@@ -1,7 +1,14 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { fetchAvailableSeasons, ingestSeason, refreshGameTeamStatsByGameId } from './server/ingest-core'
+import {
+  fetchAvailableSeasons,
+  ingestSeason,
+  refreshGameById,
+  refreshGamePlayerStatsByGameId,
+  refreshGameTeamStatsByGameId,
+  refreshLiveGames,
+} from './server/ingest-core'
 
 function getEnv(env: Record<string, string>, ...names: string[]) {
   const value = names.map((name) => env[name]).find((entry) => Boolean(entry))
@@ -99,6 +106,79 @@ export default defineConfig(({ mode }) => {
                 )
 
                 sendJson(response, 200, { gameId, rowsUpserted: rows.length, rows })
+                return
+              }
+
+              if (request.method === 'POST' && requestUrl.pathname === '/api/refresh-game') {
+                const body = (await readJsonBody(request)) as { gameId?: unknown }
+                const gameId = Number(body.gameId)
+                if (!Number.isFinite(gameId)) {
+                  sendJson(response, 400, { error: 'A numeric gameId is required.' })
+                  return
+                }
+
+                await refreshGameById(
+                  {
+                    supabaseUrl: env.SUPABASE_URL ?? env.VITE_SUPABASE_URL,
+                    serviceRoleKey: getEnv(env, 'SUPABASE_SERVICE_ROLE_KEY'),
+                    apiKey: getEnv(env, 'API_SPORTS_KEY', 'API_Sports_KEY'),
+                    apiBaseUrl: env.API_SPORTS_BASE_URL,
+                    apiHost: env.API_SPORTS_HOST,
+                    leagueId: Number(env.API_SPORTS_LEAGUE_ID ?? '1'),
+                  },
+                  gameId,
+                )
+
+                sendJson(response, 200, { gameId })
+                return
+              }
+
+              if (request.method === 'POST' && requestUrl.pathname === '/api/refresh-game-stats') {
+                const body = (await readJsonBody(request)) as {
+                  gameId?: unknown
+                  teamId?: unknown
+                  loadPlayerStats?: unknown
+                  loadTeamStats?: unknown
+                }
+                const gameId = Number(body.gameId)
+                const teamId = Number(body.teamId)
+                if (!Number.isFinite(gameId) || !Number.isFinite(teamId)) {
+                  sendJson(response, 400, { error: 'Numeric gameId and teamId values are required.' })
+                  return
+                }
+
+                const config = {
+                  supabaseUrl: env.SUPABASE_URL ?? env.VITE_SUPABASE_URL,
+                  serviceRoleKey: getEnv(env, 'SUPABASE_SERVICE_ROLE_KEY'),
+                  apiKey: getEnv(env, 'API_SPORTS_KEY', 'API_Sports_KEY'),
+                  apiBaseUrl: env.API_SPORTS_BASE_URL,
+                  apiHost: env.API_SPORTS_HOST,
+                  leagueId: Number(env.API_SPORTS_LEAGUE_ID ?? '1'),
+                }
+                const [teamRows, playerRows] = await Promise.all([
+                  body.loadTeamStats === true ? refreshGameTeamStatsByGameId(config, gameId) : Promise.resolve([]),
+                  body.loadPlayerStats === true ? refreshGamePlayerStatsByGameId(config, gameId, teamId) : Promise.resolve([]),
+                ])
+
+                sendJson(response, 200, {
+                  gameId,
+                  teamStatsRowsUpserted: teamRows.length,
+                  playerStatsRowsUpserted: playerRows.length,
+                })
+                return
+              }
+
+              if (request.method === 'POST' && requestUrl.pathname === '/api/live-games') {
+                const gameIds = await refreshLiveGames({
+                  supabaseUrl: env.SUPABASE_URL ?? env.VITE_SUPABASE_URL,
+                  serviceRoleKey: getEnv(env, 'SUPABASE_SERVICE_ROLE_KEY'),
+                  apiKey: getEnv(env, 'API_SPORTS_KEY', 'API_Sports_KEY'),
+                  apiBaseUrl: env.API_SPORTS_BASE_URL,
+                  apiHost: env.API_SPORTS_HOST,
+                  leagueId: Number(env.API_SPORTS_LEAGUE_ID ?? '1'),
+                })
+
+                sendJson(response, 200, { gameIds })
                 return
               }
             } catch (error) {

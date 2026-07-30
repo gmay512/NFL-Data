@@ -18,8 +18,8 @@ Vite + React app backed by a local Supabase stack running in Docker.
   - `public.game_player_stats`
 - Row Level Security (RLS) enabled on all schema tables.
 - Public anon read policies plus service-role full-access policies for ingestion workflows.
-- Home page and dashboard UI that queries these tables through Supabase client.
-- Home page season picker that triggers a season ingest from the app UI.
+- Dashboard UI that queries these tables through the Supabase client.
+- Dashboard season picker that loads an API-Sports season on demand when it is not yet stored locally.
 - Basic API-Sports ingest script that upserts extended datasets from the CLI as a fallback.
 
 ## Local setup
@@ -90,7 +90,7 @@ npm run ingest -- --season=2024
 
 If `--season` is omitted, the script falls back to `API_SPORTS_SEASON` from `.env.local`.
 
-The home page now offers the main ingest flow. It loads available seasons from `/seasons`, then POSTs the selected season to the local dev server so the ingest runs with service-role credentials.
+The dashboard is the main ingest flow. It loads available seasons from `/seasons`; when the selected season has no local games, the dashboard offers a button that POSTs the season to the local dev server so the documented API-Sports endpoints are ingested with service-role credentials.
 
 The CLI ingest script remains available and currently calls and upserts data from:
 
@@ -110,5 +110,6 @@ The CLI ingest script remains available and currently calls and upserts data fro
 
 ## App routes
 
-- `/` home page with links to schema sections
-- `/dashboard` data dashboard with snapshots across all 11 schema tables
+- `/` dashboard with season, week, game, and live-game views
+- `/games/:id` game detail and score breakdown
+- `/games/:gameId/teams/:teamId` team box score and player statistics

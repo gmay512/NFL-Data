@@ -1,121 +1,71 @@
 import { useEffect, useMemo, useState } from 'react'
+import { Link, useLocation, useSearchParams } from 'react-router-dom'
 import { hasSupabaseEnv, supabase } from '../lib/supabase'
-import type {
-  GameEventRow,
-  GamePlayerStatRow,
-  GameRow,
-  GameTeamStatRow,
-  InjuryRow,
-  LeagueRow,
-  LeagueSeasonRow,
-  PlayerRow,
-  PlayerSeasonStatRow,
-  StandingRow,
-  TeamRow,
-} from '../types/nfl'
+import type { GameRow, LeagueSeasonRow, TeamRow } from '../types/nfl'
 
-type DashboardState = {
-  leagues: LeagueRow[]
-  leagueSeasons: LeagueSeasonRow[]
-  teams: TeamRow[]
-  players: PlayerRow[]
-  games: GameRow[]
-  gameEvents: GameEventRow[]
-  injuries: InjuryRow[]
-  playerSeasonStats: PlayerSeasonStatRow[]
-  standings: StandingRow[]
-  gameTeamStats: GameTeamStatRow[]
-  gamePlayerStats: GamePlayerStatRow[]
+type DashboardMode = 'season' | 'live'
+type SeasonOption = { season: number; current: boolean }
+
+const UNASSIGNED_WEEK = '__unassigned__'
+const WEEK_KEY_SEPARATOR = '::'
+
+function getWeekKey(game: GameRow) {
+  return [game.stage?.trim() || 'Season', game.week?.trim() || UNASSIGNED_WEEK].join(WEEK_KEY_SEPARATOR)
 }
 
-const INITIAL_STATE: DashboardState = {
-  leagues: [],
-  leagueSeasons: [],
-  teams: [],
-  players: [],
-  games: [],
-  gameEvents: [],
-  injuries: [],
-  playerSeasonStats: [],
-  standings: [],
-  gameTeamStats: [],
-  gamePlayerStats: [],
+function getWeekLabel(week: string) {
+  if (!week || week === UNASSIGNED_WEEK) return 'Schedule'
+  const [stage, weekLabel] = week.split(WEEK_KEY_SEPARATOR)
+  if (weekLabel === UNASSIGNED_WEEK) return stage
+  if (!weekLabel) return stage
+  return `${stage} · ${weekLabel}`
+}
+
+function getGameStatus(game: GameRow) {
+  if (game.status_short === 'FT') return 'Final'
+  if (game.status_short === 'NS') return 'Scheduled'
+  if (game.status_short === 'HT') return 'Half time'
+  if (game.status_short && game.status_timer) return `${game.status_short} ${game.status_timer}`
+  return game.status_long || game.status_short || 'Scheduled'
+}
+
+function getGameDate(game: GameRow) {
+  if (!game.game_date) return 'Date pending'
+  return game.game_time ? `${game.game_date} · ${game.game_time}` : game.game_date
+}
+
+function renderScore(score: number | null) {
+  return score == null ? '—' : score
 }
 
 export function DashboardPage() {
-  const [data, setData] = useState<DashboardState>(INITIAL_STATE)
+  const location = useLocation()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [seasons, setSeasons] = useState<SeasonOption[]>([])
+  const [teams, setTeams] = useState<TeamRow[]>([])
+  const [selectedSeason, setSelectedSeason] = useState(() => searchParams.get('season') ?? '')
+  const [selectedWeek, setSelectedWeek] = useState(() => searchParams.get('week') ?? '')
+  const [games, setGames] = useState<GameRow[]>([])
+  const [mode, setMode] = useState<DashboardMode>(() => (searchParams.get('view') === 'live' ? 'live' : 'season'))
   const [isLoading, setIsLoading] = useState(true)
+  const [isRefreshingLive, setIsRefreshingLive] = useState(false)
+  const [isIngestingSeason, setIsIngestingSeason] = useState(false)
+  const [reloadKey, setReloadKey] = useState(0)
+  const [loadMessage, setLoadMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    const loadData = async () => {
+    const loadDashboardMeta = async () => {
       if (!supabase) {
         setIsLoading(false)
         return
       }
 
-      setIsLoading(true)
-      setError(null)
-
-      const [
-        leaguesResult,
-        leagueSeasonsResult,
-        teamsResult,
-        playersResult,
-        gamesResult,
-        gameEventsResult,
-        injuriesResult,
-        playerSeasonStatsResult,
-        standingsResult,
-        gameTeamStatsResult,
-        gamePlayerStatsResult,
-      ] = await Promise.all([
-        supabase.from('leagues').select('*').order('id', { ascending: true }).limit(15),
-        supabase
-          .from('league_seasons')
-          .select('*')
-          .order('id', { ascending: true })
-          .limit(20),
-        supabase.from('teams').select('*').order('id', { ascending: true }).limit(15),
-        supabase.from('players').select('*').order('id', { ascending: true }).limit(15),
-        supabase.from('games').select('*').order('id', { ascending: true }).limit(15),
-        supabase
-          .from('game_events')
-          .select('*')
-          .order('id', { ascending: true })
-          .limit(20),
-        supabase.from('injuries').select('*').order('id', { ascending: true }).limit(20),
-        supabase
-          .from('player_season_stats')
-          .select('*')
-          .order('id', { ascending: true })
-          .limit(20),
-        supabase.from('standings').select('*').order('id', { ascending: true }).limit(20),
-        supabase
-          .from('game_team_stats')
-          .select('*')
-          .order('id', { ascending: true })
-          .limit(20),
-        supabase
-          .from('game_player_stats')
-          .select('*')
-          .order('id', { ascending: true })
-          .limit(20),
+      const [seasonsResult, teamsResult] = await Promise.all([
+        supabase.from('league_seasons').select('season_year, is_current').order('season_year', { ascending: false }),
+        supabase.from('teams').select('*').order('name', { ascending: true }),
       ])
-
-      const firstError = [
-        leaguesResult,
-        leagueSeasonsResult,
-        teamsResult,
-        playersResult,
-        gamesResult,
-        gameEventsResult,
-        injuriesResult,
-        playerSeasonStatsResult,
-        standingsResult,
-        gameTeamStatsResult,
-        gamePlayerStatsResult,
-      ].find((result) => result.error)?.error
+      const firstError = [seasonsResult, teamsResult].find((result) => result.error)?.error
 
       if (firstError) {
         setError(firstError.message)
@@ -123,353 +73,281 @@ export function DashboardPage() {
         return
       }
 
-      setData({
-        leagues: (leaguesResult.data ?? []) as LeagueRow[],
-        leagueSeasons: (leagueSeasonsResult.data ?? []) as LeagueSeasonRow[],
-        teams: (teamsResult.data ?? []) as TeamRow[],
-        players: (playersResult.data ?? []) as PlayerRow[],
-        games: (gamesResult.data ?? []) as GameRow[],
-        gameEvents: (gameEventsResult.data ?? []) as GameEventRow[],
-        injuries: (injuriesResult.data ?? []) as InjuryRow[],
-        playerSeasonStats: (playerSeasonStatsResult.data ?? []) as PlayerSeasonStatRow[],
-        standings: (standingsResult.data ?? []) as StandingRow[],
-        gameTeamStats: (gameTeamStatsResult.data ?? []) as GameTeamStatRow[],
-        gamePlayerStats: (gamePlayerStatsResult.data ?? []) as GamePlayerStatRow[],
-      })
+      const seasonRows = (seasonsResult.data ?? []) as LeagueSeasonRow[]
+      const localSeasons = seasonRows
+        .map((row) => ({ season: row.season_year, current: row.is_current }))
+        .filter((season, index, all) => all.findIndex((candidate) => candidate.season === season.season) === index)
 
+      let apiSeasons: SeasonOption[] = []
+      try {
+        const response = await fetch('/api/seasons')
+        const payload = (await response.json()) as { seasons?: Array<{ season: number; current: boolean }> }
+        if (response.ok) {
+          apiSeasons = payload.seasons ?? []
+        }
+      } catch {
+        // Local season metadata remains available when the API is not configured.
+      }
+
+      const seasonsByYear = new Map(apiSeasons.map((season) => [season.season, season]))
+      for (const season of localSeasons) {
+        seasonsByYear.set(season.season, season)
+      }
+      const availableSeasons = Array.from(seasonsByYear.values()).sort((left, right) => right.season - left.season)
+
+      setSeasons(availableSeasons)
+      setTeams((teamsResult.data ?? []) as TeamRow[])
+      setSelectedSeason((current) => current || String((availableSeasons.find((season) => season.current) ?? availableSeasons[0])?.season ?? ''))
       setIsLoading(false)
     }
 
-    void loadData()
+    void loadDashboardMeta()
   }, [])
 
-  const totalRows = useMemo(
-    () =>
-      data.leagues.length +
-      data.leagueSeasons.length +
-      data.teams.length +
-      data.players.length +
-      data.games.length +
-      data.gameEvents.length +
-      data.injuries.length +
-      data.playerSeasonStats.length +
-      data.standings.length +
-      data.gameTeamStats.length +
-      data.gamePlayerStats.length,
-    [data],
+  useEffect(() => {
+    const loadSeasonGames = async () => {
+      if (!supabase || !selectedSeason || mode !== 'season') return
+
+      setIsLoading(true)
+      setError(null)
+      const { data, error: gamesError } = await supabase
+        .from('games')
+        .select('*')
+        .eq('season', Number(selectedSeason))
+        .order('game_timestamp', { ascending: true })
+
+      if (gamesError) {
+        setError(gamesError.message)
+        setGames([])
+      } else {
+        setGames((data ?? []) as GameRow[])
+      }
+      setIsLoading(false)
+    }
+
+    void loadSeasonGames()
+  }, [mode, reloadKey, selectedSeason])
+
+  const loadSeason = async () => {
+    if (!supabase || !selectedSeason) return
+
+    setIsIngestingSeason(true)
+    setError(null)
+    setLoadMessage(null)
+    try {
+      const response = await fetch('/api/ingest-season', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ season: Number(selectedSeason) }),
+      })
+      const payload = (await response.json()) as { games?: number; error?: string }
+      if (!response.ok) throw new Error(payload.error ?? 'Could not load this season.')
+
+      const { data: updatedTeams, error: teamsError } = await supabase.from('teams').select('*').order('name', { ascending: true })
+      if (teamsError) throw teamsError
+
+      setTeams((updatedTeams ?? []) as TeamRow[])
+      setLoadMessage(`Loaded ${payload.games ?? 0} games for the ${selectedSeason} season.`)
+      setReloadKey((key) => key + 1)
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Could not load this season.')
+    } finally {
+      setIsIngestingSeason(false)
+    }
+  }
+
+  const loadLiveGames = async () => {
+    if (!supabase) return
+
+    setMode('live')
+    setIsRefreshingLive(true)
+    setIsLoading(true)
+    setError(null)
+    try {
+      const response = await fetch('/api/live-games', { method: 'POST' })
+      const payload = (await response.json()) as { gameIds?: number[]; error?: string }
+      if (!response.ok) throw new Error(payload.error ?? 'Could not refresh live games.')
+
+      const gameIds = payload.gameIds ?? []
+      if (!gameIds.length) {
+        setGames([])
+        setSelectedWeek('')
+        return
+      }
+
+      const { data, error: gamesError } = await supabase.from('games').select('*').in('id', gameIds)
+      if (gamesError) throw gamesError
+
+      setGames((data ?? []) as GameRow[])
+      setSelectedWeek('')
+    } catch (liveError) {
+      setError(liveError instanceof Error ? liveError.message : 'Could not refresh live games.')
+      setGames([])
+    } finally {
+      setIsLoading(false)
+      setIsRefreshingLive(false)
+    }
+  }
+
+  const teamById = useMemo(() => Object.fromEntries(teams.map((team) => [team.id, team])) as Record<number, TeamRow>, [teams])
+  const weeks = useMemo(() => Array.from(new Set(games.map(getWeekKey))), [games])
+
+  useEffect(() => {
+    if (mode !== 'season') return
+    setSelectedWeek((week) => (weeks.includes(week) ? week : (weeks[0] ?? '')))
+  }, [mode, weeks])
+
+  useEffect(() => {
+    const nextSearchParams = new URLSearchParams()
+    if (selectedSeason) nextSearchParams.set('season', selectedSeason)
+    if (mode === 'live') {
+      nextSearchParams.set('view', 'live')
+    } else if (selectedWeek) {
+      nextSearchParams.set('week', selectedWeek)
+    }
+
+    if (nextSearchParams.toString() !== searchParams.toString()) {
+      setSearchParams(nextSearchParams, { replace: true })
+    }
+  }, [mode, searchParams, selectedSeason, selectedWeek, setSearchParams])
+
+  const displayedGames = useMemo(
+    () => (mode === 'live' ? games : games.filter((game) => getWeekKey(game) === selectedWeek)),
+    [games, mode, selectedWeek],
   )
+  const selectedSeasonLabel = seasons.find((season) => String(season.season) === selectedSeason)?.season
 
   return (
-    <main>
-      <section className="hero">
-        <p className="eyebrow">Schema dashboard</p>
-        <h1>Supabase table snapshots</h1>
-        <p className="hero-copy">
-          Quick visibility into the full 11-table NFL schema built from API-Sports
-          documentation. This page reads with anon access under RLS policies.
-        </p>
-
-        <div className="stats-grid">
-          <article className="stat-card">
-            <p className="stat-label">Tables queried</p>
-            <p className="stat-value">11</p>
-            <p className="stat-detail">Core + extended NFL schema tables.</p>
-          </article>
-          <article className="stat-card">
-            <p className="stat-label">Rows loaded</p>
-            <p className="stat-value">{totalRows}</p>
-            <p className="stat-detail">Limited sample for fast page loads.</p>
-          </article>
-          <article className="stat-card">
-            <p className="stat-label">Status</p>
-            <p className="stat-value">{isLoading ? 'Loading' : 'Ready'}</p>
-            <p className="stat-detail">
-              {hasSupabaseEnv
-                ? 'Connected with VITE_SUPABASE_URL + ANON key.'
-                : 'Set local env values to connect this page.'}
-            </p>
-          </article>
+    <main className="dashboard-page">
+      <section className="dashboard-hero">
+        <div>
+          <p className="eyebrow">NFL game center</p>
+          <h1>Every week, every matchup.</h1>
+          <p>Choose a season, browse its schedule, and open a game for its complete box score.</p>
+        </div>
+        <div className="dashboard-actions">
+          <label className="season-select">
+            <span>Season</span>
+            <select
+              value={selectedSeason}
+              onChange={(event) => {
+                setMode('season')
+                setSelectedSeason(event.target.value)
+              }}
+              disabled={isLoading || seasons.length === 0}
+            >
+              <option value="">Select season</option>
+              {seasons.map((season) => (
+                <option key={season.season} value={season.season}>
+                  {season.season}{season.current ? ' · Current' : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button className={`live-button ${mode === 'live' ? 'is-active' : ''}`} type="button" onClick={() => void loadLiveGames()} disabled={isRefreshingLive}>
+            <span className="live-indicator" />
+            {isRefreshingLive ? 'Checking live games' : 'Live games'}
+          </button>
         </div>
       </section>
 
-      {!hasSupabaseEnv && (
-        <section className="panel panel-wide status-banner">
-          <h2>Missing environment values</h2>
-          <p>
-            Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to your local env file,
-            then restart the dev server.
-          </p>
-        </section>
-      )}
+      {!hasSupabaseEnv && <StatusMessage title="Database connection required" message="Set the VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY variables to load game data." />}
+      {error && <StatusMessage title="Unable to load games" message={error} error />}
+      {loadMessage && <StatusMessage title="Season loaded" message={loadMessage} />}
 
-      {error && (
-        <section className="panel panel-wide status-banner error-banner">
-          <h2>Query error</h2>
-          <p>{error}</p>
-        </section>
-      )}
-
-      <section className="panel panel-wide dashboard-nav" aria-label="Dashboard links">
-        <a href="#leagues">Leagues</a>
-        <a href="#league-seasons">League seasons</a>
-        <a href="#teams">Teams</a>
-        <a href="#players">Players</a>
-        <a href="#games">Games</a>
-        <a href="#game-events">Game events</a>
-        <a href="#injuries">Injuries</a>
-        <a href="#player-season-stats">Player season stats</a>
-        <a href="#standings">Standings</a>
-        <a href="#game-team-stats">Game team stats</a>
-        <a href="#game-player-stats">Game player stats</a>
-      </section>
-
-      <section className="dashboard-grid">
-        <article className="panel panel-wide table-panel" id="leagues">
-          <div className="table-head">
-            <h2>Leagues</h2>
-            <span>{data.leagues.length} rows</span>
+      <section className="schedule-shell" aria-label="Game schedule">
+        <aside className="week-sidebar">
+          <div className="sidebar-heading">
+            <p className="eyebrow">{mode === 'live' ? 'Now playing' : 'Season schedule'}</p>
+            <h2>{mode === 'live' ? 'Live games' : selectedSeasonLabel ?? 'Select a season'}</h2>
           </div>
-          <DataTable
-            headers={['id', 'name', 'country_name', 'country_code']}
-            rows={data.leagues.map((row) => [
-              String(row.id),
-              row.name,
-              row.country_name ?? 'NULL',
-              row.country_code ?? 'NULL',
-            ])}
-            emptyLabel="No league rows found yet."
-            isLoading={isLoading}
-          />
-        </article>
+          {mode === 'season' ? (
+            <div className="week-list">
+              {weeks.map((week) => {
+                const gameCount = games.filter((game) => getWeekKey(game) === week).length
+                return (
+                  <button key={week} className={`week-button ${selectedWeek === week ? 'is-active' : ''}`} type="button" onClick={() => setSelectedWeek(week)}>
+                    <span>{getWeekLabel(week)}</span>
+                    <small>{gameCount}</small>
+                  </button>
+                )
+              })}
+            </div>
+          ) : (
+            <p className="sidebar-note">Scores refresh from API-Sports whenever you select this view.</p>
+          )}
+        </aside>
 
-        <article className="panel panel-wide table-panel" id="league-seasons">
-          <div className="table-head">
-            <h2>League seasons</h2>
-            <span>{data.leagueSeasons.length} rows</span>
+        <div className="games-panel">
+          <div className="games-panel-header">
+            <div>
+              <p className="eyebrow">{mode === 'live' ? 'Live scoreboard' : 'Games'}</p>
+              <h2>{mode === 'live' ? 'In progress' : getWeekLabel(selectedWeek || UNASSIGNED_WEEK)}</h2>
+            </div>
+            <span>{displayedGames.length} {displayedGames.length === 1 ? 'game' : 'games'}</span>
           </div>
-          <DataTable
-            headers={['id', 'league_id', 'season_year', 'is_current', 'cov_standings']}
-            rows={data.leagueSeasons.map((row) => [
-              String(row.id),
-              String(row.league_id),
-              String(row.season_year),
-              String(row.is_current),
-              String(row.cov_standings),
-            ])}
-            emptyLabel="No league season rows found yet."
-            isLoading={isLoading}
-          />
-        </article>
 
-        <article className="panel panel-wide table-panel" id="teams">
-          <div className="table-head">
-            <h2>Teams</h2>
-            <span>{data.teams.length} rows</span>
-          </div>
-          <DataTable
-            headers={['id', 'name', 'logo_url']}
-            rows={data.teams.map((row) => [String(row.id), row.name, row.logo_url ?? 'NULL'])}
-            emptyLabel="No team rows found yet."
-            isLoading={isLoading}
-          />
-        </article>
-
-        <article className="panel panel-wide table-panel" id="players">
-          <div className="table-head">
-            <h2>Players</h2>
-            <span>{data.players.length} rows</span>
-          </div>
-          <DataTable
-            headers={['id', 'name', 'image_url']}
-            rows={data.players.map((row) => [String(row.id), row.name, row.image_url ?? 'NULL'])}
-            emptyLabel="No player rows found yet."
-            isLoading={isLoading}
-          />
-        </article>
-
-        <article className="panel panel-wide table-panel" id="games">
-          <div className="table-head">
-            <h2>Games</h2>
-            <span>{data.games.length} rows</span>
-          </div>
-          <DataTable
-            headers={['id', 'season', 'week', 'home_team_id', 'away_team_id']}
-            rows={data.games.map((row) => [
-              String(row.id),
-              row.season == null ? 'NULL' : String(row.season),
-              row.week ?? 'NULL',
-              row.home_team_id == null ? 'NULL' : String(row.home_team_id),
-              row.away_team_id == null ? 'NULL' : String(row.away_team_id),
-            ])}
-            emptyLabel="No game rows found yet."
-            isLoading={isLoading}
-          />
-        </article>
-
-        <article className="panel panel-wide table-panel" id="game-events">
-          <div className="table-head">
-            <h2>Game events</h2>
-            <span>{data.gameEvents.length} rows</span>
-          </div>
-          <DataTable
-            headers={['id', 'game_id', 'team_id', 'player_id', 'quarter', 'event_type', 'score']}
-            rows={data.gameEvents.map((row) => [
-              String(row.id),
-              String(row.game_id),
-              String(row.team_id),
-              row.player_id == null ? 'NULL' : String(row.player_id),
-              row.quarter,
-              row.event_type,
-              `${row.score_home ?? '-'}:${row.score_away ?? '-'}`,
-            ])}
-            emptyLabel="No game event rows found yet."
-            isLoading={isLoading}
-          />
-        </article>
-
-        <article className="panel panel-wide table-panel" id="injuries">
-          <div className="table-head">
-            <h2>Injuries</h2>
-            <span>{data.injuries.length} rows</span>
-          </div>
-          <DataTable
-            headers={['id', 'player_id', 'team_id', 'injury_date', 'status']}
-            rows={data.injuries.map((row) => [
-              String(row.id),
-              String(row.player_id),
-              row.team_id == null ? 'NULL' : String(row.team_id),
-              row.injury_date ?? 'NULL',
-              row.status ?? 'NULL',
-            ])}
-            emptyLabel="No injury rows found yet."
-            isLoading={isLoading}
-          />
-        </article>
-
-        <article className="panel panel-wide table-panel" id="player-season-stats">
-          <div className="table-head">
-            <h2>Player season stats</h2>
-            <span>{data.playerSeasonStats.length} rows</span>
-          </div>
-          <DataTable
-            headers={['id', 'player_id', 'team_id', 'season', 'group', 'stat', 'value']}
-            rows={data.playerSeasonStats.map((row) => [
-              String(row.id),
-              String(row.player_id),
-              String(row.team_id),
-              String(row.season),
-              row.stat_group,
-              row.stat_name,
-              row.stat_value ?? 'NULL',
-            ])}
-            emptyLabel="No player season stat rows found yet."
-            isLoading={isLoading}
-          />
-        </article>
-
-        <article className="panel panel-wide table-panel" id="standings">
-          <div className="table-head">
-            <h2>Standings</h2>
-            <span>{data.standings.length} rows</span>
-          </div>
-          <DataTable
-            headers={['id', 'league_id', 'season', 'team_id', 'division', 'won', 'lost', 'ties']}
-            rows={data.standings.map((row) => [
-              String(row.id),
-              String(row.league_id),
-              String(row.season),
-              String(row.team_id),
-              row.division ?? 'NULL',
-              String(row.won),
-              String(row.lost),
-              String(row.ties),
-            ])}
-            emptyLabel="No standings rows found yet."
-            isLoading={isLoading}
-          />
-        </article>
-
-        <article className="panel panel-wide table-panel" id="game-team-stats">
-          <div className="table-head">
-            <h2>Game team stats</h2>
-            <span>{data.gameTeamStats.length} rows</span>
-          </div>
-          <DataTable
-            headers={['id', 'game_id', 'team_id', 'yards_total', 'turnovers_total', 'possession']}
-            rows={data.gameTeamStats.map((row) => [
-              String(row.id),
-              String(row.game_id),
-              String(row.team_id),
-              row.yards_total == null ? 'NULL' : String(row.yards_total),
-              row.turnovers_total == null ? 'NULL' : String(row.turnovers_total),
-              row.possession ?? 'NULL',
-            ])}
-            emptyLabel="No game team stat rows found yet."
-            isLoading={isLoading}
-          />
-        </article>
-
-        <article className="panel panel-wide table-panel" id="game-player-stats">
-          <div className="table-head">
-            <h2>Game player stats</h2>
-            <span>{data.gamePlayerStats.length} rows</span>
-          </div>
-          <DataTable
-            headers={['id', 'game_id', 'team_id', 'player_id', 'group', 'stat', 'value']}
-            rows={data.gamePlayerStats.map((row) => [
-              String(row.id),
-              String(row.game_id),
-              String(row.team_id),
-              String(row.player_id),
-              row.stat_group,
-              row.stat_name,
-              row.stat_value ?? 'NULL',
-            ])}
-            emptyLabel="No game player stat rows found yet."
-            isLoading={isLoading}
-          />
-        </article>
+          {isLoading ? (
+            <p className="empty-state">Loading games…</p>
+          ) : displayedGames.length === 0 ? (
+            mode === 'live' ? (
+              <p className="empty-state">There are no live NFL games right now.</p>
+            ) : (
+              <div className="empty-season-state">
+                <p>No games are stored for the {selectedSeason} season.</p>
+                <span>Load its teams, players, schedule, scores, and statistics from API-Sports.</span>
+                <button type="button" className="load-season-button" onClick={() => void loadSeason()} disabled={isIngestingSeason}>
+                  {isIngestingSeason ? `Loading ${selectedSeason}…` : `Load ${selectedSeason} season`}
+                </button>
+              </div>
+            )
+          ) : (
+            <div className="game-list">
+              {displayedGames.map((game) => {
+                const awayTeam = game.away_team_id ? teamById[game.away_team_id] : undefined
+                const homeTeam = game.home_team_id ? teamById[game.home_team_id] : undefined
+                return (
+                  <Link
+                    className="schedule-game"
+                    key={game.id}
+                    to={`/games/${game.id}`}
+                    state={{ dashboardPath: `${location.pathname}${location.search}` }}
+                  >
+                    <div className="schedule-game-meta">
+                      <span>{getGameStatus(game)}</span>
+                      <time>{getGameDate(game)}</time>
+                    </div>
+                    <div className="schedule-team">
+                      <TeamMark team={awayTeam} fallback="A" />
+                      <strong>{awayTeam?.name ?? `Away team ${game.away_team_id ?? ''}`}</strong>
+                      <b>{renderScore(game.away_total)}</b>
+                    </div>
+                    <div className="schedule-team">
+                      <TeamMark team={homeTeam} fallback="H" />
+                      <strong>{homeTeam?.name ?? `Home team ${game.home_team_id ?? ''}`}</strong>
+                      <b>{renderScore(game.home_total)}</b>
+                    </div>
+                    <span className="game-chevron" aria-hidden="true">›</span>
+                  </Link>
+                )
+              })}
+            </div>
+          )}
+        </div>
       </section>
     </main>
   )
 }
 
-type DataTableProps = {
-  headers: string[]
-  rows: string[][]
-  emptyLabel: string
-  isLoading: boolean
+function TeamMark({ team, fallback }: { team?: TeamRow; fallback: string }) {
+  return <span className="team-mark">{team?.logo_url ? <img src={team.logo_url} alt="" /> : fallback}</span>
 }
 
-function DataTable({ headers, rows, emptyLabel, isLoading }: DataTableProps) {
-  if (isLoading) {
-    return <p className="table-status">Loading rows...</p>
-  }
-
-  if (!rows.length) {
-    return <p className="table-status">{emptyLabel}</p>
-  }
-
+function StatusMessage({ title, message, error = false }: { title: string; message: string; error?: boolean }) {
   return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            {headers.map((header) => (
-              <th key={header}>{header}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, idx) => (
-            <tr key={`${idx}-${row[0]}`}>
-              {row.map((cell, cellIdx) => (
-                <td key={`${idx}-${cellIdx}`}>{cell}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <section className={`status-message ${error ? 'is-error' : ''}`}>
+      <strong>{title}</strong>
+      <span>{message}</span>
+    </section>
   )
 }

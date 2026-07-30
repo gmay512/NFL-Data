@@ -1,4 +1,4 @@
-import { createClient } from '@supabase/supabase-js'
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 
 type Dict = Record<string, unknown>
 
@@ -75,6 +75,34 @@ export type AvailableSeason = {
   current: boolean
   startDate: string | null
   endDate: string | null
+}
+
+type LiveGameApi = {
+  game?: Dict
+  league?: Dict
+  teams?: Dict
+  scores?: Dict
+}
+
+type GamePlayerStatsApi = {
+  game?: Dict
+  team?: Dict
+  groups?: Array<{
+    name?: unknown
+    players?: Array<{
+      player?: Dict
+      statistics?: Array<{ name?: unknown; value?: unknown }>
+    }>
+  }>
+}
+
+type GamePlayerStatUpsertRow = {
+  game_id: number
+  team_id: number
+  player_id: number
+  stat_group: string
+  stat_name: string
+  stat_value: string | null
 }
 
 const defaultApiBaseUrl = 'https://v1.american-football.api-sports.io'
@@ -201,6 +229,47 @@ function mapGameTeamStatsItem(item: GameTeamStatsApi, fallbackGameId?: number): 
   }
 }
 
+function mapGamePlayerStats(payload: EndpointResponse<GamePlayerStatsApi>, fallbackGameId?: number) {
+  const players = new Map<number, { id: number; name: string; image_url: string | null }>()
+  const rows: GamePlayerStatUpsertRow[] = []
+
+  for (const gameItem of payload.response) {
+    const gameId = toInt(gameItem.game?.id) ?? fallbackGameId
+    const teamId = toInt(gameItem.team?.id)
+    if (!gameId || !teamId) continue
+
+    for (const groupEntry of gameItem.groups ?? []) {
+      const statGroup = asString(groupEntry.name)
+      if (!statGroup) continue
+
+      for (const playerEntry of groupEntry.players ?? []) {
+        const player = playerEntry.player ?? {}
+        const playerId = toInt(player.id)
+        if (!playerId) continue
+
+        players.set(playerId, {
+          id: playerId,
+          name: asString(player.name) ?? `Player ${playerId}`,
+          image_url: asString(player.image),
+        })
+
+        for (const statEntry of playerEntry.statistics ?? []) {
+          rows.push({
+            game_id: gameId,
+            team_id: teamId,
+            player_id: playerId,
+            stat_group: statGroup,
+            stat_name: asString(statEntry.name) ?? 'unknown',
+            stat_value: asString(statEntry.value),
+          })
+        }
+      }
+    }
+  }
+
+  return { players: Array.from(players.values()), rows }
+}
+
 async function createApiClient(config: IngestConfig) {
   if (!config.supabaseUrl || !config.serviceRoleKey) {
     throw new Error('Missing env vars. Required: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY')
@@ -295,6 +364,114 @@ export async function fetchAvailableSeasons(config: IngestConfig): Promise<Avail
   }
 
   return seasons.sort((left, right) => right.season - left.season)
+}
+
+async function persistGamePayload(
+  supabase: SupabaseClient,
+  payload: EndpointResponse<LiveGameApi>,
+  defaultLeagueId: number,
+): Promise<number[]> {
+  const teams = new Map<number, { id: number; name: string; logo_url: string | null }>()
+  const leagues = new Map<number, { id: number; name: string; logo_url: string | null }>()
+  const games: Dict[] = []
+
+  for (const item of payload.response) {
+    const game = item.game ?? {}
+    const gameTeams = item.teams ?? {}
+    const homeTeam = asDict(gameTeams.home)
+    const awayTeam = asDict(gameTeams.away)
+    const homeTeamId = toInt(homeTeam.id)
+    const awayTeamId = toInt(awayTeam.id)
+    const gameId = toInt(game.id)
+    const leagueId = toInt(item.league?.id) ?? defaultLeagueId
+
+    if (!gameId || !homeTeamId || !awayTeamId) continue
+
+    for (const [id, team] of [
+      [homeTeamId, homeTeam],
+      [awayTeamId, awayTeam],
+    ] as const) {
+      teams.set(id, {
+        id,
+        name: asString(team.name) ?? `Team ${id}`,
+        logo_url: asString(team.logo),
+      })
+    }
+
+    leagues.set(leagueId, {
+      id: leagueId,
+      name: asString(item.league?.name) ?? `League ${leagueId}`,
+      logo_url: asString(item.league?.logo),
+    })
+
+    const scores = asDict(item.scores ?? game.scores)
+    const homeScores = asDict(scores.home)
+    const awayScores = asDict(scores.away)
+    const venue = asDict(game.venue)
+
+    games.push({
+      id: gameId,
+      league_id: leagueId,
+      season: toInt(item.league?.season) ?? toInt(game.season),
+      stage: pickText(game.stage),
+      week: pickText(game.week),
+      home_team_id: homeTeamId,
+      away_team_id: awayTeamId,
+      date_timezone: pickText(game.timezone, game.date_timezone),
+      game_date: pickText(game.date, asDict(game.date).date),
+      game_time: pickText(game.time, asDict(game.time).time),
+      game_timestamp: toInt(game.timestamp),
+      venue_name: pickText(venue.name),
+      venue_city: pickText(venue.city),
+      status_short: pickText(asDict(game.status).short),
+      status_long: pickText(asDict(game.status).long),
+      status_timer: pickText(asDict(game.status).timer),
+      home_q1: toInt(homeScores.q1 ?? homeScores.quarter_1 ?? homeScores.quarter1),
+      home_q2: toInt(homeScores.q2 ?? homeScores.quarter_2 ?? homeScores.quarter2),
+      home_q3: toInt(homeScores.q3 ?? homeScores.quarter_3 ?? homeScores.quarter3),
+      home_q4: toInt(homeScores.q4 ?? homeScores.quarter_4 ?? homeScores.quarter4),
+      home_ot: toInt(homeScores.ot ?? homeScores.overtime),
+      home_total: toInt(homeScores.total),
+      away_q1: toInt(awayScores.q1 ?? awayScores.quarter_1 ?? awayScores.quarter1),
+      away_q2: toInt(awayScores.q2 ?? awayScores.quarter_2 ?? awayScores.quarter2),
+      away_q3: toInt(awayScores.q3 ?? awayScores.quarter_3 ?? awayScores.quarter3),
+      away_q4: toInt(awayScores.q4 ?? awayScores.quarter_4 ?? awayScores.quarter4),
+      away_ot: toInt(awayScores.ot ?? awayScores.overtime),
+      away_total: toInt(awayScores.total),
+      venue: pickText(venue.name, venue.city),
+    })
+  }
+
+  if (!games.length) return []
+
+  const { error: leagueError } = await supabase.from('leagues').upsert(Array.from(leagues.values()), { onConflict: 'id' })
+  if (leagueError) throw leagueError
+
+  const { error: teamError } = await supabase.from('teams').upsert(Array.from(teams.values()), { onConflict: 'id' })
+  if (teamError) throw teamError
+
+  const { error: gameError } = await supabase.from('games').upsert(games, { onConflict: 'id' })
+  if (gameError) throw gameError
+
+  return games.map((game) => game.id as number)
+}
+
+export async function refreshLiveGames(config: IngestConfig): Promise<number[]> {
+  const { supabase, fetchEndpoint } = await createApiClient(config)
+  const payload = await fetchEndpoint<LiveGameApi>('/games', { live: 'all' })
+  return persistGamePayload(supabase, payload, config.leagueId ?? 1)
+}
+
+export async function refreshGameById(config: IngestConfig, gameId: number): Promise<number> {
+  const { supabase, fetchEndpoint } = await createApiClient(config)
+  const payload = await fetchEndpoint<LiveGameApi>('/games', { id: gameId })
+  const gameIds = await persistGamePayload(supabase, payload, config.leagueId ?? 1)
+
+  if (!gameIds.includes(gameId)) {
+    throw new Error(`Game ${gameId} was not returned by API-Sports.`)
+  }
+
+  return gameId
 }
 
 async function upsertTeams(config: IngestConfig, season: number) {
@@ -486,7 +663,7 @@ async function upsertGames(config: IngestConfig, season: number) {
 
       const homeTeamId = toInt((teams.home as Dict | undefined)?.id)
       const awayTeamId = toInt((teams.away as Dict | undefined)?.id)
-      
+
       // Skip games with invalid team IDs
       if (!homeTeamId || !awayTeamId) return null
 
@@ -813,6 +990,9 @@ async function upsertInjuries(config: IngestConfig, season: number) {
 
 async function upsertPlayerSeasonStats(config: IngestConfig, season: number) {
   const { supabase, fetchEndpoint } = await createApiClient(config)
+
+  console.log(`[Ingest] Fetching player stats for league ${config.leagueId ?? 1}, season ${season}...`)
+
   type PlayerStatsApi = {
     player?: Dict
     team?: Dict
@@ -824,42 +1004,99 @@ async function upsertPlayerSeasonStats(config: IngestConfig, season: number) {
       }>
     }>
   }
+
   const payload = await fetchEndpoint<PlayerStatsApi>('/players/statistics', {
     league: config.leagueId ?? 1,
     season,
   })
 
+  if (!payload.response || !Array.isArray(payload.response)) {
+    console.warn('[Ingest] No player stats response or invalid format.')
+    return 0
+  }
+
   const rows: Dict[] = []
+  let skippedPlayers = 0
+  let skippedTeams = 0
 
   for (const item of payload.response) {
+    // 1. Validate Player
     const playerId = toInt(item.player?.id)
-    if (!playerId) continue
-    for (const teamEntry of item.teams ?? []) {
+    if (!playerId) {
+      skippedPlayers++
+      continue
+    }
+
+    const teamsList = item.teams ?? []
+
+    for (const teamEntry of teamsList) {
+      // 2. Validate Team
       const teamId = toInt(teamEntry.team?.id)
-      if (!teamId) continue
-      for (const groupEntry of teamEntry.groups ?? []) {
+      if (!teamId) {
+        skippedTeams++
+        continue
+      }
+
+      const groupsList = teamEntry.groups ?? []
+
+      for (const groupEntry of groupsList) {
         const statGroup = asString(groupEntry.name)
-        if (!statGroup) continue
-        for (const statEntry of groupEntry.statistics ?? []) {
+        if (!statGroup) continue // Skip empty group names, but don't increment skip count heavily unless needed
+
+        const statsList = groupEntry.statistics ?? []
+
+        for (const statEntry of statsList) {
+          const statName = asString(statEntry.name)
+          // We allow 'unknown' as a fallback if name is missing, but require at least a name structure
+          if (!statName && statEntry.name == null) continue
+
+          const statValue = asString(statEntry.value)
+
+          // Construct the row
           rows.push({
             player_id: playerId,
             team_id: teamId,
             season,
             stat_group: statGroup,
-            stat_name: asString(statEntry.name) ?? 'unknown',
-            stat_value: asString(statEntry.value),
+            stat_name: statName ?? 'unknown_stat',
+            stat_value: statValue,
           })
         }
       }
     }
   }
 
-  if (!rows.length) return 0
-  const { error } = await supabase
-    .from('player_season_stats')
-    .upsert(rows, { onConflict: 'player_id,team_id,season,stat_group,stat_name' })
-  if (error) throw error
-  return rows.length
+  console.log(`[Ingest] Processed ${payload.response.length} player entries. Generated ${rows.length} rows.`)
+  if (skippedPlayers > 0) console.warn(`[Ingest] Skipped ${skippedPlayers} players due to invalid IDs.`)
+  if (skippedTeams > 0) console.warn(`[Ingest] Skipped ${skippedTeams} teams due to invalid IDs.`)
+
+  if (!rows.length) {
+    console.log('[Ingest] No valid player stats rows to insert.')
+    return 0
+  }
+
+  try {
+    // Ensure the conflict target matches your DB schema exactly.
+    // If you get a "there is no unique or exclusion constraint matching the ON CONFLICT specification" error,
+    // you must add that constraint in your SQL migration first.
+    const { error } = await supabase
+      .from('player_season_stats')
+      .upsert(rows, {
+        onConflict: 'player_id,team_id,season,stat_group,stat_name',
+        ignoreDuplicates: false // default is true for upsert usually, but explicit is good
+      })
+
+    if (error) {
+      console.error('[Ingest] Error inserting player stats:', error)
+      throw error
+    }
+
+    console.log(`[Ingest] Successfully inserted ${rows.length} player stat rows.`)
+    return rows.length
+  } catch (err) {
+    console.error('[Ingest] Failed to insert player stats:', err)
+    throw err
+  }
 }
 
 async function upsertStandings(config: IngestConfig, season: number) {
@@ -948,50 +1185,12 @@ export async function refreshGameTeamStatsByGameId(
 
 async function upsertGamePlayerStats(config: IngestConfig, season: number) {
   const { supabase, fetchEndpoint } = await createApiClient(config)
-  type GamePlayerStatsApi = {
-    game?: Dict
-    team?: Dict
-    groups?: Array<{
-      name?: unknown
-      players?: Array<{
-        player?: Dict
-        statistics?: Array<{ name?: unknown; value?: unknown }>
-      }>
-    }>
-  }
   const gamesPayload = await fetchEndpoint<GamePlayerStatsApi>('/games/statistics/players', {
     league: config.leagueId ?? 1,
     season,
   })
 
-  const rows: Dict[] = []
-
-  for (const gameItem of gamesPayload.response) {
-    const gameId = toInt(gameItem.game?.id)
-    const teamId = toInt(gameItem.team?.id)
-    if (!gameId || !teamId) continue
-
-    for (const groupEntry of gameItem.groups ?? []) {
-      const statGroup = asString(groupEntry.name)
-      if (!statGroup) continue
-
-      for (const playerEntry of groupEntry.players ?? []) {
-        const playerId = toInt(playerEntry.player?.id)
-        if (!playerId) continue
-
-        for (const statEntry of playerEntry.statistics ?? []) {
-          rows.push({
-            game_id: gameId,
-            team_id: teamId,
-            player_id: playerId,
-            stat_group: statGroup,
-            stat_name: asString(statEntry.name) ?? 'unknown',
-            stat_value: asString(statEntry.value),
-          })
-        }
-      }
-    }
-  }
+  const { rows } = mapGamePlayerStats(gamesPayload)
 
   if (!rows.length) return 0
   const { error } = await supabase
@@ -1001,45 +1200,69 @@ async function upsertGamePlayerStats(config: IngestConfig, season: number) {
   return rows.length
 }
 
+export async function refreshGamePlayerStatsByGameId(
+  config: IngestConfig,
+  gameId: number,
+  teamId?: number,
+): Promise<GamePlayerStatUpsertRow[]> {
+  const { supabase, fetchEndpoint } = await createApiClient(config)
+  const payload = await fetchEndpoint<GamePlayerStatsApi>('/games/statistics/players', { id: gameId })
+  const { players, rows } = mapGamePlayerStats(payload, gameId)
+  const teamRows = teamId == null ? rows : rows.filter((row) => row.team_id === teamId)
+
+  if (!teamRows.length) return []
+  const playerIds = new Set(teamRows.map((row) => row.player_id))
+  const selectedTeamPlayers = players.filter((player) => playerIds.has(player.id))
+
+  const { error: playerError } = await supabase.from('players').upsert(selectedTeamPlayers, { onConflict: 'id' })
+  if (playerError) throw playerError
+
+  const { error } = await supabase
+    .from('game_player_stats')
+    .upsert(teamRows, { onConflict: 'game_id,team_id,player_id,stat_group,stat_name' })
+  if (error) throw error
+  return teamRows
+}
+
 export async function ingestSeason(config: IngestConfig, season: number): Promise<IngestSummary> {
   console.log(`[Ingest] Starting ingest for season ${season}`)
-  
+
   console.log(`[Ingest] Step 1: Upserting league metadata...`)
   const leagueMetadata = await upsertLeagueMetadata(config)
   console.log(`[Ingest] Step 1 complete: ${leagueMetadata.leagues} leagues, ${leagueMetadata.leagueSeasons} seasons`)
-  
+
   console.log(`[Ingest] Step 2: Upserting teams...`)
   const teams = await upsertTeams(config, season)
   console.log(`[Ingest] Step 2 complete: ${teams} teams`)
-  
+
   console.log(`[Ingest] Step 3: Upserting players...`)
   const players = await upsertPlayers(config, season)
   console.log(`[Ingest] Step 3 complete: ${players} players`)
-  
+
   console.log(`[Ingest] Step 4: Upserting games...`)
   const games = await upsertGames(config, season)
   console.log(`[Ingest] Step 4 complete: ${games} games`)
-  
+
   console.log(`[Ingest] Step 5: Upserting game events...`)
   const gameEvents = await upsertGameEvents(config, season)
   console.log(`[Ingest] Step 5 complete: ${gameEvents} game events`)
-  
+
   console.log(`[Ingest] Step 6: Upserting injuries...`)
   const injuries = await upsertInjuries(config, season)
   console.log(`[Ingest] Step 6 complete: ${injuries} injuries`)
-  
+
   console.log(`[Ingest] Step 7: Upserting player season stats...`)
   const playerSeasonStats = await upsertPlayerSeasonStats(config, season)
   console.log(`[Ingest] Step 7 complete: ${playerSeasonStats} player season stats`)
-  
+
   console.log(`[Ingest] Step 8: Upserting standings...`)
   const standings = await upsertStandings(config, season)
   console.log(`[Ingest] Step 8 complete: ${standings} standings`)
-  
+
   console.log(`[Ingest] Step 9: Upserting game team stats...`)
   const gameTeamStats = await upsertGameTeamStats(config, season)
   console.log(`[Ingest] Step 9 complete: ${gameTeamStats} game team stats`)
-  
+
   console.log(`[Ingest] Step 10: Upserting game player stats...`)
   const gamePlayerStats = await upsertGamePlayerStats(config, season)
   console.log(`[Ingest] Step 10 complete: ${gamePlayerStats} game player stats`)

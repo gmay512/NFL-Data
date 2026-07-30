@@ -1,18 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useLocation, useParams } from 'react-router-dom'
 import { hasSupabaseEnv, supabase } from '../lib/supabase'
 import type { GamePlayerStatRow, GameRow, GameTeamStatRow, PlayerRow, TeamRow } from '../types/nfl'
 
 type PlayerStatsBucket = {
   offense: GroupedStats[]
   defense: GroupedStats[]
-  other: GroupedStats[]
+  specialTeams: GroupedStats[]
 }
 
 type GroupedStats = {
   group: string
   entries: Array<{ statName: string; statValue: string | null }>
 }
+
+type PlayerUnit = keyof PlayerStatsBucket
 
 type TeamPageState = {
   game: GameRow | null
@@ -32,8 +34,15 @@ const INITIAL_STATE: TeamPageState = {
   players: [],
 }
 
-const offenseKeywords = ['passing', 'rushing', 'receiving', 'kicking', 'punt', 'return', 'offense', 'offence']
+const offenseKeywords = ['passing', 'rushing', 'receiving', 'offense', 'offence']
 const defenseKeywords = ['defense', 'defence', 'tackle', 'interception', 'sack', 'coverage', 'fumble']
+const specialTeamsKeywords = ['special', 'kicking', 'kick', 'punt', 'return', 'field goal']
+
+const playerUnits: Array<{ id: PlayerUnit; label: string }> = [
+  { id: 'offense', label: 'Offense' },
+  { id: 'defense', label: 'Defense' },
+  { id: 'specialTeams', label: 'Special Teams' },
+]
 
 function formatGameStatus(game: GameRow | null) {
   if (!game) return 'Loading'
@@ -55,14 +64,23 @@ function classifyGroup(group: string) {
   const normalized = group.trim().toLowerCase()
   if (offenseKeywords.some((keyword) => normalized.includes(keyword))) return 'offense' as const
   if (defenseKeywords.some((keyword) => normalized.includes(keyword))) return 'defense' as const
-  return 'other' as const
+  if (specialTeamsKeywords.some((keyword) => normalized.includes(keyword))) return 'specialTeams' as const
+  return 'specialTeams' as const
+}
+
+function getPlayerUnit(positionGroup: string | null | undefined): PlayerUnit | null {
+  const normalized = positionGroup?.trim().toLowerCase()
+  if (normalized === 'offense' || normalized === 'offence') return 'offense'
+  if (normalized === 'defense' || normalized === 'defence') return 'defense'
+  if (normalized === 'special teams' || normalized === 'special team') return 'specialTeams'
+  return null
 }
 
 function groupPlayerStats(rows: GamePlayerStatRow[]): PlayerStatsBucket {
-  const groupedByBucket: Record<'offense' | 'defense' | 'other', Map<string, GroupedStats>> = {
+  const groupedByBucket: Record<PlayerUnit, Map<string, GroupedStats>> = {
     offense: new Map(),
     defense: new Map(),
-    other: new Map(),
+    specialTeams: new Map(),
   }
 
   for (const row of rows) {
@@ -87,26 +105,32 @@ function groupPlayerStats(rows: GamePlayerStatRow[]): PlayerStatsBucket {
   return {
     offense: toSortedArray(groupedByBucket.offense),
     defense: toSortedArray(groupedByBucket.defense),
-    other: toSortedArray(groupedByBucket.other),
+    specialTeams: toSortedArray(groupedByBucket.specialTeams),
   }
 }
 
 export function GameTeamDetailPage() {
   const { gameId, teamId } = useParams()
+  const location = useLocation()
   const [data, setData] = useState<TeamPageState>(INITIAL_STATE)
   const [isLoading, setIsLoading] = useState(true)
+  const [isLoadingApiStats, setIsLoadingApiStats] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null)
+  const [selectedUnit, setSelectedUnit] = useState<PlayerUnit>('offense')
+  const [selectedPlayerId, setSelectedPlayerId] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const loadData = useCallback(
     async (showLoader: boolean) => {
       if (!supabase || !gameId || !teamId) {
         setIsLoading(false)
+        setIsLoadingApiStats(false)
         return
       }
 
       if (showLoader) setIsLoading(true)
+      setIsLoadingApiStats(false)
       setError(null)
 
       const gameIdValue = Number(gameId)
@@ -114,6 +138,7 @@ export function GameTeamDetailPage() {
       if (!Number.isFinite(gameIdValue) || !Number.isFinite(teamIdValue)) {
         setError('Invalid game or team id.')
         setIsLoading(false)
+        setIsLoadingApiStats(false)
         return
       }
 
@@ -128,24 +153,58 @@ export function GameTeamDetailPage() {
       if (firstError) {
         setError(firstError.message)
         setIsLoading(false)
+        setIsLoadingApiStats(false)
         return
       }
 
       const game = (gameResult.data ?? null) as GameRow | null
       const teams = (teamsResult.data ?? []) as TeamRow[]
-      const playerStats = (playerStatsResult.data ?? []) as GamePlayerStatRow[]
+      let teamStats = (teamStatsResult.data ?? null) as GameTeamStatRow | null
+      let playerStats = (playerStatsResult.data ?? []) as GamePlayerStatRow[]
+
+      const loadTeamStats = teamStats == null
+      const loadPlayerStats = playerStats.length === 0
+      if (game && (loadTeamStats || loadPlayerStats)) {
+        setIsLoadingApiStats(true)
+        try {
+          const response = await fetch('/api/refresh-game-stats', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ gameId: gameIdValue, teamId: teamIdValue, loadTeamStats, loadPlayerStats }),
+          })
+          const payload = (await response.json()) as { error?: string }
+          if (!response.ok) {
+            throw new Error(payload.error ?? 'Failed to load game statistics.')
+          }
+
+          const [refreshedTeamStatsResult, refreshedPlayerStatsResult] = await Promise.all([
+            supabase.from('game_team_stats').select('*').eq('game_id', gameIdValue).eq('team_id', teamIdValue).maybeSingle(),
+            supabase.from('game_player_stats').select('*').eq('game_id', gameIdValue).eq('team_id', teamIdValue),
+          ])
+          const refreshError = [refreshedTeamStatsResult, refreshedPlayerStatsResult].find((result) => result.error)?.error
+          if (refreshError) throw refreshError
+
+          teamStats = (refreshedTeamStatsResult.data ?? null) as GameTeamStatRow | null
+          playerStats = (refreshedPlayerStatsResult.data ?? []) as GamePlayerStatRow[]
+        } catch (statsLoadError) {
+          setError(statsLoadError instanceof Error ? statsLoadError.message : 'Failed to load game statistics.')
+        } finally {
+          setIsLoadingApiStats(false)
+        }
+      }
 
       const uniquePlayerIds = Array.from(new Set(playerStats.map((row) => row.player_id)))
       let players: PlayerRow[] = []
       if (uniquePlayerIds.length > 0) {
         const playersResult = await supabase
           .from('players')
-          .select('id, name, image_url, created_at')
+          .select('id, name, image_url, position_group, created_at')
           .in('id', uniquePlayerIds)
 
         if (playersResult.error) {
           setError(playersResult.error.message)
           setIsLoading(false)
+          setIsLoadingApiStats(false)
           return
         }
 
@@ -165,11 +224,12 @@ export function GameTeamDetailPage() {
         game,
         team,
         opponent,
-        teamStats: (teamStatsResult.data ?? null) as GameTeamStatRow | null,
+        teamStats,
         playerStats,
         players,
       })
       setIsLoading(false)
+      setIsLoadingApiStats(false)
     },
     [gameId, teamId],
   )
@@ -228,6 +288,7 @@ export function GameTeamDetailPage() {
     const groupedByPlayer = new Map<number, GamePlayerStatRow[]>()
 
     for (const row of data.playerStats) {
+      if (row.team_id !== Number(teamId)) continue
       const current = groupedByPlayer.get(row.player_id)
       if (current) {
         current.push(row)
@@ -243,14 +304,29 @@ export function GameTeamDetailPage() {
           playerId,
           playerName: player?.name ?? `Player ${playerId}`,
           playerImage: player?.image_url ?? null,
+          unit: getPlayerUnit(player?.position_group),
           grouped: groupPlayerStats(stats),
         }
       })
       .sort((left, right) => left.playerName.localeCompare(right.playerName))
-  }, [data.playerStats, playersById])
+  }, [data.playerStats, playersById, teamId])
+
+  const unitRoster = useMemo(
+    () => roster.filter((player) => player.unit === selectedUnit),
+    [roster, selectedUnit],
+  )
+
+  useEffect(() => {
+    if (!unitRoster.some((player) => player.playerId === selectedPlayerId)) {
+      setSelectedPlayerId(unitRoster[0]?.playerId ?? null)
+    }
+  }, [selectedPlayerId, unitRoster])
+
+  const selectedPlayer = unitRoster.find((player) => player.playerId === selectedPlayerId) ?? null
 
   const selectedTeamHref = gameId && teamId ? `/games/${gameId}/teams/${teamId}` : null
   const opponentHref = gameId && data.opponent ? `/games/${gameId}/teams/${data.opponent.id}` : null
+  const dashboardPath = (location.state as { dashboardPath?: string } | null)?.dashboardPath
 
   return (
     <main>
@@ -264,7 +340,7 @@ export function GameTeamDetailPage() {
         </p>
 
         <div className="detail-actions">
-          <Link className="week-nav-button detail-back-link" to={`/games/${gameId}`}>
+          <Link className="week-nav-button detail-back-link" to={`/games/${gameId}`} state={{ dashboardPath }}>
             Back to game
           </Link>
           <button
@@ -300,14 +376,21 @@ export function GameTeamDetailPage() {
 
       <section className="panel panel-wide detail-panel">
         {isLoading ? (
-          <p className="table-status">Loading team details...</p>
+          <p className="table-status">
+            {isLoadingApiStats ? 'Loading team and player stats from API-Sports...' : 'Loading team details...'}
+          </p>
         ) : !data.game || !data.team ? (
           <p className="table-status">No team details found for this game.</p>
         ) : (
           <>
             <div className="team-game-header">
               {selectedTeamHref ? (
-                <Link className="team-game-card team-game-card-link" to={selectedTeamHref} aria-label={`View ${data.team.name} team details`}>
+                <Link
+                  className="team-game-card team-game-card-link"
+                  to={selectedTeamHref}
+                  state={{ dashboardPath }}
+                  aria-label={`View ${data.team.name} team details`}
+                >
                   <div className="team-mark team-game-mark">
                     {data.team.logo_url ? <img src={data.team.logo_url} alt="" /> : <span>T</span>}
                   </div>
@@ -331,6 +414,7 @@ export function GameTeamDetailPage() {
                 <Link
                   className="team-game-card team-game-card-link"
                   to={opponentHref}
+                  state={{ dashboardPath }}
                   aria-label={`View ${data.opponent?.name ?? 'Opponent'} team details`}
                 >
                   <div className="team-mark team-game-mark">
@@ -398,24 +482,73 @@ export function GameTeamDetailPage() {
               {roster.length === 0 ? (
                 <p className="table-status">No player stats available for this team in this game.</p>
               ) : (
-                <div className="roster-grid">
-                  {roster.map((player) => (
-                    <article key={player.playerId} className="roster-card">
+                <div className="player-stats-explorer">
+                  <div className="player-picker" aria-label="Players with game statistics">
+                    <div className="player-unit-tabs" role="tablist" aria-label="Player units">
+                      {playerUnits.map((unit) => (
+                        <button
+                          key={unit.id}
+                          type="button"
+                          role="tab"
+                          aria-selected={selectedUnit === unit.id}
+                          className={selectedUnit === unit.id ? 'is-selected' : ''}
+                          onClick={() => setSelectedUnit(unit.id)}
+                        >
+                          {unit.label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="player-picker-label">{playerUnits.find((unit) => unit.id === selectedUnit)?.label} players</p>
+                    <div className="player-picker-list">
+                      {unitRoster.map((player) => {
+                        const statCount =
+                          player.grouped.offense.reduce((count, group) => count + group.entries.length, 0) +
+                          player.grouped.defense.reduce((count, group) => count + group.entries.length, 0) +
+                          player.grouped.specialTeams.reduce((count, group) => count + group.entries.length, 0)
+                        return (
+                          <button
+                            key={player.playerId}
+                            type="button"
+                            className={`player-picker-button ${selectedPlayer?.playerId === player.playerId ? 'is-selected' : ''}`}
+                            onClick={() => setSelectedPlayerId(player.playerId)}
+                          >
+                            <span className="roster-player-avatar">
+                              {player.playerImage ? <img src={player.playerImage} alt="" /> : 'P'}
+                            </span>
+                            <span>{player.playerName}</span>
+                            <small>{statCount}</small>
+                          </button>
+                        )
+                      })}
+                      {unitRoster.length === 0 && <p className="player-picker-empty">No {selectedUnit === 'specialTeams' ? 'special teams' : selectedUnit} players recorded.</p>}
+                    </div>
+                  </div>
+
+                  {selectedPlayer && (
+                    <article className="roster-card player-stats-detail">
                       <header className="roster-card-head">
                         <div className="roster-player-avatar">
-                          {player.playerImage ? <img src={player.playerImage} alt="" /> : <span>P</span>}
+                          {selectedPlayer.playerImage ? <img src={selectedPlayer.playerImage} alt="" /> : <span>P</span>}
                         </div>
                         <div>
-                          <p className="game-card-label">Player</p>
-                          <h3>{player.playerName}</h3>
+                          <p className="game-card-label">Selected player</p>
+                          <h3>{selectedPlayer.playerName}</h3>
                         </div>
                       </header>
 
-                      <RosterBucket title="Offense" groups={player.grouped.offense} />
-                      <RosterBucket title="Defense" groups={player.grouped.defense} />
-                      <RosterBucket title="Other" groups={player.grouped.other} />
+                      <RosterBucket
+                        title={playerUnits.find((unit) => unit.id === selectedUnit)?.label ?? 'Player stats'}
+                        groups={[
+                          ...selectedPlayer.grouped.offense,
+                          ...selectedPlayer.grouped.defense,
+                          ...selectedPlayer.grouped.specialTeams,
+                        ]}
+                      />
                     </article>
-                  ))}
+                  )}
+                  {!selectedPlayer && (
+                    <p className="player-stats-empty">Select a unit with recorded player statistics to view details.</p>
+                  )}
                 </div>
               )}
             </section>

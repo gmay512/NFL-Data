@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useLocation, useParams } from 'react-router-dom'
 import { hasSupabaseEnv, supabase } from '../lib/supabase'
-import type { GameRow, TeamRow } from '../types/nfl'
+import type { GameRow, GameTeamStatRow, TeamRow } from '../types/nfl'
 
 function formatGameStatus(game: GameRow | null) {
   if (!game) return 'Loading'
@@ -25,10 +25,14 @@ function renderQuarterValue(value: number | null | undefined) {
 
 export function GameDetailPage() {
   const { id } = useParams()
+  const location = useLocation()
   const [game, setGame] = useState<GameRow | null>(null)
   const [teams, setTeams] = useState<TeamRow[]>([])
+  const [teamStats, setTeamStats] = useState<GameTeamStatRow[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  const [isLoadingStats, setIsLoadingStats] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [statsError, setStatsError] = useState<string | null>(null)
 
   const teamMap = useMemo(() => Object.fromEntries(teams.map((team) => [team.id, team])) as Record<number, TeamRow>, [teams])
 
@@ -36,34 +40,101 @@ export function GameDetailPage() {
     const loadGame = async () => {
       if (!supabase || !id) {
         setIsLoading(false)
+        setIsLoadingStats(false)
         return
       }
 
       setIsLoading(true)
+      setIsLoadingStats(true)
       setError(null)
+      setStatsError(null)
+      setTeamStats([])
 
       const gameId = Number(id)
       if (!Number.isFinite(gameId)) {
         setError('Invalid game id.')
         setIsLoading(false)
+        setIsLoadingStats(false)
         return
       }
 
-      const [gameResult, teamsResult] = await Promise.all([
+      const [gameResult, teamsResult, teamStatsResult] = await Promise.all([
         supabase.from('games').select('*').eq('id', gameId).maybeSingle(),
         supabase.from('teams').select('id, name, logo_url').order('id', { ascending: true }),
+        supabase.from('game_team_stats').select('*').eq('game_id', gameId),
       ])
 
-      const firstError = [gameResult, teamsResult].find((result) => result.error)?.error
+      const firstError = [gameResult, teamsResult, teamStatsResult].find((result) => result.error)?.error
       if (firstError) {
         setError(firstError.message)
+        setIsLoading(false)
+        setIsLoadingStats(false)
+        return
+      }
+
+      let loadedGame = (gameResult.data ?? null) as GameRow | null
+      let loadedTeams = (teamsResult.data ?? []) as TeamRow[]
+      let storedStats = (teamStatsResult.data ?? []) as GameTeamStatRow[]
+
+      if (!loadedGame) {
+        try {
+          const response = await fetch('/api/refresh-game', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ gameId }),
+          })
+          const payload = (await response.json()) as { error?: string }
+          if (!response.ok) {
+            throw new Error(payload.error ?? 'Could not load this game.')
+          }
+
+          const [persistedGameResult, persistedTeamsResult, persistedStatsResult] = await Promise.all([
+            supabase.from('games').select('*').eq('id', gameId).maybeSingle(),
+            supabase.from('teams').select('id, name, logo_url').order('id', { ascending: true }),
+            supabase.from('game_team_stats').select('*').eq('game_id', gameId),
+          ])
+          const persistedError = [persistedGameResult, persistedTeamsResult, persistedStatsResult].find((result) => result.error)?.error
+          if (persistedError) throw persistedError
+
+          loadedGame = (persistedGameResult.data ?? null) as GameRow | null
+          loadedTeams = (persistedTeamsResult.data ?? []) as TeamRow[]
+          storedStats = (persistedStatsResult.data ?? []) as GameTeamStatRow[]
+        } catch (gameLoadError) {
+          setError(gameLoadError instanceof Error ? gameLoadError.message : 'Could not load this game.')
+          setIsLoading(false)
+          setIsLoadingStats(false)
+          return
+        }
+      }
+
+      setGame(loadedGame)
+      setTeams(loadedTeams)
+      setTeamStats(storedStats)
+
+      if (storedStats.length > 0 || !loadedGame) {
+        setIsLoadingStats(false)
         setIsLoading(false)
         return
       }
 
-      setGame((gameResult.data ?? null) as GameRow | null)
-      setTeams((teamsResult.data ?? []) as TeamRow[])
       setIsLoading(false)
+      try {
+        const response = await fetch('/api/refresh-game-team-stats', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ gameId }),
+        })
+        const payload = (await response.json()) as { rows?: GameTeamStatRow[]; error?: string }
+        if (!response.ok) {
+          throw new Error(payload.error ?? 'Could not load game stats.')
+        }
+
+        setTeamStats(payload.rows ?? [])
+      } catch (statsLoadError) {
+        setStatsError(statsLoadError instanceof Error ? statsLoadError.message : 'Could not load game stats.')
+      } finally {
+        setIsLoadingStats(false)
+      }
     }
 
     void loadGame()
@@ -71,8 +142,11 @@ export function GameDetailPage() {
 
   const homeTeam = game?.home_team_id ? teamMap[game.home_team_id] : undefined
   const awayTeam = game?.away_team_id ? teamMap[game.away_team_id] : undefined
+  const awayTeamStats = game?.away_team_id ? teamStats.find((stats) => stats.team_id === game.away_team_id) : undefined
+  const homeTeamStats = game?.home_team_id ? teamStats.find((stats) => stats.team_id === game.home_team_id) : undefined
   const awayTeamHref = game?.away_team_id ? `/games/${game.id}/teams/${game.away_team_id}` : null
   const homeTeamHref = game?.home_team_id ? `/games/${game.id}/teams/${game.home_team_id}` : null
+  const dashboardPath = (location.state as { dashboardPath?: string } | null)?.dashboardPath ?? '/games'
 
   return (
     <main>
@@ -84,7 +158,7 @@ export function GameDetailPage() {
         </p>
 
         <div className="detail-actions">
-          <Link className="week-nav-button detail-back-link" to="/games">
+          <Link className="week-nav-button detail-back-link" to={dashboardPath}>
             Back to games
           </Link>
           {game && <span className="detail-status-pill">{formatGameStatus(game)}</span>}
@@ -114,7 +188,7 @@ export function GameDetailPage() {
           <>
             <div className="detail-scoreboard">
               {awayTeamHref ? (
-                <Link className="detail-team detail-team-link" to={awayTeamHref}>
+                <Link className="detail-team detail-team-link" to={awayTeamHref} state={{ dashboardPath }}>
                   <div className="team-mark detail-team-mark">
                     {awayTeam?.logo_url ? <img src={awayTeam.logo_url} alt="" /> : <span>A</span>}
                   </div>
@@ -140,7 +214,7 @@ export function GameDetailPage() {
               <div className="detail-score-divider" />
 
               {homeTeamHref ? (
-                <Link className="detail-team detail-team-link" to={homeTeamHref}>
+                <Link className="detail-team detail-team-link" to={homeTeamHref} state={{ dashboardPath }}>
                   <div className="team-mark detail-team-mark">
                     {homeTeam?.logo_url ? <img src={homeTeam.logo_url} alt="" /> : <span>H</span>}
                   </div>
@@ -207,6 +281,23 @@ export function GameDetailPage() {
               </div>
             </section>
 
+            <section className="detail-game-stats" aria-label="Game team statistics">
+              <div className="section-heading detail-section-heading">
+                <p className="eyebrow">Game stats</p>
+                <h2>Team comparison</h2>
+              </div>
+
+              {isLoadingStats ? (
+                <p className="stats-loading-message">Loading game stats from API-Sports…</p>
+              ) : statsError ? (
+                <p className="stats-loading-message is-error">{statsError}</p>
+              ) : !awayTeamStats && !homeTeamStats ? (
+                <p className="stats-loading-message">Game statistics are not available yet.</p>
+              ) : (
+                <GameStatsTable awayTeam={awayTeam?.name ?? 'Away team'} homeTeam={homeTeam?.name ?? 'Home team'} awayStats={awayTeamStats} homeStats={homeTeamStats} />
+              )}
+            </section>
+
             <div className="detail-grid">
               <article className="stat-card detail-stat">
                 <p className="stat-label">Season</p>
@@ -240,5 +331,56 @@ export function GameDetailPage() {
         )}
       </section>
     </main>
+  )
+}
+
+function GameStatsTable({
+  awayTeam,
+  homeTeam,
+  awayStats,
+  homeStats,
+}: {
+  awayTeam: string
+  homeTeam: string
+  awayStats?: GameTeamStatRow
+  homeStats?: GameTeamStatRow
+}) {
+  const rows: Array<[string, string | number | null | undefined, string | number | null | undefined]> = [
+    ['Total yards', awayStats?.yards_total, homeStats?.yards_total],
+    ['Passing yards', awayStats?.pass_yards, homeStats?.pass_yards],
+    ['Rushing yards', awayStats?.rush_yards, homeStats?.rush_yards],
+    ['Total plays', awayStats?.plays_total, homeStats?.plays_total],
+    ['First downs', awayStats?.fd_total, homeStats?.fd_total],
+    ['Third down efficiency', awayStats?.third_down_eff, homeStats?.third_down_eff],
+    ['Possession', awayStats?.possession, homeStats?.possession],
+    ['Turnovers', awayStats?.turnovers_total, homeStats?.turnovers_total],
+  ]
+
+  return (
+    <div className="boxscore-table-wrap">
+      <table className="boxscore-table game-stats-table">
+        <colgroup>
+          <col className="game-stats-team-column" />
+          <col className="game-stats-label-column" />
+          <col className="game-stats-team-column" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th>{awayTeam}</th>
+            <th>Stat</th>
+            <th>{homeTeam}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([label, awayValue, homeValue]) => (
+            <tr key={label}>
+              <td>{renderValue(awayValue)}</td>
+              <th scope="row">{label}</th>
+              <td>{renderValue(homeValue)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
