@@ -1,0 +1,18 @@
+# new-mcp-server.yaml  (unchanged parts are from your original file [1])
+name: New MCP server
+version: 0.0.1
+schema: v1
+
+mcpServers:
+  # ---- Existing filesystem MCP server -------------------------------------------------
+  - name: "filesystem"
+    command: "npx"
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-filesystem"
+      - "/home/glenn/dev/NFL-Data"
+
+  # ---- NEW Supabase MCP server -------------------------------------------------------
+  - name: "supabase-local"
+    type: "streamable-http"
+    url: "http://127.0.0.1:54323/api/mcp"

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router-dom'
 import { hasSupabaseEnv, supabase } from '../lib/supabase'
-import type { GameRow, LeagueSeasonRow, TeamRow } from '../types/nfl'
+import type { GameRow, GameTeamStatRow, LeagueSeasonRow, TeamRow } from '../types/nfl'
 
-type DashboardMode = 'season' | 'live'
+type DashboardMode = 'season' | 'live' | 'team'
 type SeasonOption = { season: number; current: boolean }
 
 const UNASSIGNED_WEEK = '__unassigned__'
@@ -34,7 +34,7 @@ function getGameDate(game: GameRow) {
   return game.game_time ? `${game.game_date} · ${game.game_time}` : game.game_date
 }
 
-function renderScore(score: number | null) {
+function renderScore(score: number | null | undefined) {
   return score == null ? '—' : score
 }
 
@@ -45,8 +45,13 @@ export function DashboardPage() {
   const [teams, setTeams] = useState<TeamRow[]>([])
   const [selectedSeason, setSelectedSeason] = useState(() => searchParams.get('season') ?? '')
   const [selectedWeek, setSelectedWeek] = useState(() => searchParams.get('week') ?? '')
+  const [selectedTeamId, setSelectedTeamId] = useState(() => searchParams.get('team') ?? '')
   const [games, setGames] = useState<GameRow[]>([])
-  const [mode, setMode] = useState<DashboardMode>(() => (searchParams.get('view') === 'live' ? 'live' : 'season'))
+  const [teamGameStats, setTeamGameStats] = useState<Record<number, GameTeamStatRow>>({})
+  const [mode, setMode] = useState<DashboardMode>(() => {
+    const view = searchParams.get('view')
+    return view === 'live' || view === 'team' ? view : 'season'
+  })
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshingLive, setIsRefreshingLive] = useState(false)
   const [isIngestingSeason, setIsIngestingSeason] = useState(false)
@@ -106,27 +111,58 @@ export function DashboardPage() {
 
   useEffect(() => {
     const loadSeasonGames = async () => {
-      if (!supabase || !selectedSeason || mode !== 'season') return
+      if (!supabase || !selectedSeason || (mode !== 'season' && mode !== 'team')) return
+      if (mode === 'team' && !selectedTeamId) {
+        setGames([])
+        setTeamGameStats({})
+        setIsLoading(false)
+        return
+      }
 
       setIsLoading(true)
       setError(null)
-      const { data, error: gamesError } = await supabase
+      let gamesQuery = supabase
         .from('games')
         .select('*')
         .eq('season', Number(selectedSeason))
         .order('game_timestamp', { ascending: true })
 
+      if (mode === 'team' && selectedTeamId) {
+        gamesQuery = gamesQuery.or(`home_team_id.eq.${selectedTeamId},away_team_id.eq.${selectedTeamId}`)
+      }
+
+      const { data, error: gamesError } = await gamesQuery
       if (gamesError) {
         setError(gamesError.message)
         setGames([])
+        setTeamGameStats({})
       } else {
-        setGames((data ?? []) as GameRow[])
+        const loadedGames = (data ?? []) as GameRow[]
+        setGames(loadedGames)
+
+        if (mode === 'team' && selectedTeamId && loadedGames.length > 0) {
+          const { data: statsData, error: statsError } = await supabase
+            .from('game_team_stats')
+            .select('*')
+            .eq('team_id', Number(selectedTeamId))
+            .in('game_id', loadedGames.map((game) => game.id))
+          if (statsError) {
+            setError(statsError.message)
+            setTeamGameStats({})
+          } else {
+            setTeamGameStats(
+              Object.fromEntries(((statsData ?? []) as GameTeamStatRow[]).map((stats) => [stats.game_id, stats])),
+            )
+          }
+        } else {
+          setTeamGameStats({})
+        }
       }
       setIsLoading(false)
     }
 
     void loadSeasonGames()
-  }, [mode, reloadKey, selectedSeason])
+  }, [mode, reloadKey, selectedSeason, selectedTeamId])
 
   const loadSeason = async () => {
     if (!supabase || !selectedSeason) return
@@ -190,6 +226,7 @@ export function DashboardPage() {
   }
 
   const teamById = useMemo(() => Object.fromEntries(teams.map((team) => [team.id, team])) as Record<number, TeamRow>, [teams])
+  const selectedTeam = selectedTeamId ? teamById[Number(selectedTeamId)] : undefined
   const weeks = useMemo(() => Array.from(new Set(games.map(getWeekKey))), [games])
 
   useEffect(() => {
@@ -202,6 +239,9 @@ export function DashboardPage() {
     if (selectedSeason) nextSearchParams.set('season', selectedSeason)
     if (mode === 'live') {
       nextSearchParams.set('view', 'live')
+    } else if (mode === 'team') {
+      nextSearchParams.set('view', 'team')
+      if (selectedTeamId) nextSearchParams.set('team', selectedTeamId)
     } else if (selectedWeek) {
       nextSearchParams.set('week', selectedWeek)
     }
@@ -209,13 +249,14 @@ export function DashboardPage() {
     if (nextSearchParams.toString() !== searchParams.toString()) {
       setSearchParams(nextSearchParams, { replace: true })
     }
-  }, [mode, searchParams, selectedSeason, selectedWeek, setSearchParams])
+  }, [mode, searchParams, selectedSeason, selectedTeamId, selectedWeek, setSearchParams])
 
   const displayedGames = useMemo(
-    () => (mode === 'live' ? games : games.filter((game) => getWeekKey(game) === selectedWeek)),
+    () => (mode === 'season' ? games.filter((game) => getWeekKey(game) === selectedWeek) : games),
     [games, mode, selectedWeek],
   )
   const selectedSeasonLabel = seasons.find((season) => String(season.season) === selectedSeason)?.season
+  const dashboardPath = `${location.pathname}${location.search}`
 
   return (
     <main className="dashboard-page">
@@ -244,6 +285,22 @@ export function DashboardPage() {
               ))}
             </select>
           </label>
+          <div className="dashboard-view-switcher" aria-label="Dashboard view">
+            <button
+              type="button"
+              className={mode === 'season' ? 'is-active' : ''}
+              onClick={() => setMode('season')}
+            >
+              Schedule
+            </button>
+            <button
+              type="button"
+              className={mode === 'team' ? 'is-active' : ''}
+              onClick={() => setMode('team')}
+            >
+              Teams
+            </button>
+          </div>
           <button className={`live-button ${mode === 'live' ? 'is-active' : ''}`} type="button" onClick={() => void loadLiveGames()} disabled={isRefreshingLive}>
             <span className="live-indicator" />
             {isRefreshingLive ? 'Checking live games' : 'Live games'}
@@ -255,11 +312,29 @@ export function DashboardPage() {
       {error && <StatusMessage title="Unable to load games" message={error} error />}
       {loadMessage && <StatusMessage title="Season loaded" message={loadMessage} />}
 
+      {mode === 'team' && (
+        <section className="team-dashboard-controls" aria-label="Team schedule controls">
+          <div>
+            <p className="eyebrow">Team games</p>
+            <h2>Explore a team’s season</h2>
+          </div>
+          <label className="season-select team-select">
+            <span>Team</span>
+            <select value={selectedTeamId} onChange={(event) => setSelectedTeamId(event.target.value)} disabled={teams.length === 0}>
+              <option value="">Select team</option>
+              {teams.map((team) => (
+                <option key={team.id} value={team.id}>{team.name}</option>
+              ))}
+            </select>
+          </label>
+        </section>
+      )}
+
       <section className="schedule-shell" aria-label="Game schedule">
         <aside className="week-sidebar">
           <div className="sidebar-heading">
-            <p className="eyebrow">{mode === 'live' ? 'Now playing' : 'Season schedule'}</p>
-            <h2>{mode === 'live' ? 'Live games' : selectedSeasonLabel ?? 'Select a season'}</h2>
+            <p className="eyebrow">{mode === 'live' ? 'Now playing' : mode === 'team' ? 'Team schedule' : 'Season schedule'}</p>
+            <h2>{mode === 'live' ? 'Live games' : mode === 'team' ? selectedTeam?.name ?? 'Select a team' : selectedSeasonLabel ?? 'Select a season'}</h2>
           </div>
           {mode === 'season' ? (
             <div className="week-list">
@@ -273,6 +348,8 @@ export function DashboardPage() {
                 )
               })}
             </div>
+          ) : mode === 'team' ? (
+            <p className="sidebar-note">Select a team to list every stored game and open its complete team and player statistics.</p>
           ) : (
             <p className="sidebar-note">Scores refresh from API-Sports whenever you select this view.</p>
           )}
@@ -281,8 +358,8 @@ export function DashboardPage() {
         <div className="games-panel">
           <div className="games-panel-header">
             <div>
-              <p className="eyebrow">{mode === 'live' ? 'Live scoreboard' : 'Games'}</p>
-              <h2>{mode === 'live' ? 'In progress' : getWeekLabel(selectedWeek || UNASSIGNED_WEEK)}</h2>
+              <p className="eyebrow">{mode === 'live' ? 'Live scoreboard' : mode === 'team' ? 'Team results' : 'Games'}</p>
+              <h2>{mode === 'live' ? 'In progress' : mode === 'team' ? `${selectedSeasonLabel ?? ''} season` : getWeekLabel(selectedWeek || UNASSIGNED_WEEK)}</h2>
             </div>
             <span>{displayedGames.length} {displayedGames.length === 1 ? 'game' : 'games'}</span>
           </div>
@@ -292,6 +369,10 @@ export function DashboardPage() {
           ) : displayedGames.length === 0 ? (
             mode === 'live' ? (
               <p className="empty-state">There are no live NFL games right now.</p>
+            ) : mode === 'team' && !selectedTeamId ? (
+              <p className="empty-state">Select a team to view its games for the selected season.</p>
+            ) : mode === 'team' ? (
+              <p className="empty-state">No games are stored for this team in the selected season.</p>
             ) : (
               <div className="empty-season-state">
                 <p>No games are stored for the {selectedSeason} season.</p>
@@ -306,15 +387,29 @@ export function DashboardPage() {
               {displayedGames.map((game) => {
                 const awayTeam = game.away_team_id ? teamById[game.away_team_id] : undefined
                 const homeTeam = game.home_team_id ? teamById[game.home_team_id] : undefined
+                if (mode === 'team' && selectedTeamId) {
+                  return (
+                    <TeamSeasonGameCard
+                      key={game.id}
+                      game={game}
+                      teamId={Number(selectedTeamId)}
+                      selectedTeam={selectedTeam}
+                      opponent={game.home_team_id === Number(selectedTeamId) ? awayTeam : homeTeam}
+                      stats={teamGameStats[game.id]}
+                      dashboardPath={dashboardPath}
+                    />
+                  )
+                }
+
                 return (
                   <Link
                     className="schedule-game"
                     key={game.id}
                     to={`/games/${game.id}`}
-                    state={{ dashboardPath: `${location.pathname}${location.search}` }}
+                    state={{ dashboardPath }}
                   >
                     <div className="schedule-game-meta">
-                      <span>{getGameStatus(game)}</span>
+                    <span>{getGameStatus(game)}</span>
                       <time>{getGameDate(game)}</time>
                     </div>
                     <div className="schedule-team">
@@ -341,6 +436,57 @@ export function DashboardPage() {
 
 function TeamMark({ team, fallback }: { team?: TeamRow; fallback: string }) {
   return <span className="team-mark">{team?.logo_url ? <img src={team.logo_url} alt="" /> : fallback}</span>
+}
+
+function TeamSeasonGameCard({
+  game,
+  teamId,
+  selectedTeam,
+  opponent,
+  stats,
+  dashboardPath,
+}: {
+  game: GameRow
+  teamId: number
+  selectedTeam?: TeamRow
+  opponent?: TeamRow
+  stats?: GameTeamStatRow
+  dashboardPath: string
+}) {
+  const isHome = game.home_team_id === teamId
+  const teamScore = isHome ? game.home_total : game.away_total
+  const opponentScore = isHome ? game.away_total : game.home_total
+
+  return (
+    <article className="team-season-game">
+      <div className="schedule-game-meta">
+        <span>{[game.stage, game.week, getGameStatus(game)].filter(Boolean).join(' · ')}</span>
+        <time>{getGameDate(game)}</time>
+      </div>
+      <div className="team-game-matchup">
+        <div className="schedule-team">
+          <TeamMark team={selectedTeam} fallback="T" />
+          <strong>{selectedTeam?.name ?? 'Selected team'}</strong>
+          <b>{renderScore(teamScore)}</b>
+        </div>
+        <span className="team-game-versus">vs</span>
+        <div className="schedule-team">
+          <TeamMark team={opponent} fallback="O" />
+          <strong>{opponent?.name ?? 'Opponent'}</strong>
+          <b>{renderScore(opponentScore)}</b>
+        </div>
+      </div>
+      <div className="team-game-stat-summary">
+        <span><b>{renderScore(stats?.yards_total)}</b> yards</span>
+        <span><b>{renderScore(stats?.pass_yards)}</b> passing</span>
+        <span><b>{renderScore(stats?.rush_yards)}</b> rushing</span>
+        <span><b>{renderScore(stats?.turnovers_total)}</b> turnovers</span>
+      </div>
+      <Link className="team-game-stats-link" to={`/games/${game.id}/teams/${teamId}`} state={{ dashboardPath }}>
+        View all stats
+      </Link>
+    </article>
+  )
 }
 
 function StatusMessage({ title, message, error = false }: { title: string; message: string; error?: boolean }) {

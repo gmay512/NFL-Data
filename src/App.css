@@ -34,7 +34,7 @@
   letter-spacing: 0;
 }
 
-.top-nav-links { display: flex; gap: 4px; }
+.top-nav-actions, .top-nav-links { display: flex; align-items: center; gap: 4px; }
 .top-nav-links a {
   padding: 8px 11px;
   border-radius: 8px;
@@ -44,6 +44,19 @@
   text-decoration: none;
 }
 .top-nav-links a.active { color: var(--accent-dark); background: var(--accent-soft); }
+.theme-toggle {
+  min-height: 34px;
+  margin-left: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-size: .78rem;
+  font-weight: 800;
+}
+.theme-toggle:hover { border-color: var(--accent-hover-border); color: var(--accent-dark); }
 
 .dashboard-page { display: grid; gap: 22px; }
 .dashboard-hero {
@@ -85,9 +98,12 @@
 }
 .season-select select { min-width: 155px; padding: 0 34px 0 12px; }
 .live-button { padding: 0 14px; cursor: pointer; }
-.live-button:hover, .live-button.is-active { border-color: #e9a3a3; background: #fff5f5; color: #b53b3b; }
+.live-button:hover, .live-button.is-active { border-color: var(--error-border); background: var(--live-soft); color: var(--live-dark); }
 .live-button:disabled { opacity: 0.65; cursor: wait; }
 .live-indicator { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: var(--live); }
+.dashboard-view-switcher { display: flex; padding: 3px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-muted); }
+.dashboard-view-switcher button { min-height: 34px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--muted-text); cursor: pointer; font-size: .8rem; font-weight: 800; }
+.dashboard-view-switcher button.is-active { background: var(--surface); color: var(--accent-dark); box-shadow: 0 1px 3px var(--tab-shadow); }
 
 .status-message {
   display: grid;
@@ -99,7 +115,7 @@
   color: var(--muted-text);
 }
 .status-message strong { color: var(--text); }
-.status-message.is-error { border-color: #f0b3b3; background: #fff8f8; }
+.status-message.is-error { border-color: var(--error-border); background: var(--error-soft); }
 
 .schedule-shell {
   display: grid;
@@ -110,7 +126,7 @@
   background: var(--surface);
   box-shadow: var(--shadow);
 }
-.week-sidebar { min-height: 570px; padding: 25px 14px; border-right: 1px solid var(--border); background: #fafbfc; }
+.week-sidebar { min-height: 570px; padding: 25px 14px; border-right: 1px solid var(--border); background: var(--sidebar-surface); }
 .sidebar-heading { padding: 0 9px 18px; }
 .sidebar-heading h2, .games-panel-header h2 { margin-bottom: 0; font-size: 1.3rem; letter-spacing: -0.03em; }
 .week-list { display: grid; gap: 3px; }
@@ -123,13 +139,13 @@
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #4b5565;
+  color: var(--muted-text);
   cursor: pointer;
   font-size: 0.9rem;
   font-weight: 700;
   text-align: left;
 }
-.week-button small { display: grid; width: 21px; height: 21px; place-items: center; border-radius: 50%; background: #edf0f4; color: var(--muted-text); font-size: 0.7rem; }
+.week-button small { display: grid; width: 21px; height: 21px; place-items: center; border-radius: 50%; background: var(--surface-muted); color: var(--muted-text); font-size: 0.7rem; }
 .week-button:hover { background: var(--surface-muted); }
 .week-button.is-active { background: var(--accent); color: white; }
 .week-button.is-active small { background: rgba(255,255,255,.2); color: white; }
@@ -151,7 +167,7 @@
   text-decoration: none;
   transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
 }
-.schedule-game:hover { border-color: #b8dcd9; box-shadow: 0 8px 22px rgba(18, 93, 89, .08); transform: translateY(-1px); }
+.schedule-game:hover { border-color: var(--accent-hover-border); box-shadow: 0 8px 22px var(--accent-shadow); transform: translateY(-1px); }
 .schedule-game-meta { grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 15px; color: var(--muted-text); font-size: 0.73rem; font-weight: 700; }
 .schedule-game-meta span { color: var(--accent); }
 .schedule-team { display: grid; grid-template-columns: 32px minmax(130px, 1fr) auto; gap: 10px; align-items: center; }
@@ -165,7 +181,7 @@
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 50%;
-  background: #f8fafb;
+  background: var(--team-mark-surface);
   color: var(--accent-dark);
   font-size: 0.68rem;
   font-weight: 800;
@@ -197,6 +213,17 @@
 }
 .load-season-button:hover { background: var(--accent-dark); border-color: var(--accent-dark); }
 .load-season-button:disabled { cursor: wait; opacity: 0.7; }
+.team-dashboard-controls { display: flex; align-items: end; justify-content: space-between; gap: 18px; padding: 19px 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
+.team-dashboard-controls h2 { margin: 0; font-size: 1.2rem; letter-spacing: -.03em; }
+.team-select select { min-width: 230px; }
+.team-season-game { display: grid; gap: 14px; padding: 18px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); }
+.team-game-matchup { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 14px; align-items: center; }
+.team-game-versus { color: var(--muted-text); font-size: .72rem; font-weight: 800; text-transform: uppercase; }
+.team-game-stat-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding: 11px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.team-game-stat-summary span { color: var(--muted-text); font-size: .75rem; }
+.team-game-stat-summary b { color: var(--text); font-size: .88rem; }
+.team-game-stats-link { justify-self: start; padding: 8px 11px; border-radius: 7px; background: var(--accent-soft); color: var(--accent-dark); font-size: .8rem; font-weight: 800; text-decoration: none; }
+.team-game-stats-link:hover { background: var(--accent-link-hover); }
 
 /* Game and team-detail screens */
 .hero {
@@ -217,9 +244,9 @@
   font-weight: 700;
 }
 .week-nav-button { cursor: pointer; }
-.week-nav-button:hover { border-color: #a9d4d1; color: var(--accent-dark); }
+.week-nav-button:hover { border-color: var(--accent-hover-border); color: var(--accent-dark); }
 .detail-back-link { text-decoration: none; }
-.detail-status-pill { color: var(--accent-dark); background: var(--accent-soft); border-color: #c2e5e1; }
+.detail-status-pill { color: var(--accent-dark); background: var(--accent-soft); border-color: var(--accent-hover-border); }
 .detail-refresh-time { color: var(--muted-text); font-size: 0.8rem; }
 .panel { border: 1px solid var(--border); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow); }
 .panel-wide { padding: 25px; }
@@ -235,6 +262,14 @@
 .game-card-label { margin-bottom: 0; color: var(--muted-text); font-size: .67rem; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
 .section-heading { margin-bottom: 14px; }
 .section-heading h2 { margin-bottom: 0; font-size: 1.15rem; letter-spacing: -.025em; }
+.game-detail-tabs { display: flex; gap: 5px; padding: 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-muted); }
+.game-detail-tabs button { min-height: 36px; flex: 1; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: var(--muted-text); cursor: pointer; font-size: .82rem; font-weight: 800; }
+.game-detail-tabs button:hover { color: var(--text); }
+.game-detail-tabs button.is-active { background: var(--surface); color: var(--accent-dark); box-shadow: 0 1px 3px var(--tab-shadow); }
+.game-meta-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.game-meta-grid .stat-card { min-height: 0; padding: 11px 12px; }
+.game-meta-grid .stat-label { margin-bottom: 3px; font-size: .61rem; }
+.game-meta-grid .stat-value { font-size: .88rem; line-height: 1.35; }
 .boxscore-table-wrap, .table-wrap { overflow-x: auto; }
 .boxscore-table, table { width: 100%; min-width: 580px; border-collapse: collapse; }
 .boxscore-table th, .boxscore-table td, th, td { padding: 12px; border-bottom: 1px solid var(--border); text-align: left; }
@@ -250,7 +285,7 @@
   font-size: 0.9rem;
   font-weight: 700;
 }
-.stats-loading-message.is-error { background: #fff4f4; color: #b53b3b; }
+.stats-loading-message.is-error { background: var(--error-soft); color: var(--live-dark); }
 .game-stats-table { table-layout: fixed; }
 .game-stats-team-column { width: 28%; }
 .game-stats-label-column { width: 44%; }
@@ -261,21 +296,30 @@
 .game-stats-table th:last-child,
 .game-stats-table td:last-child { text-align: right; }
 .game-stats-table td:first-child { font-weight: 800; color: var(--accent-dark); }
-.game-stats-table td:last-child { font-weight: 800; color: #2d405e; }
+.game-stats-table td:last-child { font-weight: 800; color: var(--text); }
 .game-stats-table tbody th { text-align: center; color: var(--muted-text); }
-.game-stats-table tbody tr:nth-child(even) { background: #f7f9fb; }
+.game-stats-table tbody tr:nth-child(even) { background: var(--subtle-fill); }
+.selected-team-stats { display: grid; gap: 16px; }
+.team-stat-selector { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.team-stat-selector-button { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 10px; align-items: center; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); cursor: pointer; font-size: .88rem; font-weight: 800; text-align: left; }
+.team-stat-selector-button:hover { border-color: var(--accent-hover-border); background: var(--accent-hover-soft); }
+.team-stat-selector-button.is-selected { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-dark); }
+.team-stat-selector-button .detail-team-mark { width: 42px; height: 42px; }
+.team-stats-detail-button { justify-self: start; padding: 9px 12px; border: 0; border-radius: 8px; background: var(--accent); color: white; cursor: pointer; font-size: .84rem; font-weight: 800; }
+.team-stats-detail-button:hover { background: var(--accent-dark); }
+.full-team-stats-panel { display: grid; gap: 12px; margin-top: 4px; padding-top: 18px; border-top: 1px solid var(--border); }
 .detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-.stat-card { padding: 15px; border: 1px solid var(--border); border-radius: 10px; background: #fcfcfd; }
+.stat-card { padding: 15px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); }
 .stat-label { margin-bottom: 5px; color: var(--muted-text); font-size: .7rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .stat-value { margin-bottom: 0; font-size: 1.1rem; font-weight: 800; }
 .team-game-header { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .team-game-card { display: grid; grid-template-columns: 50px minmax(0,1fr); gap: 12px; align-items: center; padding: 14px; border: 1px solid var(--border); border-radius: 10px; }
 .team-game-card-link { color: inherit; text-decoration: none; }
-.team-game-card-link:hover { border-color: #afd9d5; }
+.team-game-card-link:hover { border-color: var(--accent-hover-border); }
 .team-roster-section { display: grid; gap: 12px; }
 .roster-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
 .player-stats-explorer { display: grid; grid-template-columns: minmax(220px, 0.7fr) minmax(0, 1.3fr); gap: 12px; align-items: start; }
-.player-picker { overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: #fcfcfd; }
+.player-picker { overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-raised); }
 .player-unit-tabs { display: grid; grid-template-columns: repeat(3, 1fr); padding: 7px; gap: 4px; border-bottom: 1px solid var(--border); }
 .player-unit-tabs button { min-height: 29px; padding: 5px 3px; border: 0; border-radius: 6px; background: transparent; color: var(--muted-text); cursor: pointer; font-size: .68rem; font-weight: 800; }
 .player-unit-tabs button:hover { background: var(--surface-muted); color: var(--text); }
@@ -326,6 +370,8 @@
   .top-nav-links a { padding: 7px 8px; }
   .dashboard-hero { display: grid; padding: 23px; }
   .dashboard-actions { align-items: end; }
+  .team-dashboard-controls { align-items: stretch; flex-direction: column; }
+  .team-select select { width: 100%; }
   .schedule-shell { grid-template-columns: 1fr; }
   .week-sidebar { min-height: 0; padding: 19px; border-right: 0; border-bottom: 1px solid var(--border); }
   .sidebar-heading { padding: 0 0 12px; }
@@ -334,8 +380,13 @@
   .games-panel { padding: 20px; }
   .schedule-game { grid-template-columns: 1fr; gap: 8px; }
   .schedule-team { grid-template-columns: 32px minmax(0, 1fr) auto; }
+  .team-game-matchup { grid-template-columns: 1fr; gap: 8px; }
+  .team-game-versus { display: none; }
+  .team-game-stat-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .game-chevron { display: none; }
   .detail-scoreboard, .team-game-header, .roster-grid, .player-stats-explorer { grid-template-columns: 1fr; }
+  .team-stat-selector { grid-template-columns: 1fr; }
+  .game-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .player-picker-list { max-height: 220px; }
   .detail-score-divider { width: 100%; height: 1px; }
   .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
