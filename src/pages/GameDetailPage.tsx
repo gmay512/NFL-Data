@@ -1,45 +1,38 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useLocation, useParams } from 'react-router-dom'
 import { hasSupabaseEnv, supabase } from '../lib/supabase'
 import type { GamePlayerStatRow, GameRow, GameTeamStatRow, PlayerRow, TeamRow } from '../types/nfl'
 
-type GameDetailTab = 'box-score' | 'comparison' | 'team-stats'
+type GameDetailTab = 'comparison' | 'team-stats'
 
-type PlayerUnit = 'offense' | 'defense' | 'specialTeams'
+type PlayerStatCategory = 'offense' | 'defense' | 'specialTeams'
 
-type GroupedStats = {
-  group: string
-  entries: Array<{ statName: string; statValue: string | null }>
-}
-
-const playerUnits: Array<{ id: PlayerUnit; label: string }> = [
+const playerStatCategories: Array<{ id: PlayerStatCategory; label: string }> = [
   { id: 'offense', label: 'Offense' },
   { id: 'defense', label: 'Defense' },
   { id: 'specialTeams', label: 'Special Teams' },
 ]
 
-function getPlayerUnit(positionGroup: string | null | undefined): PlayerUnit | null {
-  const normalized = positionGroup?.trim().toLowerCase()
-  if (normalized === 'offense' || normalized === 'offence') return 'offense'
-  if (normalized === 'defense' || normalized === 'defence') return 'defense'
-  if (normalized === 'special teams' || normalized === 'special team') return 'specialTeams'
-  return null
+function getPlayerStatCategory(statGroup: string): PlayerStatCategory {
+  const normalized = statGroup.trim().toLowerCase()
+  if (['rushing', 'receiving', 'passing', 'fumbles'].some((name) => normalized.includes(name))) return 'offense'
+  if (['kicking', 'kick', 'punt', 'return'].some((name) => normalized.includes(name))) return 'specialTeams'
+  return 'defense'
 }
 
-function groupPlayerStats(rows: GamePlayerStatRow[]): GroupedStats[] {
-  const groups = new Map<string, GroupedStats>()
-
-  for (const row of rows) {
-    const group = row.stat_group || 'Unknown'
-    const current = groups.get(group)
-    if (current) {
-      current.entries.push({ statName: row.stat_name, statValue: row.stat_value })
-    } else {
-      groups.set(group, { group, entries: [{ statName: row.stat_name, statValue: row.stat_value }] })
-    }
+function getPlayerStatGroupOrder(statGroup: string, category: PlayerStatCategory) {
+  const normalized = statGroup.trim().toLowerCase()
+  if (category === 'specialTeams') {
+    if (normalized.includes('kick') && !normalized.includes('return')) return 0
+    if (normalized.includes('kick return')) return 1
+    if (normalized.includes('punt') && !normalized.includes('return')) return 2
+    if (normalized.includes('punt return')) return 3
+    return 4
   }
 
-  return Array.from(groups.values()).sort((left, right) => left.group.localeCompare(right.group))
+  const order = category === 'offense' ? ['passing', 'rushing', 'receiving', 'fumbles'] : []
+  const index = order.findIndex((name) => normalized.includes(name))
+  return index === -1 ? order.length : index
 }
 
 function formatGameStatus(game: GameRow | null) {
@@ -62,13 +55,21 @@ function renderQuarterValue(value: number | null | undefined) {
   return value == null ? '—' : String(value)
 }
 
+function needsGameRefresh(game: GameRow | null, hasTeamStats: boolean) {
+  if (!game) return true
+  if (hasTeamStats || game.status_short !== 'NS') return false
+  if (game.game_timestamp == null) return true
+
+  return game.game_timestamp * 1000 <= Date.now()
+}
+
 export function GameDetailPage() {
   const { id } = useParams()
   const location = useLocation()
   const [game, setGame] = useState<GameRow | null>(null)
   const [teams, setTeams] = useState<TeamRow[]>([])
   const [teamStats, setTeamStats] = useState<GameTeamStatRow[]>([])
-  const [activeTab, setActiveTab] = useState<GameDetailTab>('box-score')
+  const [activeTab, setActiveTab] = useState<GameDetailTab>('comparison')
   const [selectedTeamId, setSelectedTeamId] = useState<number | null>(null)
   const [playerStats, setPlayerStats] = useState<GamePlayerStatRow[]>([])
   const [players, setPlayers] = useState<PlayerRow[]>([])
@@ -122,7 +123,7 @@ export function GameDetailPage() {
       let loadedTeams = (teamsResult.data ?? []) as TeamRow[]
       let storedStats = (teamStatsResult.data ?? []) as GameTeamStatRow[]
 
-      if (!loadedGame) {
+      if (needsGameRefresh(loadedGame, storedStats.length > 0)) {
         try {
           const response = await fetch('/api/refresh-game', {
             method: 'POST',
@@ -146,10 +147,14 @@ export function GameDetailPage() {
           loadedTeams = (persistedTeamsResult.data ?? []) as TeamRow[]
           storedStats = (persistedStatsResult.data ?? []) as GameTeamStatRow[]
         } catch (gameLoadError) {
-          setError(gameLoadError instanceof Error ? gameLoadError.message : 'Could not load this game.')
-          setIsLoading(false)
-          setIsLoadingStats(false)
-          return
+          const message = gameLoadError instanceof Error ? gameLoadError.message : 'Could not refresh this game.'
+          if (!loadedGame) {
+            setError(message)
+            setIsLoading(false)
+            setIsLoadingStats(false)
+            return
+          }
+          setStatsError(message)
         }
       }
 
@@ -190,9 +195,6 @@ export function GameDetailPage() {
   const awayTeam = game?.away_team_id ? teamMap[game.away_team_id] : undefined
   const awayTeamStats = game?.away_team_id ? teamStats.find((stats) => stats.team_id === game.away_team_id) : undefined
   const homeTeamStats = game?.home_team_id ? teamStats.find((stats) => stats.team_id === game.home_team_id) : undefined
-  const selectedTeam = selectedTeamId ? teamMap[selectedTeamId] : undefined
-  const selectedTeamStats = selectedTeamId ? teamStats.find((stats) => stats.team_id === selectedTeamId) : undefined
-  const selectedTeamHref = game && selectedTeamId ? `/games/${game.id}/teams/${selectedTeamId}` : null
   const dashboardPath = (location.state as { dashboardPath?: string } | null)?.dashboardPath ?? '/games'
 
   useEffect(() => {
@@ -209,7 +211,7 @@ export function GameDetailPage() {
     setFullTeamStatsError(null)
   }, [selectedTeamId])
 
-  const loadFullTeamStats = async () => {
+  const loadFullTeamStats = useCallback(async () => {
     if (!supabase || !game || !selectedTeamId) return
 
     setShowFullTeamStats(true)
@@ -265,7 +267,12 @@ export function GameDetailPage() {
     } finally {
       setIsLoadingFullTeamStats(false)
     }
-  }
+  }, [game, selectedTeamId])
+
+  useEffect(() => {
+    if (!game || !selectedTeamId) return
+    void loadFullTeamStats()
+  }, [game, loadFullTeamStats, selectedTeamId])
 
   return (
     <main>
@@ -295,6 +302,37 @@ export function GameDetailPage() {
         <section className="panel panel-wide status-banner error-banner">
           <h2>Game load error</h2>
           <p>{error}</p>
+        </section>
+      )}
+
+      {!isLoading && game && (
+        <section className="game-meta-card game-meta-panel">
+          <dl>
+            <div>
+              <dt>Season</dt>
+              <dd>{renderValue(game.season)}</dd>
+            </div>
+            <div>
+              <dt>Week</dt>
+              <dd>{renderValue(game.week)}</dd>
+            </div>
+            <div>
+              <dt>Date</dt>
+              <dd>{renderValue(game.game_date)}</dd>
+            </div>
+            <div>
+              <dt>Time</dt>
+              <dd>{renderValue(game.game_time)}</dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd>{formatGameStatus(game)}</dd>
+            </div>
+            <div>
+              <dt>Venue</dt>
+              <dd>{[game.venue_name, game.venue_city].filter(Boolean).join(', ') || '—'}</dd>
+            </div>
+          </dl>
         </section>
       )}
 
@@ -331,22 +369,7 @@ export function GameDetailPage() {
               </div>
             </div>
 
-            <div className="game-meta-grid">
-              <StatMetric label="Season" value={game.season} />
-              <StatMetric label="Week" value={game.week} />
-              <StatMetric label="Date" value={game.game_date} />
-              <StatMetric label="Time" value={game.game_time} />
-              <StatMetric label="Status" value={formatGameStatus(game)} />
-              <StatMetric label="Venue" value={[game.venue_name, game.venue_city].filter(Boolean).join(', ') || '—'} />
-            </div>
-
-            <div className="game-detail-tabs" role="tablist" aria-label="Game detail sections">
-              <GameDetailTabButton id="box-score" label="Box Score" activeTab={activeTab} onSelect={setActiveTab} />
-              <GameDetailTabButton id="comparison" label="Team Comparison" activeTab={activeTab} onSelect={setActiveTab} />
-              <GameDetailTabButton id="team-stats" label="Team Stats" activeTab={activeTab} onSelect={setActiveTab} />
-            </div>
-
-            {activeTab === 'box-score' && <section className="detail-boxscore" aria-label="Quarter box score">
+            <section className="detail-boxscore" aria-label="Quarter box score">
               <div className="section-heading detail-section-heading">
                 <p className="eyebrow">Box score</p>
                 <h2>Quarter-by-quarter scoring</h2>
@@ -387,7 +410,12 @@ export function GameDetailPage() {
                   </tbody>
                 </table>
               </div>
-            </section>}
+            </section>
+
+            <div className="game-detail-tabs" role="tablist" aria-label="Game detail sections">
+              <GameDetailTabButton id="comparison" label="Team Comparison" activeTab={activeTab} onSelect={setActiveTab} />
+              <GameDetailTabButton id="team-stats" label="Player Stats" activeTab={activeTab} onSelect={setActiveTab} />
+            </div>
 
             {activeTab === 'comparison' && <section className="detail-game-stats" aria-label="Game team statistics">
               <div className="section-heading detail-section-heading">
@@ -407,61 +435,37 @@ export function GameDetailPage() {
             </section>}
 
             {activeTab === 'team-stats' && (
-              <section className="selected-team-stats" aria-label="Selected team statistics">
-                <div className="section-heading detail-section-heading">
-                  <p className="eyebrow">Team stats</p>
-                  <h2>Choose a team</h2>
-                </div>
-                <div className="team-stat-selector">
-                  <TeamStatSelector
-                    team={awayTeam}
-                    teamId={game.away_team_id}
-                    selectedTeamId={selectedTeamId}
-                    onSelect={setSelectedTeamId}
-                    fallback="A"
-                  />
-                  <TeamStatSelector
-                    team={homeTeam}
-                    teamId={game.home_team_id}
-                    selectedTeamId={selectedTeamId}
-                    onSelect={setSelectedTeamId}
-                    fallback="H"
-                  />
-                </div>
-
-                {isLoadingStats ? (
-                  <p className="stats-loading-message">Loading team stats from API-Sports…</p>
-                ) : statsError ? (
-                  <p className="stats-loading-message is-error">{statsError}</p>
-                ) : (
-                  <>
-                    <div className="detail-grid">
-                      <StatMetric label="Possession" value={selectedTeamStats?.possession} />
-                      <StatMetric label="Total yards" value={selectedTeamStats?.yards_total} />
-                      <StatMetric label="Passing yards" value={selectedTeamStats?.pass_yards} />
-                      <StatMetric label="Rushing yards" value={selectedTeamStats?.rush_yards} />
-                      <StatMetric label="First downs" value={selectedTeamStats?.fd_total} />
-                      <StatMetric label="Third down" value={selectedTeamStats?.third_down_eff} />
-                      <StatMetric label="Turnovers" value={selectedTeamStats?.turnovers_total} />
-                      <StatMetric label="Points against" value={selectedTeamStats?.points_against} />
-                    </div>
-                    {selectedTeamHref && (
-                      <button type="button" className="team-stats-detail-button" onClick={() => void loadFullTeamStats()}>
-                        {showFullTeamStats
-                          ? `Refresh ${selectedTeam?.name ?? 'team'} player stats`
-                          : `View ${selectedTeam?.name ?? 'team'} player and full stats`}
-                      </button>
-                    )}
-                    {showFullTeamStats && (
-                      <FullTeamStatsPanel
-                        isLoading={isLoadingFullTeamStats}
-                        error={fullTeamStatsError}
-                        playerStats={playerStats}
-                        players={players}
-                      />
-                    )}
-                  </>
-                )}
+              <section className="selected-team-stats" aria-label="Player statistics">
+                <section className="player-stats-selection" aria-label="Player statistics">
+                  <div className="section-heading detail-section-heading">
+                    <p className="eyebrow">Player stats</p>
+                    <h2>Choose a team</h2>
+                  </div>
+                  <div className="team-stat-selector">
+                    <TeamStatSelector
+                      team={awayTeam}
+                      teamId={game.away_team_id}
+                      selectedTeamId={selectedTeamId}
+                      onSelect={setSelectedTeamId}
+                      fallback="A"
+                    />
+                    <TeamStatSelector
+                      team={homeTeam}
+                      teamId={game.home_team_id}
+                      selectedTeamId={selectedTeamId}
+                      onSelect={setSelectedTeamId}
+                      fallback="H"
+                    />
+                  </div>
+                  {showFullTeamStats && (
+                    <FullTeamStatsPanel
+                      isLoading={isLoadingFullTeamStats}
+                      error={fullTeamStatsError}
+                      playerStats={playerStats}
+                      players={players}
+                    />
+                  )}
+                </section>
               </section>
             )}
 
@@ -525,15 +529,6 @@ function TeamStatSelector({
   )
 }
 
-function StatMetric({ label, value }: { label: string; value: string | number | null | undefined }) {
-  return (
-    <article className="stat-card detail-stat">
-      <p className="stat-label">{label}</p>
-      <p className="stat-value">{renderValue(value)}</p>
-    </article>
-  )
-}
-
 function FullTeamStatsPanel({
   isLoading,
   error,
@@ -546,38 +541,67 @@ function FullTeamStatsPanel({
   players: PlayerRow[]
 }) {
   const playerById = new Map(players.map((player) => [player.id, player]))
-  const [selectedUnit, setSelectedUnit] = useState<PlayerUnit>('offense')
-  const [selectedPlayerId, setSelectedPlayerId] = useState<number | null>(null)
-  const roster = useMemo(() => {
-    const statsByPlayer = new Map<number, GamePlayerStatRow[]>()
+  const [selectedCategory, setSelectedCategory] = useState<PlayerStatCategory>('offense')
+
+  const statGroups = useMemo(() => {
+    const byGroup = new Map<string, Map<number, Map<string, string | null>>>()
     for (const stat of playerStats) {
-      const stats = statsByPlayer.get(stat.player_id) ?? []
-      stats.push(stat)
-      statsByPlayer.set(stat.player_id, stats)
+      const group = stat.stat_group || 'Other'
+      const playersInGroup = byGroup.get(group) ?? new Map<number, Map<string, string | null>>()
+      const playerStats = playersInGroup.get(stat.player_id) ?? new Map<string, string | null>()
+      playerStats.set(stat.stat_name, stat.stat_value)
+      playersInGroup.set(stat.player_id, playerStats)
+      byGroup.set(group, playersInGroup)
     }
 
-    return Array.from(statsByPlayer.entries())
-      .map(([playerId, stats]) => {
-        const player = playerById.get(playerId)
-        return {
-          playerId,
-          playerName: player?.name ?? `Player ${playerId}`,
-          playerImage: player?.image_url ?? null,
-          unit: getPlayerUnit(player?.position_group),
-          groups: groupPlayerStats(stats),
-          statCount: stats.length,
-        }
+    return Array.from(byGroup.entries())
+      .map(([group, playersInGroup]) => {
+        const statNames = Array.from(
+          new Set(Array.from(playersInGroup.values()).flatMap((stats) => Array.from(stats.keys()))),
+        )
+          .filter((statName) =>
+            Array.from(playersInGroup.values()).some((stats) => {
+              const value = stats.get(statName)
+              return value != null && value !== ''
+            }),
+          )
+          .sort((left, right) => left.localeCompare(right))
+        const rows = Array.from(playersInGroup.entries())
+          .map(([playerId, stats]) => ({
+            playerId,
+            playerName: playerById.get(playerId)?.name ?? `Player ${playerId}`,
+            position: playerById.get(playerId)?.position ?? null,
+            stats,
+          }))
+          .sort((left, right) => left.playerName.localeCompare(right.playerName))
+        return { group, statNames, rows }
       })
-      .sort((left, right) => left.playerName.localeCompare(right.playerName))
+      .sort((left, right) => left.group.localeCompare(right.group))
   }, [playerById, playerStats])
-  const unitRoster = useMemo(() => roster.filter((player) => player.unit === selectedUnit), [roster, selectedUnit])
-  const selectedPlayer = unitRoster.find((player) => player.playerId === selectedPlayerId) ?? null
+  const categoryStatGroups = statGroups
+    .filter((group) => getPlayerStatCategory(group.group) === selectedCategory)
+    .sort((left, right) => {
+      const orderDifference =
+        getPlayerStatGroupOrder(left.group, selectedCategory) - getPlayerStatGroupOrder(right.group, selectedCategory)
+      return orderDifference || left.group.localeCompare(right.group)
+    })
+    .map((group) => {
+      if (selectedCategory !== 'offense') return group
 
-  useEffect(() => {
-    if (!unitRoster.some((player) => player.playerId === selectedPlayerId)) {
-      setSelectedPlayerId(unitRoster[0]?.playerId ?? null)
-    }
-  }, [selectedPlayerId, unitRoster])
+      const yardsStatName = group.statNames.find((statName) => statName.toLowerCase().includes('yard'))
+      if (!yardsStatName) return group
+
+      return {
+        ...group,
+        rows: [...group.rows].sort((left, right) => {
+          const leftYards = Number.parseFloat(left.stats.get(yardsStatName) ?? '')
+          const rightYards = Number.parseFloat(right.stats.get(yardsStatName) ?? '')
+          const leftValue = Number.isFinite(leftYards) ? leftYards : Number.NEGATIVE_INFINITY
+          const rightValue = Number.isFinite(rightYards) ? rightYards : Number.NEGATIVE_INFINITY
+          return rightValue - leftValue || left.playerName.localeCompare(right.playerName)
+        }),
+      }
+    })
 
   if (isLoading) {
     return <p className="stats-loading-message">Loading player statistics from API-Sports…</p>
@@ -587,7 +611,7 @@ function FullTeamStatsPanel({
     return <p className="stats-loading-message is-error">{error}</p>
   }
 
-  if (roster.length === 0) {
+  if (statGroups.length === 0) {
     return <p className="stats-loading-message">Player statistics are not available for this team yet.</p>
   }
 
@@ -595,92 +619,54 @@ function FullTeamStatsPanel({
     <section className="full-team-stats-panel" aria-label="Player statistics">
       <div className="section-heading detail-section-heading">
         <p className="eyebrow">Player stats</p>
-        <h2>Game statistics by unit</h2>
+        <h2>Game statistics</h2>
       </div>
-      <div className="player-stats-explorer">
-        <div className="player-picker" aria-label="Players with game statistics">
-          <div className="player-unit-tabs" role="tablist" aria-label="Player units">
-            {playerUnits.map((unit) => (
-              <button
-                key={unit.id}
-                type="button"
-                role="tab"
-                aria-selected={selectedUnit === unit.id}
-                className={selectedUnit === unit.id ? 'is-selected' : ''}
-                onClick={() => {
-                  setSelectedUnit(unit.id)
-                  setSelectedPlayerId(null)
-                }}
-              >
-                {unit.label}
-              </button>
-            ))}
-          </div>
-          <p className="player-picker-label">{playerUnits.find((unit) => unit.id === selectedUnit)?.label} players</p>
-          <div className="player-picker-list">
-            {unitRoster.map((player) => (
-              <button
-                key={player.playerId}
-                type="button"
-                className={`player-picker-button ${selectedPlayer?.playerId === player.playerId ? 'is-selected' : ''}`}
-                onClick={() => setSelectedPlayerId(player.playerId)}
-              >
-                <span className="roster-player-avatar">
-                  {player.playerImage ? <img src={player.playerImage} alt="" /> : 'P'}
-                </span>
-                <span>{player.playerName}</span>
-                <small>{player.statCount}</small>
-              </button>
-            ))}
-            {unitRoster.length === 0 && (
-              <p className="player-picker-empty">
-                No {selectedUnit === 'specialTeams' ? 'special teams' : selectedUnit} players recorded.
-              </p>
-            )}
-          </div>
-        </div>
-
-        {selectedPlayer ? (
-          <article className="roster-card player-stats-detail">
-            <header className="roster-card-head">
-              <div className="roster-player-avatar">
-                {selectedPlayer.playerImage ? <img src={selectedPlayer.playerImage} alt="" /> : <span>P</span>}
-              </div>
-              <div>
-                <p className="game-card-label">Selected player</p>
-                <h3>{selectedPlayer.playerName}</h3>
-              </div>
-            </header>
-            <RosterBucket title={playerUnits.find((unit) => unit.id === selectedUnit)?.label ?? 'Player stats'} groups={selectedPlayer.groups} />
-          </article>
-        ) : (
-          <p className="player-stats-empty">Select a player to view game statistics.</p>
-        )}
-      </div>
-    </section>
-  )
-}
-
-function RosterBucket({ title, groups }: { title: string; groups: GroupedStats[] }) {
-  if (!groups.length) return null
-
-  return (
-    <section className="roster-bucket" aria-label={`${title} stats`}>
-      <h4>{title}</h4>
-      <div className="roster-group-list">
-        {groups.map((group) => (
-          <div key={group.group} className="roster-group">
-            <p>{group.group}</p>
-            <ul>
-              {group.entries.map((entry) => (
-                <li key={`${group.group}-${entry.statName}`}>
-                  <span>{entry.statName}</span>
-                  <strong>{renderValue(entry.statValue)}</strong>
-                </li>
-              ))}
-            </ul>
-          </div>
+      <div className="player-stat-category-tabs" role="tablist" aria-label="Player statistic categories">
+        {playerStatCategories.map((category) => (
+          <button
+            key={category.id}
+            type="button"
+            role="tab"
+            aria-selected={selectedCategory === category.id}
+            className={selectedCategory === category.id ? 'is-selected' : ''}
+            onClick={() => setSelectedCategory(category.id)}
+          >
+            {category.label}
+          </button>
         ))}
+      </div>
+      <div className="player-stat-tables">
+        {categoryStatGroups.map((group) => (
+          <section key={group.group} className="player-stat-table-section" aria-label={`${group.group} player statistics`}>
+            <h3>{group.group}</h3>
+            <div className="table-wrap">
+              <table className="player-stat-table">
+                <thead>
+                  <tr>
+                    <th>Player</th>
+                    {group.statNames.map((statName) => <th key={statName}>{statName}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {group.rows.map((row) => (
+                    <tr key={row.playerId}>
+                      <th scope="row">
+                        {row.playerName}
+                        {row.position && <small>{row.position}</small>}
+                      </th>
+                      {group.statNames.map((statName) => <td key={statName}>{renderValue(row.stats.get(statName))}</td>)}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        ))}
+        {categoryStatGroups.length === 0 && (
+          <p className="player-stat-category-empty">
+            No {selectedCategory === 'specialTeams' ? 'special teams' : selectedCategory} statistics are available for this team.
+          </p>
+        )}
       </div>
     </section>
   )

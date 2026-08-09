@@ -107,6 +107,7 @@ type GamePlayerStatUpsertRow = {
 
 const defaultApiBaseUrl = 'https://v1.american-football.api-sports.io'
 const defaultApiHost = 'v1.american-football.api-sports.io'
+const scheduleTimezone = 'America/New_York'
 
 function toInt(value: unknown): number | null {
   if (value == null || value === '') return null
@@ -157,6 +158,17 @@ function pickText(...values: unknown[]): string | null {
   }
 
   return null
+}
+
+function getGameDateFields(game: Dict) {
+  const date = asDict(game.date)
+
+  return {
+    date_timezone: pickText(date.timezone, game.timezone, game.date_timezone),
+    game_date: pickText(date.date, game.date),
+    game_time: pickText(date.time, game.time),
+    game_timestamp: pickInt(date.timestamp, game.timestamp),
+  }
 }
 
 function mapGameTeamStatsItem(item: GameTeamStatsApi, fallbackGameId?: number): GameTeamStatsUpsertRow | null {
@@ -408,6 +420,7 @@ async function persistGamePayload(
     const homeScores = asDict(scores.home)
     const awayScores = asDict(scores.away)
     const venue = asDict(game.venue)
+    const gameDate = getGameDateFields(game)
 
     games.push({
       id: gameId,
@@ -417,10 +430,7 @@ async function persistGamePayload(
       week: pickText(game.week),
       home_team_id: homeTeamId,
       away_team_id: awayTeamId,
-      date_timezone: pickText(game.timezone, game.date_timezone),
-      game_date: pickText(game.date, asDict(game.date).date),
-      game_time: pickText(game.time, asDict(game.time).time),
-      game_timestamp: toInt(game.timestamp),
+      ...gameDate,
       venue_name: pickText(venue.name),
       venue_city: pickText(venue.city),
       status_short: pickText(asDict(game.status).short),
@@ -458,13 +468,13 @@ async function persistGamePayload(
 
 export async function refreshLiveGames(config: IngestConfig): Promise<number[]> {
   const { supabase, fetchEndpoint } = await createApiClient(config)
-  const payload = await fetchEndpoint<LiveGameApi>('/games', { live: 'all' })
+  const payload = await fetchEndpoint<LiveGameApi>('/games', { live: 'all', timezone: scheduleTimezone })
   return persistGamePayload(supabase, payload, config.leagueId ?? 1)
 }
 
 export async function refreshGameById(config: IngestConfig, gameId: number): Promise<number> {
   const { supabase, fetchEndpoint } = await createApiClient(config)
-  const payload = await fetchEndpoint<LiveGameApi>('/games', { id: gameId })
+  const payload = await fetchEndpoint<LiveGameApi>('/games', { id: gameId, timezone: scheduleTimezone })
   const gameIds = await persistGamePayload(supabase, payload, config.leagueId ?? 1)
 
   if (!gameIds.includes(gameId)) {
@@ -648,6 +658,7 @@ async function upsertGames(config: IngestConfig, season: number) {
   const payload = await fetchEndpoint<GameApi>('/games', {
     league: config.leagueId ?? 1,
     season,
+    timezone: scheduleTimezone,
   })
 
   const rows = payload.response
@@ -658,6 +669,7 @@ async function upsertGames(config: IngestConfig, season: number) {
       const scores = (item.scores ?? (game.scores as Dict | undefined) ?? {}) as Dict
       const homeScores = (scores.home ?? {}) as Dict
       const awayScores = (scores.away ?? {}) as Dict
+      const gameDate = getGameDateFields(game)
       const id = toInt(game.id)
       if (!id) return null
 
@@ -675,10 +687,7 @@ async function upsertGames(config: IngestConfig, season: number) {
         week: pickText(game.week),
         home_team_id: homeTeamId,
         away_team_id: awayTeamId,
-        date_timezone: pickText(game.timezone, game.date_timezone),
-        game_date: pickText(game.date, (game.date as Dict | undefined)?.date),
-        game_time: pickText(game.time, (game.time as Dict | undefined)?.time),
-        game_timestamp: toInt(game.timestamp),
+        ...gameDate,
         venue_name: pickText(venue?.name),
         venue_city: pickText(venue?.city),
         status_short: pickText((game.status as Dict | undefined)?.short),
@@ -714,6 +723,12 @@ async function upsertGames(config: IngestConfig, season: number) {
   return rows.length
 }
 
+export async function refreshSeasonSchedule(config: IngestConfig, season: number) {
+  const teams = await upsertTeams(config, season)
+  const games = await upsertGames(config, season)
+  return { teams, games }
+}
+
 async function upsertGameEvents(config: IngestConfig, season: number) {
   const { supabase, fetchEndpointWithRetry } = await createApiClient(config)
 
@@ -741,6 +756,11 @@ async function upsertGameEvents(config: IngestConfig, season: number) {
     comment?: unknown
     scores?: { home?: { total?: unknown }; away?: { total?: unknown } }
   }
+  type EventPlayerUpsertRow = {
+    id: number
+    name: string
+    image_url: string | null
+  }
 
   const CONCURRENCY = 2
   let totalRows = 0
@@ -750,14 +770,25 @@ async function upsertGameEvents(config: IngestConfig, season: number) {
     await Promise.all(
       batch.map(async (gameId) => {
         const payload = await fetchEndpointWithRetry<GameEventsApi>('/games/events', { id: gameId })
+        const eventPlayers = new Map<number, EventPlayerUpsertRow>()
         const rows = payload.response
           .map((item) => {
             const teamId = toInt(item.team?.id)
             if (!teamId) return null
+            const playerId = toInt(item.player?.id)
+
+            if (playerId) {
+              eventPlayers.set(playerId, {
+                id: playerId,
+                name: asString(item.player?.name) ?? `Player ${playerId}`,
+                image_url: asString(item.player?.image),
+              })
+            }
+
             return {
               game_id: gameId,
               team_id: teamId,
-              player_id: toInt(item.player?.id),
+              player_id: playerId,
               quarter: asString(item.quarter),
               minute: asString(item.time),
               event_type: asString(item.type),
@@ -769,6 +800,13 @@ async function upsertGameEvents(config: IngestConfig, season: number) {
           .filter(Boolean) as Dict[]
 
         if (!rows.length) return
+
+        if (eventPlayers.size) {
+          const { error: playerError } = await supabase
+            .from('players')
+            .upsert(Array.from(eventPlayers.values()), { onConflict: 'id' })
+          if (playerError) throw playerError
+        }
 
         // Delete existing events for this game before re-inserting to handle re-runs
         const { error: delError } = await supabase

@@ -29,9 +29,37 @@ function getGameStatus(game: GameRow) {
   return game.status_long || game.status_short || 'Scheduled'
 }
 
+function isWinningTeam(game: GameRow, team: 'away' | 'home') {
+  if (!['FT', 'AOT'].includes(game.status_short ?? '')) return false
+  if (game.away_total == null || game.home_total == null || game.away_total === game.home_total) return false
+
+  return team === 'away' ? game.away_total > game.home_total : game.home_total > game.away_total
+}
+
 function getGameDate(game: GameRow) {
   if (!game.game_date) return 'Date pending'
-  return game.game_time ? `${game.game_date} · ${game.game_time}` : game.game_date
+
+  const [year, month, day] = game.game_date.split('-').map(Number)
+  const date = new Date(year, month - 1, day)
+  const formattedDate = Number.isNaN(date.getTime())
+    ? game.game_date
+    : new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).format(date)
+
+  if (!game.game_time) return formattedDate
+
+  const [hours, minutes] = game.game_time.split(':').map(Number)
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return formattedDate
+
+  const meridiem = hours >= 12 ? 'PM' : 'AM'
+  const formattedTime = `${hours % 12 || 12}:${String(minutes).padStart(2, '0')} ${meridiem}`
+  const timeZoneAbbreviation = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    timeZoneName: 'short',
+  })
+    .formatToParts(new Date(Date.UTC(year, month - 1, day, 12)))
+    .find((part) => part.type === 'timeZoneName')?.value ?? 'ET'
+
+  return `${formattedDate} · ${formattedTime} ${timeZoneAbbreviation}`
 }
 
 function renderScore(score: number | null | undefined) {
@@ -261,9 +289,10 @@ export function DashboardPage() {
   return (
     <main className="dashboard-page">
       <section className="dashboard-hero">
-        <div>
-          <p className="eyebrow">NFL game center</p>
-          <h1>Every week, every matchup.</h1>
+        <div className="dashboard-hero-copy">
+          <h1 className="dashboard-logo">
+            <img src="/nfl-game-center-logo-white.svg" alt="NFL Game Center" />
+          </h1>
           <p>Choose a season, browse its schedule, and open a game for its complete box score.</p>
         </div>
         <div className="dashboard-actions">
@@ -389,12 +418,12 @@ export function DashboardPage() {
                 const homeTeam = game.home_team_id ? teamById[game.home_team_id] : undefined
                 if (mode === 'team' && selectedTeamId) {
                   return (
-                    <TeamSeasonGameCard
+                    <ScheduleGameCard
                       key={game.id}
                       game={game}
+                      awayTeam={awayTeam}
+                      homeTeam={homeTeam}
                       teamId={Number(selectedTeamId)}
-                      selectedTeam={selectedTeam}
-                      opponent={game.home_team_id === Number(selectedTeamId) ? awayTeam : homeTeam}
                       stats={teamGameStats[game.id]}
                       dashboardPath={dashboardPath}
                     />
@@ -402,28 +431,13 @@ export function DashboardPage() {
                 }
 
                 return (
-                  <Link
-                    className="schedule-game"
+                  <ScheduleGameCard
                     key={game.id}
-                    to={`/games/${game.id}`}
-                    state={{ dashboardPath }}
-                  >
-                    <div className="schedule-game-meta">
-                    <span>{getGameStatus(game)}</span>
-                      <time>{getGameDate(game)}</time>
-                    </div>
-                    <div className="schedule-team">
-                      <TeamMark team={awayTeam} fallback="A" />
-                      <strong>{awayTeam?.name ?? `Away team ${game.away_team_id ?? ''}`}</strong>
-                      <b>{renderScore(game.away_total)}</b>
-                    </div>
-                    <div className="schedule-team">
-                      <TeamMark team={homeTeam} fallback="H" />
-                      <strong>{homeTeam?.name ?? `Home team ${game.home_team_id ?? ''}`}</strong>
-                      <b>{renderScore(game.home_total)}</b>
-                    </div>
-                    <span className="game-chevron" aria-hidden="true">›</span>
-                  </Link>
+                    game={game}
+                    awayTeam={awayTeam}
+                    homeTeam={homeTeam}
+                    dashboardPath={dashboardPath}
+                  />
                 )
               })}
             </div>
@@ -438,53 +452,61 @@ function TeamMark({ team, fallback }: { team?: TeamRow; fallback: string }) {
   return <span className="team-mark">{team?.logo_url ? <img src={team.logo_url} alt="" /> : fallback}</span>
 }
 
-function TeamSeasonGameCard({
+function ScheduleGameCard({
   game,
+  awayTeam,
+  homeTeam,
   teamId,
-  selectedTeam,
-  opponent,
   stats,
   dashboardPath,
 }: {
   game: GameRow
-  teamId: number
-  selectedTeam?: TeamRow
-  opponent?: TeamRow
+  awayTeam?: TeamRow
+  homeTeam?: TeamRow
+  teamId?: number
   stats?: GameTeamStatRow
   dashboardPath: string
 }) {
-  const isHome = game.home_team_id === teamId
-  const teamScore = isHome ? game.home_total : game.away_total
-  const opponentScore = isHome ? game.away_total : game.home_total
-
   return (
-    <article className="team-season-game">
-      <div className="schedule-game-meta">
-        <span>{[game.stage, game.week, getGameStatus(game)].filter(Boolean).join(' · ')}</span>
-        <time>{getGameDate(game)}</time>
-      </div>
-      <div className="team-game-matchup">
-        <div className="schedule-team">
-          <TeamMark team={selectedTeam} fallback="T" />
-          <strong>{selectedTeam?.name ?? 'Selected team'}</strong>
-          <b>{renderScore(teamScore)}</b>
+    <article className={`schedule-game ${teamId ? 'has-team-stats' : ''}`}>
+      <Link className="schedule-game-details" to={`/games/${game.id}`} state={{ dashboardPath }}>
+        <div className="schedule-game-meta">
+          <span>{[game.stage, game.week, getGameStatus(game)].filter(Boolean).join(' · ')}</span>
+          <time>{getGameDate(game)}</time>
         </div>
-        <span className="team-game-versus">vs</span>
-        <div className="schedule-team">
-          <TeamMark team={opponent} fallback="O" />
-          <strong>{opponent?.name ?? 'Opponent'}</strong>
-          <b>{renderScore(opponentScore)}</b>
+        <div className="schedule-matchup">
+          <div className={`schedule-team ${isWinningTeam(game, 'away') ? 'is-winner' : ''}`}>
+            <TeamMark team={awayTeam} fallback="A" />
+            <div className="schedule-team-name">
+              <span>Away</span>
+              <strong>{awayTeam?.name ?? `Away team ${game.away_team_id ?? ''}`}</strong>
+            </div>
+            <b>{renderScore(game.away_total)}</b>
+          </div>
+          <div className={`schedule-team schedule-team-home ${isWinningTeam(game, 'home') ? 'is-winner' : ''}`}>
+            <TeamMark team={homeTeam} fallback="H" />
+            <div className="schedule-team-name">
+              <span>Home</span>
+              <strong>{homeTeam?.name ?? `Home team ${game.home_team_id ?? ''}`}</strong>
+            </div>
+            <b>{renderScore(game.home_total)}</b>
+          </div>
         </div>
-      </div>
-      <div className="team-game-stat-summary">
-        <span><b>{renderScore(stats?.yards_total)}</b> yards</span>
-        <span><b>{renderScore(stats?.pass_yards)}</b> passing</span>
-        <span><b>{renderScore(stats?.rush_yards)}</b> rushing</span>
-        <span><b>{renderScore(stats?.turnovers_total)}</b> turnovers</span>
-      </div>
-      <Link className="team-game-stats-link" to={`/games/${game.id}/teams/${teamId}`} state={{ dashboardPath }}>
-        View all stats
+        <span className="game-chevron" aria-hidden="true">›</span>
       </Link>
+      {teamId && (
+        <div className="team-game-stats">
+          <div className="team-game-stat-summary">
+            <span><b>{renderScore(stats?.yards_total)}</b> yards</span>
+            <span><b>{renderScore(stats?.pass_yards)}</b> passing</span>
+            <span><b>{renderScore(stats?.rush_yards)}</b> rushing</span>
+            <span><b>{renderScore(stats?.turnovers_total)}</b> turnovers</span>
+          </div>
+          <Link className="team-game-stats-link" to={`/games/${game.id}/teams/${teamId}`} state={{ dashboardPath }}>
+            View all stats
+          </Link>
+        </div>
+      )}
     </article>
   )
 }
