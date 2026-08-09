@@ -1,0 +1,27 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      network: host
+      args:
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
+    container_name: nfl-data-app
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      HOST: 127.0.0.1
+      PORT: 3000
+      SUPABASE_URL: http://192.168.4.237:8000
+    network_mode: host
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 15s
+      timeout: 5s
+      retries: 5

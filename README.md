@@ -113,3 +113,36 @@ The CLI ingest script remains available and currently calls and upserts data fro
 - `/` dashboard with season, week, game, and live-game views
 - `/games/:id` game detail and score breakdown
 - `/games/:gameId/teams/:teamId` team box score and player statistics
+
+## Production deployment
+
+The production target defaults to `glenn@192.168.4.237`. It expects the self-hosted
+Supabase Compose project at `/home/glenn/srv/supabase-project`. The app uses host
+networking for outbound DNS but listens only on `127.0.0.1:3000`; nginx is the LAN
+entry point.
+
+Apply new database migrations, then deploy or update the app:
+
+```bash
+./scripts/deploy-schema.sh
+./scripts/deploy.sh
+```
+
+The first production setup also needs a one-time copy of the local public-schema data:
+
+```bash
+./scripts/seed-production-db.sh
+```
+
+The seed command refuses to run after production contains data. App secrets are written
+only to `/home/glenn/srv/nfl-data/deploy/.env.production` on the server with mode `0600`.
+
+The server's nginx site should use `deploy/nginx.conf`. It serves the web app at
+`http://192.168.4.237`, proxies Supabase API paths to Kong, and limits access to
+`192.168.4.0/24`. Installing or changing that site requires sudo:
+
+```bash
+sudo cp /home/glenn/srv/nfl-data/deploy/nginx.conf /etc/nginx/sites-available/supabase
+sudo nginx -t
+sudo systemctl reload nginx
+```
