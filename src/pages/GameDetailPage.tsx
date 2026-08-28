@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useLocation, useParams } from 'react-router-dom'
+import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import { hasSupabaseEnv, supabase } from '../lib/supabase'
+import { shouldRefreshGame } from '../lib/game-sync'
 import type { GamePlayerStatRow, GameRow, GameTeamStatRow, PlayerRow, TeamRow } from '../types/nfl'
 
 type GameDetailTab = 'comparison' | 'team-stats'
@@ -55,14 +57,6 @@ function renderQuarterValue(value: number | null | undefined) {
   return value == null ? '—' : String(value)
 }
 
-function needsGameRefresh(game: GameRow | null, hasTeamStats: boolean) {
-  if (!game) return true
-  if (hasTeamStats || game.status_short !== 'NS') return false
-  if (game.game_timestamp == null) return true
-
-  return game.game_timestamp * 1000 <= Date.now()
-}
-
 export function GameDetailPage() {
   const { id } = useParams()
   const location = useLocation()
@@ -80,6 +74,9 @@ export function GameDetailPage() {
   const [isLoadingStats, setIsLoadingStats] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [statsError, setStatsError] = useState<string | null>(null)
+  const [refreshStatsOnLoad, setRefreshStatsOnLoad] = useState(false)
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [lastCheckedAt, setLastCheckedAt] = useState<Date | null>(null)
 
   const teamMap = useMemo(() => Object.fromEntries(teams.map((team) => [team.id, team])) as Record<number, TeamRow>, [teams])
 
@@ -122,8 +119,10 @@ export function GameDetailPage() {
       let loadedGame = (gameResult.data ?? null) as GameRow | null
       let loadedTeams = (teamsResult.data ?? []) as TeamRow[]
       let storedStats = (teamStatsResult.data ?? []) as GameTeamStatRow[]
+      const refreshCurrentGame = loadedGame ? shouldRefreshGame(loadedGame) : true
+      setRefreshStatsOnLoad(refreshCurrentGame)
 
-      if (needsGameRefresh(loadedGame, storedStats.length > 0)) {
+      if (refreshCurrentGame) {
         try {
           const response = await fetch('/api/refresh-game', {
             method: 'POST',
@@ -162,7 +161,8 @@ export function GameDetailPage() {
       setTeams(loadedTeams)
       setTeamStats(storedStats)
 
-      if (storedStats.length > 0 || !loadedGame) {
+      if ((!refreshCurrentGame && storedStats.length > 0) || !loadedGame) {
+        if (loadedGame) setLastCheckedAt(new Date())
         setIsLoadingStats(false)
         setIsLoading(false)
         return
@@ -181,6 +181,7 @@ export function GameDetailPage() {
         }
 
         setTeamStats(payload.rows ?? [])
+        setLastCheckedAt(new Date())
       } catch (statsLoadError) {
         setStatsError(statsLoadError instanceof Error ? statsLoadError.message : 'Could not load game stats.')
       } finally {
@@ -189,13 +190,18 @@ export function GameDetailPage() {
     }
 
     void loadGame()
-  }, [id])
+  }, [id, refreshKey])
 
   const homeTeam = game?.home_team_id ? teamMap[game.home_team_id] : undefined
   const awayTeam = game?.away_team_id ? teamMap[game.away_team_id] : undefined
   const awayTeamStats = game?.away_team_id ? teamStats.find((stats) => stats.team_id === game.away_team_id) : undefined
   const homeTeamStats = game?.home_team_id ? teamStats.find((stats) => stats.team_id === game.home_team_id) : undefined
   const dashboardPath = (location.state as { dashboardPath?: string } | null)?.dashboardPath ?? '/games'
+
+  useVisiblePolling(
+    async () => setRefreshKey((current) => current + 1),
+    Boolean(game && shouldRefreshGame(game)),
+  )
 
   useEffect(() => {
     if (!game) return
@@ -225,7 +231,7 @@ export function GameDetailPage() {
         .eq('team_id', selectedTeamId)
       if (playerStatsError) throw playerStatsError
 
-      if ((storedPlayerStats ?? []).length === 0) {
+      if (refreshStatsOnLoad || (storedPlayerStats ?? []).length === 0) {
         const response = await fetch('/api/refresh-game-stats', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -267,7 +273,7 @@ export function GameDetailPage() {
     } finally {
       setIsLoadingFullTeamStats(false)
     }
-  }, [game, selectedTeamId])
+  }, [game, refreshStatsOnLoad, selectedTeamId])
 
   useEffect(() => {
     if (!game || !selectedTeamId) return
@@ -288,6 +294,9 @@ export function GameDetailPage() {
             Back to games
           </Link>
           {game && <span className="detail-status-pill">{formatGameStatus(game)}</span>}
+          {lastCheckedAt && (
+            <span className="detail-refresh-time">Last checked {lastCheckedAt.toLocaleTimeString()}</span>
+          )}
         </div>
       </section>
 

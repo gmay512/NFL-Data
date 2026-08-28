@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router-dom'
+import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import { hasSupabaseEnv, supabase } from '../lib/supabase'
+import { shouldRefreshGame } from '../lib/game-sync'
 import type { GameRow, GameTeamStatRow, LeagueSeasonRow, TeamRow } from '../types/nfl'
 
 type DashboardMode = 'season' | 'live' | 'team'
@@ -86,6 +88,8 @@ export function DashboardPage() {
   const [reloadKey, setReloadKey] = useState(0)
   const [loadMessage, setLoadMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [lastLiveCheckedAt, setLastLiveCheckedAt] = useState<Date | null>(null)
+  const liveRequestId = useRef(0)
 
   useEffect(() => {
     const loadDashboardMeta = async () => {
@@ -138,42 +142,75 @@ export function DashboardPage() {
   }, [])
 
   useEffect(() => {
+    let cancelled = false
+
     const loadSeasonGames = async () => {
       if (!supabase || !selectedSeason || (mode !== 'season' && mode !== 'team')) return
+      const client = supabase
       if (mode === 'team' && !selectedTeamId) {
-        setGames([])
-        setTeamGameStats({})
-        setIsLoading(false)
+        if (!cancelled) {
+          setGames([])
+          setTeamGameStats({})
+          setIsLoading(false)
+        }
         return
       }
 
       setIsLoading(true)
       setError(null)
-      let gamesQuery = supabase
-        .from('games')
-        .select('*')
-        .eq('season', Number(selectedSeason))
-        .order('game_timestamp', { ascending: true })
 
-      if (mode === 'team' && selectedTeamId) {
-        gamesQuery = gamesQuery.or(`home_team_id.eq.${selectedTeamId},away_team_id.eq.${selectedTeamId}`)
+      const fetchGames = async () => {
+        let gamesQuery = client
+          .from('games')
+          .select('*')
+          .eq('season', Number(selectedSeason))
+          .order('game_timestamp', { ascending: true })
+
+        if (mode === 'team' && selectedTeamId) {
+          gamesQuery = gamesQuery.or(`home_team_id.eq.${selectedTeamId},away_team_id.eq.${selectedTeamId}`)
+        }
+
+        const result = await gamesQuery
+        if (result.error) throw result.error
+        return (result.data ?? []) as GameRow[]
       }
 
-      const { data, error: gamesError } = await gamesQuery
-      if (gamesError) {
-        setError(gamesError.message)
-        setGames([])
-        setTeamGameStats({})
-      } else {
-        const loadedGames = (data ?? []) as GameRow[]
+      try {
+        let loadedGames = await fetchGames()
+        const visibleGames =
+          mode === 'season' && selectedWeek
+            ? loadedGames.filter((game) => getWeekKey(game) === selectedWeek)
+            : mode === 'team'
+              ? loadedGames
+              : []
+
+        if (visibleGames.some((game) => shouldRefreshGame(game))) {
+          try {
+            const response = await fetch('/api/refresh-season-games', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ season: Number(selectedSeason) }),
+            })
+            const payload = (await response.json()) as { error?: string }
+            if (!response.ok) throw new Error(payload.error ?? 'Could not refresh game scores.')
+            loadedGames = await fetchGames()
+          } catch (refreshError) {
+            if (!cancelled) {
+              setError(refreshError instanceof Error ? refreshError.message : 'Could not refresh game scores.')
+            }
+          }
+        }
+
+        if (cancelled) return
         setGames(loadedGames)
 
         if (mode === 'team' && selectedTeamId && loadedGames.length > 0) {
-          const { data: statsData, error: statsError } = await supabase
+          const { data: statsData, error: statsError } = await client
             .from('game_team_stats')
             .select('*')
             .eq('team_id', Number(selectedTeamId))
             .in('game_id', loadedGames.map((game) => game.id))
+          if (cancelled) return
           if (statsError) {
             setError(statsError.message)
             setTeamGameStats({})
@@ -185,12 +222,20 @@ export function DashboardPage() {
         } else {
           setTeamGameStats({})
         }
+      } catch (gamesError) {
+        if (cancelled) return
+        setError(gamesError instanceof Error ? gamesError.message : 'Could not load games.')
+        setGames([])
+        setTeamGameStats({})
       }
-      setIsLoading(false)
+      if (!cancelled) setIsLoading(false)
     }
 
     void loadSeasonGames()
-  }, [mode, reloadKey, selectedSeason, selectedTeamId])
+    return () => {
+      cancelled = true
+    }
+  }, [mode, reloadKey, selectedSeason, selectedTeamId, selectedWeek])
 
   const loadSeason = async () => {
     if (!supabase || !selectedSeason) return
@@ -220,10 +265,10 @@ export function DashboardPage() {
     }
   }
 
-  const loadLiveGames = async () => {
+  const refreshLiveGames = useCallback(async () => {
     if (!supabase) return
 
-    setMode('live')
+    const requestId = ++liveRequestId.current
     setIsRefreshingLive(true)
     setIsLoading(true)
     setError(null)
@@ -231,36 +276,55 @@ export function DashboardPage() {
       const response = await fetch('/api/live-games', { method: 'POST' })
       const payload = (await response.json()) as { gameIds?: number[]; error?: string }
       if (!response.ok) throw new Error(payload.error ?? 'Could not refresh live games.')
+      if (requestId !== liveRequestId.current) return
 
       const gameIds = payload.gameIds ?? []
       if (!gameIds.length) {
         setGames([])
         setSelectedWeek('')
+        setLastLiveCheckedAt(new Date())
         return
       }
 
       const { data, error: gamesError } = await supabase.from('games').select('*').in('id', gameIds)
       if (gamesError) throw gamesError
+      if (requestId !== liveRequestId.current) return
 
       setGames((data ?? []) as GameRow[])
       setSelectedWeek('')
+      setLastLiveCheckedAt(new Date())
     } catch (liveError) {
+      if (requestId !== liveRequestId.current) return
       setError(liveError instanceof Error ? liveError.message : 'Could not refresh live games.')
       setGames([])
     } finally {
-      setIsLoading(false)
-      setIsRefreshingLive(false)
+      if (requestId === liveRequestId.current) {
+        setIsLoading(false)
+        setIsRefreshingLive(false)
+      }
     }
-  }
+  }, [])
+
+  useVisiblePolling(refreshLiveGames, mode === 'live')
+
+  useEffect(() => {
+    if (mode !== 'live') return
+    const timeoutId = window.setTimeout(() => void refreshLiveGames(), 0)
+
+    return () => {
+      window.clearTimeout(timeoutId)
+      liveRequestId.current += 1
+    }
+  }, [mode, refreshLiveGames])
 
   const teamById = useMemo(() => Object.fromEntries(teams.map((team) => [team.id, team])) as Record<number, TeamRow>, [teams])
   const selectedTeam = selectedTeamId ? teamById[Number(selectedTeamId)] : undefined
   const weeks = useMemo(() => Array.from(new Set(games.map(getWeekKey))), [games])
 
   useEffect(() => {
-    if (mode !== 'season') return
+    if (mode !== 'season' || isLoading || weeks.length === 0) return
     setSelectedWeek((week) => (weeks.includes(week) ? week : (weeks[0] ?? '')))
-  }, [mode, weeks])
+  }, [isLoading, mode, weeks])
 
   useEffect(() => {
     const nextSearchParams = new URLSearchParams()
@@ -330,7 +394,18 @@ export function DashboardPage() {
               Teams
             </button>
           </div>
-          <button className={`live-button ${mode === 'live' ? 'is-active' : ''}`} type="button" onClick={() => void loadLiveGames()} disabled={isRefreshingLive}>
+          <button
+            className={`live-button ${mode === 'live' ? 'is-active' : ''}`}
+            type="button"
+            onClick={() => {
+              if (mode === 'live') {
+                void refreshLiveGames()
+              } else {
+                setMode('live')
+              }
+            }}
+            disabled={isRefreshingLive}
+          >
             <span className="live-indicator" />
             {isRefreshingLive ? 'Checking live games' : 'Live games'}
           </button>
@@ -380,7 +455,12 @@ export function DashboardPage() {
           ) : mode === 'team' ? (
             <p className="sidebar-note">Select a team to list every stored game and open its complete team and player statistics.</p>
           ) : (
-            <p className="sidebar-note">Scores refresh from API-Sports whenever you select this view.</p>
+            <>
+              <p className="sidebar-note">Scores refresh from API-Sports every 60 seconds while this page is visible.</p>
+              {lastLiveCheckedAt && (
+                <span className="detail-refresh-time">Last checked {lastLiveCheckedAt.toLocaleTimeString()}</span>
+              )}
+            </>
           )}
         </aside>
 

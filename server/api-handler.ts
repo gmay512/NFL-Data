@@ -6,6 +6,7 @@ import {
   refreshGamePlayerStatsByGameId,
   refreshGameTeamStatsByGameId,
   refreshLiveGames,
+  refreshSeasonGames,
   refreshSeasonSchedule,
 } from './ingest-core'
 
@@ -83,6 +84,19 @@ export async function handleApiRequest(request: IncomingMessage, response: Serve
 
       const summary = await refreshSeasonSchedule(getIngestConfig(env), season)
       sendJson(response, 200, { season, ...summary })
+      return true
+    }
+
+    if (request.method === 'POST' && requestUrl.pathname === '/api/refresh-season-games') {
+      const body = (await readJsonBody(request)) as { season?: unknown }
+      const season = Number(body.season)
+      if (!Number.isFinite(season)) {
+        sendJson(response, 400, { error: 'A numeric season is required.' })
+        return true
+      }
+
+      const games = await refreshSeasonGames(getIngestConfig(env), season)
+      sendJson(response, 200, { season, games })
       return true
     }
 

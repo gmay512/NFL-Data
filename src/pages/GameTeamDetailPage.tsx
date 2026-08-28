@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useLocation, useParams } from 'react-router-dom'
 import { hasSupabaseEnv, supabase } from '../lib/supabase'
+import { shouldRefreshGame } from '../lib/game-sync'
 import type { GamePlayerStatRow, GameRow, GameTeamStatRow, PlayerRow, TeamRow } from '../types/nfl'
 
 type PlayerStatsBucket = {
@@ -122,7 +123,7 @@ export function GameTeamDetailPage() {
   const [error, setError] = useState<string | null>(null)
 
   const loadData = useCallback(
-    async (showLoader: boolean) => {
+    async (showLoader: boolean, refreshFromApi = true) => {
       if (!supabase || !gameId || !teamId) {
         setIsLoading(false)
         setIsLoadingApiStats(false)
@@ -157,13 +158,32 @@ export function GameTeamDetailPage() {
         return
       }
 
-      const game = (gameResult.data ?? null) as GameRow | null
+      let game = (gameResult.data ?? null) as GameRow | null
       const teams = (teamsResult.data ?? []) as TeamRow[]
       let teamStats = (teamStatsResult.data ?? null) as GameTeamStatRow | null
       let playerStats = (playerStatsResult.data ?? []) as GamePlayerStatRow[]
+      const refreshCurrentGame = refreshFromApi && game ? shouldRefreshGame(game) : false
 
-      const loadTeamStats = teamStats == null
-      const loadPlayerStats = playerStats.length === 0
+      if (refreshCurrentGame) {
+        try {
+          const response = await fetch('/api/refresh-game', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ gameId: gameIdValue }),
+          })
+          const payload = (await response.json()) as { error?: string }
+          if (!response.ok) throw new Error(payload.error ?? 'Failed to refresh game.')
+
+          const refreshedGameResult = await supabase.from('games').select('*').eq('id', gameIdValue).maybeSingle()
+          if (refreshedGameResult.error) throw refreshedGameResult.error
+          game = (refreshedGameResult.data ?? null) as GameRow | null
+        } catch (gameRefreshError) {
+          setError(gameRefreshError instanceof Error ? gameRefreshError.message : 'Failed to refresh game.')
+        }
+      }
+
+      const loadTeamStats = refreshCurrentGame || teamStats == null
+      const loadPlayerStats = refreshCurrentGame || playerStats.length === 0
       if (game && (loadTeamStats || loadPlayerStats)) {
         setIsLoadingApiStats(true)
         try {
@@ -251,26 +271,32 @@ export function GameTeamDetailPage() {
     setError(null)
 
     try {
-      const response = await fetch('/api/refresh-game-team-stats', {
+      const gameResponse = await fetch('/api/refresh-game', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ gameId: gameIdValue }),
       })
-
-      const payload = (await response.json()) as { error?: string; rows?: GameTeamStatRow[] }
-      if (!response.ok) {
-        throw new Error(payload.error ?? 'Failed to refresh team game stats.')
+      const gamePayload = (await gameResponse.json()) as { error?: string }
+      if (!gameResponse.ok) {
+        throw new Error(gamePayload.error ?? 'Failed to refresh game.')
       }
 
-      const updatedTeamStats = payload.rows?.find((row) => row.team_id === Number(teamId)) ?? null
-      if (updatedTeamStats) {
-        setData((current) => ({
-          ...current,
-          teamStats: updatedTeamStats,
-        }))
+      const statsResponse = await fetch('/api/refresh-game-stats', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          gameId: gameIdValue,
+          teamId: Number(teamId),
+          loadTeamStats: true,
+          loadPlayerStats: true,
+        }),
+      })
+      const statsPayload = (await statsResponse.json()) as { error?: string }
+      if (!statsResponse.ok) {
+        throw new Error(statsPayload.error ?? 'Failed to refresh game statistics.')
       }
 
-      await loadData(false)
+      await loadData(false, false)
       setLastRefreshedAt(new Date())
     } catch (refreshError) {
       setError(refreshError instanceof Error ? refreshError.message : 'Failed to refresh team game stats.')

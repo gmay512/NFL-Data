@@ -4,6 +4,7 @@ type Dict = Record<string, unknown>
 
 type EndpointResponse<T> = {
   response: T[]
+  errors?: unknown
 }
 
 type GameTeamStatsApi = Dict & { game?: Dict; team?: Dict; statistics?: Dict | Dict[] }
@@ -41,6 +42,17 @@ type GameTeamStatsUpsertRow = {
   safeties: number | null
   int_touchdowns: number | null
   points_against: number | null
+}
+
+function describeApiErrors(errors: unknown): string | null {
+  if (Array.isArray(errors)) {
+    return errors.length ? errors.map(String).join('; ') : null
+  }
+  if (errors && typeof errors === 'object') {
+    const entries = Object.entries(errors)
+    return entries.length ? entries.map(([field, message]) => `${field}: ${String(message)}`).join('; ') : null
+  }
+  return errors ? String(errors) : null
 }
 
 export type IngestConfig = {
@@ -310,7 +322,13 @@ async function createApiClient(config: IngestConfig) {
       throw new Error(`API request failed (${result.status}) ${url}\n${body}`)
     }
 
-    return (await result.json()) as EndpointResponse<T>
+    const payload = (await result.json()) as EndpointResponse<T>
+    const apiErrors = describeApiErrors(payload.errors)
+    if (apiErrors) {
+      throw new Error(`API request failed ${url}\n${apiErrors}`)
+    }
+
+    return payload
   }
 
   async function fetchEndpointWithRetry<T>(
@@ -361,6 +379,10 @@ export async function fetchAvailableSeasons(config: IngestConfig): Promise<Avail
   }
 
   const payload = (await response.json()) as EndpointResponse<number>
+  const apiErrors = describeApiErrors(payload.errors)
+  if (apiErrors) {
+    throw new Error(`API request failed ${apiBaseUrl}/seasons\n${apiErrors}`)
+  }
 
   const seasons: AvailableSeason[] = []
   for (const season of payload.response) {
@@ -468,8 +490,13 @@ async function persistGamePayload(
 
 export async function refreshLiveGames(config: IngestConfig): Promise<number[]> {
   const { supabase, fetchEndpoint } = await createApiClient(config)
-  const payload = await fetchEndpoint<LiveGameApi>('/games', { live: 'all', timezone: scheduleTimezone })
-  return persistGamePayload(supabase, payload, config.leagueId ?? 1)
+  const leagueId = config.leagueId ?? 1
+  const payload = await fetchEndpoint<LiveGameApi>('/games', {
+    live: 'all',
+    timezone: scheduleTimezone,
+  })
+  payload.response = payload.response.filter((item) => toInt(item.league?.id) === leagueId)
+  return persistGamePayload(supabase, payload, leagueId)
 }
 
 export async function refreshGameById(config: IngestConfig, gameId: number): Promise<number> {
@@ -727,6 +754,10 @@ export async function refreshSeasonSchedule(config: IngestConfig, season: number
   const teams = await upsertTeams(config, season)
   const games = await upsertGames(config, season)
   return { teams, games }
+}
+
+export async function refreshSeasonGames(config: IngestConfig, season: number) {
+  return upsertGames(config, season)
 }
 
 async function upsertGameEvents(config: IngestConfig, season: number) {
