@@ -77,6 +77,8 @@ export type GameEventRow = {
   created_at: string
 }
 
+export type LatestGameEventRow = Omit<GameEventRow, 'created_at' | 'id'>
+
 export type LeagueRow = {
   id: number
   name: string

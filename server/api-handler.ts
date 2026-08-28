@@ -5,12 +5,17 @@ import {
   fetchAvailableSeasons,
   ingestSeason,
   refreshGameById,
+  refreshGamesByIds,
   refreshGamePlayerStatsByGameId,
   refreshGameTeamStatsByGameId,
   refreshLiveGames,
   refreshSeasonGames,
   refreshSeasonSchedule,
 } from './ingest-core'
+
+function isPositiveIntegerArray(value: unknown): value is number[] {
+  return Array.isArray(value) && value.every((gameId) => Number.isInteger(gameId) && gameId > 0)
+}
 
 export async function handleApiRequest(request: IncomingMessage, response: ServerResponse, env: AppEnv) {
   const requestUrl = new URL(request.url ?? '/', 'http://localhost')
@@ -52,14 +57,24 @@ export async function handleApiRequest(request: IncomingMessage, response: Serve
     }
 
     if (request.method === 'POST' && requestUrl.pathname === '/api/refresh-season-games') {
-      const values = await readNumericFields(request, ['season'])
-      if (!values) {
+      const body = await readJsonBody(request)
+      const season = Number(body.season)
+      if (!Number.isFinite(season)) {
         sendJson(response, 400, { error: 'A numeric season is required.' })
         return true
       }
 
-      const games = await refreshSeasonGames(getIngestConfig(env), values.season)
-      sendJson(response, 200, { season: values.season, games })
+      if (body.gameIds !== undefined && !isPositiveIntegerArray(body.gameIds)) {
+        sendJson(response, 400, { error: 'gameIds must be an array of positive integers.' })
+        return true
+      }
+
+      const config = getIngestConfig(env)
+      const games =
+        body.gameIds === undefined
+          ? await refreshSeasonGames(config, season)
+          : await refreshGamesByIds(config, body.gameIds)
+      sendJson(response, 200, { season, games })
       return true
     }
 

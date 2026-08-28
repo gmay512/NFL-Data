@@ -3,10 +3,12 @@ import type {
   GamePlayerStatRow,
   GameRow,
   GameTeamStatRow,
+  LatestGameEventRow,
   LeagueSeasonRow,
   PlayerRow,
   TeamRow,
 } from '../types/nfl'
+import { selectFirstRowsByKey } from '../lib/game-sync'
 
 let teamsRequest: Promise<TeamRow[]> | null = null
 
@@ -72,6 +74,17 @@ export async function getGamesByIds(gameIds: number[]) {
   const { data, error } = await getClient().from('games').select('*').in('id', gameIds)
   if (error) throw error
   return (data ?? []) as GameRow[]
+}
+
+export async function getLatestGameEvents(gameIds: number[]) {
+  if (!gameIds.length) return []
+  const { data, error } = await getClient()
+    .from('game_events')
+    .select('game_id, team_id, player_id, quarter, minute, event_type, comment, score_home, score_away')
+    .in('game_id', gameIds)
+    .order('id', { ascending: false })
+  if (error) throw error
+  return selectFirstRowsByKey((data ?? []) as LatestGameEventRow[], 'game_id')
 }
 
 export async function getGame(gameId: number) {

@@ -9,6 +9,17 @@ export type GroupedStats = {
 }
 
 export type PlayerStatsBucket = Record<PlayerUnit, GroupedStats[]>
+export type SortDirection = 'ascending' | 'descending'
+
+export type PlayerStatSortColumn =
+  | { type: 'player' }
+  | { type: 'stat'; statName: string }
+
+export type PlayerStatTableRow = {
+  playerId: number
+  playerName: string
+  stats: Map<string, string | null>
+}
 
 const offenseKeywords = ['passing', 'rushing', 'receiving', 'offense', 'offence']
 const defenseKeywords = ['defense', 'defence', 'tackle', 'interception', 'sack', 'coverage', 'fumble']
@@ -79,4 +90,58 @@ export function groupPlayerStats(rows: GamePlayerStatRow[]): PlayerStatsBucket {
     defense: toSortedArray(groupedByBucket.defense),
     specialTeams: toSortedArray(groupedByBucket.specialTeams),
   }
+}
+
+function isMissingStatValue(value: string | null | undefined) {
+  return value == null || value.trim() === ''
+}
+
+function parseNumericStatValue(value: string) {
+  const parsed = Number(value.trim())
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+export function compareStatValues(
+  left: string | null | undefined,
+  right: string | null | undefined,
+  direction: SortDirection,
+) {
+  const leftMissing = isMissingStatValue(left)
+  const rightMissing = isMissingStatValue(right)
+  if (leftMissing || rightMissing) {
+    if (leftMissing === rightMissing) return 0
+    return leftMissing ? 1 : -1
+  }
+
+  const leftValue = left as string
+  const rightValue = right as string
+  const leftNumber = parseNumericStatValue(leftValue)
+  const rightNumber = parseNumericStatValue(rightValue)
+  const comparison =
+    leftNumber != null && rightNumber != null
+      ? leftNumber - rightNumber
+      : leftValue.localeCompare(rightValue, undefined, { sensitivity: 'base' })
+
+  return direction === 'ascending' ? comparison : -comparison
+}
+
+export function sortPlayerStatRows<T extends PlayerStatTableRow>(
+  rows: T[],
+  column: PlayerStatSortColumn,
+  direction: SortDirection,
+) {
+  return [...rows].sort((left, right) => {
+    const comparison =
+      column.type === 'player'
+        ? left.playerName.localeCompare(right.playerName, undefined, { sensitivity: 'base' })
+        : compareStatValues(left.stats.get(column.statName), right.stats.get(column.statName), direction)
+    const directedComparison =
+      column.type === 'player' && direction === 'descending' ? -comparison : comparison
+
+    return (
+      directedComparison ||
+      left.playerName.localeCompare(right.playerName, undefined, { sensitivity: 'base' }) ||
+      left.playerId - right.playerId
+    )
+  })
 }

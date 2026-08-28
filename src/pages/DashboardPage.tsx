@@ -4,6 +4,7 @@ import { getAvailableSeasons, ingestSeason, refreshLiveGames as refreshLiveGames
 import {
   getDashboardMetadata,
   getGamesByIds,
+  getLatestGameEvents,
   getSeasonGames,
   getTeamStatsForGames,
   getTeams,
@@ -12,14 +13,15 @@ import {
 import { ScheduleGameCard, StatusMessage } from '../features/dashboard/DashboardComponents'
 import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import { hasSupabaseEnv, supabase } from '../lib/supabase'
-import { shouldRefreshGame } from '../lib/game-sync'
-import type { GameRow, GameTeamStatRow, LeagueSeasonRow, TeamRow } from '../types/nfl'
+import { getRefreshableGameIds, hasLiveGameChanged, reconcileRowsByKey } from '../lib/game-sync'
+import type { GameRow, GameTeamStatRow, LatestGameEventRow, LeagueSeasonRow, TeamRow } from '../types/nfl'
 
 type DashboardMode = 'season' | 'live' | 'team'
 type SeasonOption = { season: number; current: boolean }
 
 const UNASSIGNED_WEEK = '__unassigned__'
 const WEEK_KEY_SEPARATOR = '::'
+const LIVE_UPDATE_HIGHLIGHT_MS = 4_000
 
 function getWeekKey(game: GameRow) {
   return [game.stage?.trim() || 'Season', game.week?.trim() || UNASSIGNED_WEEK].join(WEEK_KEY_SEPARATOR)
@@ -43,6 +45,7 @@ export function DashboardPage() {
   const [selectedTeamId, setSelectedTeamId] = useState(() => searchParams.get('team') ?? '')
   const [games, setGames] = useState<GameRow[]>([])
   const [teamGameStats, setTeamGameStats] = useState<Record<number, GameTeamStatRow>>({})
+  const [latestGameEvents, setLatestGameEvents] = useState<Record<number, LatestGameEventRow>>({})
   const [mode, setMode] = useState<DashboardMode>(() => {
     const view = searchParams.get('view')
     return view === 'live' || view === 'team' ? view : 'season'
@@ -54,7 +57,11 @@ export function DashboardPage() {
   const [loadMessage, setLoadMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [lastLiveCheckedAt, setLastLiveCheckedAt] = useState<Date | null>(null)
+  const [updatedLiveGameIds, setUpdatedLiveGameIds] = useState<Set<number>>(() => new Set())
   const liveRequestId = useRef(0)
+  const liveGameSnapshot = useRef<Map<number, GameRow>>(new Map())
+  const liveHighlightTimeouts = useRef<Map<number, number>>(new Map())
+  const displayedGamesKey = useRef<string | null>(null)
 
   useEffect(() => {
     const loadDashboardMeta = async () => {
@@ -109,12 +116,17 @@ export function DashboardPage() {
         if (!cancelled) {
           setGames([])
           setTeamGameStats({})
+          displayedGamesKey.current = `team:${selectedSeason}:none`
           setIsLoading(false)
         }
         return
       }
 
-      setIsLoading(true)
+      const queryKey = mode === 'team'
+        ? `team:${selectedSeason}:${selectedTeamId}`
+        : `season:${selectedSeason}`
+      const isInitialLoad = displayedGamesKey.current !== queryKey
+      if (isInitialLoad) setIsLoading(true)
       setError(null)
 
       const fetchGames = () => getSeasonGames(
@@ -123,49 +135,58 @@ export function DashboardPage() {
       )
 
       try {
-        let loadedGames = await fetchGames()
-        if (loadedGames.some((game) => shouldRefreshGame(game))) {
+        const loadedGames = await fetchGames()
+        let statsData: GameTeamStatRow[] = []
+        let statsError: unknown
+        if (mode === 'team' && selectedTeamId && loadedGames.length > 0) {
           try {
-            await refreshSeasonGames(Number(selectedSeason))
-            loadedGames = await fetchGames()
+            statsData = await getTeamStatsForGames(Number(selectedTeamId), loadedGames.map((game) => game.id))
+          } catch (loadStatsError) {
+            statsError = loadStatsError
+          }
+        }
+
+        if (cancelled) return
+        setGames((current) => reconcileRowsByKey(current, loadedGames, 'id'))
+        if (mode === 'team' && selectedTeamId && loadedGames.length > 0) {
+          if (statsError) {
+            setError(statsError instanceof Error ? statsError.message : 'Could not load team statistics.')
+            setTeamGameStats({})
+          } else {
+            setTeamGameStats((current) => Object.fromEntries(
+              reconcileRowsByKey(Object.values(current), statsData, 'game_id')
+                .map((stats) => [stats.game_id, stats]),
+            ))
+          }
+        } else {
+          setTeamGameStats({})
+        }
+        displayedGamesKey.current = queryKey
+        setIsLoading(false)
+
+        const refreshableGameIds = getRefreshableGameIds(loadedGames)
+        if (refreshableGameIds.length > 0) {
+          try {
+            await refreshSeasonGames(Number(selectedSeason), refreshableGameIds)
+            const refreshedGames = await fetchGames()
+            if (!cancelled) {
+              setGames((current) => reconcileRowsByKey(current, refreshedGames, 'id'))
+            }
           } catch (refreshError) {
             if (!cancelled) {
               setError(refreshError instanceof Error ? refreshError.message : 'Could not refresh game scores.')
             }
           }
         }
-
-        if (cancelled) return
-        setGames(loadedGames)
-
-        if (mode === 'team' && selectedTeamId && loadedGames.length > 0) {
-          let statsData: GameTeamStatRow[]
-          let statsError: unknown
-          try {
-            statsData = await getTeamStatsForGames(Number(selectedTeamId), loadedGames.map((game) => game.id))
-          } catch (loadStatsError) {
-            statsData = []
-            statsError = loadStatsError
-          }
-          if (cancelled) return
-          if (statsError) {
-            setError(statsError instanceof Error ? statsError.message : 'Could not load team statistics.')
-            setTeamGameStats({})
-          } else {
-            setTeamGameStats(
-              Object.fromEntries(statsData.map((stats) => [stats.game_id, stats])),
-            )
-          }
-        } else {
-          setTeamGameStats({})
-        }
       } catch (gamesError) {
         if (cancelled) return
         setError(gamesError instanceof Error ? gamesError.message : 'Could not load games.')
-        setGames([])
-        setTeamGameStats({})
+        if (isInitialLoad) {
+          setGames([])
+          setTeamGameStats({})
+        }
+        setIsLoading(false)
       }
-      if (!cancelled) setIsLoading(false)
     }
 
     void loadSeasonGames()
@@ -197,8 +218,9 @@ export function DashboardPage() {
     if (!supabase) return
 
     const requestId = ++liveRequestId.current
+    const isInitialLoad = displayedGamesKey.current !== 'live'
     setIsRefreshingLive(true)
-    setIsLoading(true)
+    if (isInitialLoad) setIsLoading(true)
     setError(null)
     try {
       const payload = await refreshLiveGamesFromApi()
@@ -206,25 +228,69 @@ export function DashboardPage() {
 
       const gameIds = payload.gameIds ?? []
       if (!gameIds.length) {
-        setGames([])
+        liveGameSnapshot.current.clear()
+        liveHighlightTimeouts.current.forEach((timeoutId) => window.clearTimeout(timeoutId))
+        liveHighlightTimeouts.current.clear()
+        setUpdatedLiveGameIds(new Set())
+        setGames((current) => reconcileRowsByKey(current, [], 'id'))
+        setLatestGameEvents({})
         setSelectedWeek('')
         setLastLiveCheckedAt(new Date())
+        displayedGamesKey.current = 'live'
         return
       }
 
-      const data = await getGamesByIds(gameIds)
+      const [data, latestEvents] = await Promise.all([
+        getGamesByIds(gameIds),
+        getLatestGameEvents(gameIds),
+      ])
       if (requestId !== liveRequestId.current) return
 
-      setGames(data)
+      const previousSnapshot = liveGameSnapshot.current
+      const updatedIds = data
+        .filter((game) => hasLiveGameChanged(previousSnapshot.get(game.id), game))
+        .map((game) => game.id)
+      liveGameSnapshot.current = new Map(data.map((game) => [game.id, game]))
+
+      if (previousSnapshot.size === 0) {
+        setUpdatedLiveGameIds(new Set())
+      } else if (updatedIds.length > 0) {
+        setUpdatedLiveGameIds((current) => new Set([...current, ...updatedIds]))
+        for (const gameId of updatedIds) {
+          const existingTimeout = liveHighlightTimeouts.current.get(gameId)
+          if (existingTimeout != null) window.clearTimeout(existingTimeout)
+
+          const timeoutId = window.setTimeout(() => {
+            setUpdatedLiveGameIds((current) => {
+              if (!current.has(gameId)) return current
+              const next = new Set(current)
+              next.delete(gameId)
+              return next
+            })
+            liveHighlightTimeouts.current.delete(gameId)
+          }, LIVE_UPDATE_HIGHLIGHT_MS)
+          liveHighlightTimeouts.current.set(gameId, timeoutId)
+        }
+      }
+
+      setGames((current) => reconcileRowsByKey(current, data, 'id'))
+      setLatestGameEvents((current) => Object.fromEntries(
+        reconcileRowsByKey(Object.values(current), latestEvents, 'game_id')
+          .map((event) => [event.game_id, event]),
+      ))
       setSelectedWeek('')
       setLastLiveCheckedAt(new Date())
+      displayedGamesKey.current = 'live'
     } catch (liveError) {
       if (requestId !== liveRequestId.current) return
       setError(liveError instanceof Error ? liveError.message : 'Could not refresh live games.')
-      setGames([])
+      if (isInitialLoad) {
+        setGames([])
+        setLatestGameEvents({})
+      }
     } finally {
       if (requestId === liveRequestId.current) {
-        setIsLoading(false)
+        if (isInitialLoad) setIsLoading(false)
         setIsRefreshingLive(false)
       }
     }
@@ -234,11 +300,15 @@ export function DashboardPage() {
 
   useEffect(() => {
     if (mode !== 'live') return
+    const highlightTimeouts = liveHighlightTimeouts.current
     const timeoutId = window.setTimeout(() => void refreshLiveGames(), 0)
 
     return () => {
       window.clearTimeout(timeoutId)
       liveRequestId.current += 1
+      liveGameSnapshot.current.clear()
+      highlightTimeouts.forEach((highlightTimeoutId) => window.clearTimeout(highlightTimeoutId))
+      highlightTimeouts.clear()
     }
   }, [mode, refreshLiveGames])
 
@@ -286,6 +356,7 @@ export function DashboardPage() {
             <select
               value={selectedSeason}
               onChange={(event) => {
+                if (supabase) setIsLoading(true)
                 setMode('season')
                 setSelectedSeason(event.target.value)
               }}
@@ -303,14 +374,20 @@ export function DashboardPage() {
             <button
               type="button"
               className={mode === 'season' ? 'is-active' : ''}
-              onClick={() => setMode('season')}
+              onClick={() => {
+                if (supabase && mode !== 'season') setIsLoading(true)
+                setMode('season')
+              }}
             >
               Schedule
             </button>
             <button
               type="button"
               className={mode === 'team' ? 'is-active' : ''}
-              onClick={() => setMode('team')}
+              onClick={() => {
+                if (supabase && mode !== 'team') setIsLoading(true)
+                setMode('team')
+              }}
             >
               Teams
             </button>
@@ -322,6 +399,7 @@ export function DashboardPage() {
               if (mode === 'live') {
                 void refreshLiveGames()
               } else {
+                if (supabase) setIsLoading(true)
                 setMode('live')
               }
             }}
@@ -345,7 +423,14 @@ export function DashboardPage() {
           </div>
           <label className="season-select team-select">
             <span>Team</span>
-            <select value={selectedTeamId} onChange={(event) => setSelectedTeamId(event.target.value)} disabled={teams.length === 0}>
+            <select
+              value={selectedTeamId}
+              onChange={(event) => {
+                if (supabase) setIsLoading(true)
+                setSelectedTeamId(event.target.value)
+              }}
+              disabled={teams.length === 0}
+            >
               <option value="">Select team</option>
               {teams.map((team) => (
                 <option key={team.id} value={team.id}>{team.name}</option>
@@ -438,6 +523,8 @@ export function DashboardPage() {
                     awayTeam={awayTeam}
                     homeTeam={homeTeam}
                     dashboardPath={dashboardPath}
+                    isUpdated={mode === 'live' && updatedLiveGameIds.has(game.id)}
+                    latestEvent={mode === 'live' ? latestGameEvents[game.id] : undefined}
                   />
                 )
               })}

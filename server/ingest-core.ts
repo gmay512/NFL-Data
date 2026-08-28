@@ -84,6 +84,36 @@ type LiveGameApi = {
   scores?: Dict
 }
 
+type GameEventApi = {
+  team?: Dict
+  player?: Dict
+  quarter?: unknown
+  minute?: unknown
+  time?: unknown
+  type?: unknown
+  comment?: unknown
+  score?: Dict
+  scores?: Dict
+}
+
+export type GameEventUpsertRow = {
+  game_id: number
+  team_id: number
+  player_id: number | null
+  quarter: string
+  minute: string | null
+  event_type: string
+  comment: string | null
+  score_home: number | null
+  score_away: number | null
+}
+
+type EventPlayerUpsertRow = {
+  id: number
+  name: string
+  image_url: string | null
+}
+
 type GamePlayerStatsApi = {
   game?: Dict
   team?: Dict
@@ -108,7 +138,13 @@ type GamePlayerStatUpsertRow = {
 const defaultApiBaseUrl = 'https://v1.american-football.api-sports.io'
 const defaultApiHost = 'v1.american-football.api-sports.io'
 const scheduleTimezone = 'America/New_York'
+const targetedGameRefreshCooldownMs = 60_000
+const targetedGameRefreshConcurrency = 2
 const apiClients = new WeakMap<IngestConfig, ApiClient>()
+const targetedGameRefreshes = new Map<
+  string,
+  { completedAt: number | null; promise: Promise<number> }
+>()
 
 function toInt(value: unknown): number | null {
   if (value == null || value === '') return null
@@ -128,6 +164,44 @@ function asDict(value: unknown): Dict {
   }
 
   return {}
+}
+
+export function mapGameEventRows(gameId: number, events: GameEventApi[]) {
+  const players = new Map<number, EventPlayerUpsertRow>()
+  const rows = events
+    .map((event) => {
+      const teamId = toInt(event.team?.id)
+      const playerId = toInt(event.player?.id)
+      const quarter = asString(event.quarter)
+      const eventType = asString(event.type)
+      if (!teamId || !quarter || !eventType) return null
+
+      if (playerId) {
+        players.set(playerId, {
+          id: playerId,
+          name: asString(event.player?.name) ?? `Player ${playerId}`,
+          image_url: asString(event.player?.image),
+        })
+      }
+
+      const score = asDict(event.score ?? event.scores)
+      const homeScore = score.home
+      const awayScore = score.away
+      return {
+        game_id: gameId,
+        team_id: teamId,
+        player_id: playerId,
+        quarter,
+        minute: asString(event.minute ?? event.time),
+        event_type: eventType,
+        comment: asString(event.comment),
+        score_home: toInt(asDict(homeScore).total ?? homeScore),
+        score_away: toInt(asDict(awayScore).total ?? awayScore),
+      }
+    })
+    .filter((row): row is GameEventUpsertRow => row !== null)
+
+  return { players: Array.from(players.values()), rows }
 }
 
 function pickFromDict(source: Dict, ...keys: string[]): unknown {
@@ -306,20 +380,43 @@ function createApiClient(config: IngestConfig): ApiClient {
   async function fetchEndpoint<T>(path: string, params: Record<string, string | number>) {
     const search = new URLSearchParams()
     Object.entries(params).forEach(([key, value]) => search.set(key, String(value)))
-    const url = `${apiBaseUrl}${path}?${search.toString()}`
+    const requestPath = `${path}${search.size ? `?${search.toString()}` : ''}`
+    const url = `${apiBaseUrl}${requestPath}`
+    const startedAt = Date.now()
 
-    const result = await fetch(url, { headers: apiHeaders })
+    let result: Response
+    try {
+      result = await fetch(url, { headers: apiHeaders })
+    } catch (error) {
+      const durationMs = Date.now() - startedAt
+      console.error(`[API-Sports] GET ${requestPath} -> network error in ${durationMs}ms`, error)
+      throw error
+    }
     if (!result.ok) {
       const body = await result.text()
+      const durationMs = Date.now() - startedAt
+      console.error(`[API-Sports] GET ${requestPath} -> ${result.status} in ${durationMs}ms`)
       throw new Error(`API request failed (${result.status}) ${url}\n${body}`)
     }
 
-    const payload = (await result.json()) as EndpointResponse<T>
+    let payload: EndpointResponse<T>
+    try {
+      payload = (await result.json()) as EndpointResponse<T>
+    } catch (error) {
+      const durationMs = Date.now() - startedAt
+      console.error(`[API-Sports] GET ${requestPath} -> invalid JSON in ${durationMs}ms`, error)
+      throw error
+    }
     const apiErrors = describeApiErrors(payload.errors)
     if (apiErrors) {
+      const durationMs = Date.now() - startedAt
+      console.error(`[API-Sports] GET ${requestPath} -> API error in ${durationMs}ms: ${apiErrors}`)
       throw new Error(`API request failed ${url}\n${apiErrors}`)
     }
 
+    const durationMs = Date.now() - startedAt
+    const responseCount = Array.isArray(payload.response) ? payload.response.length : 0
+    console.log(`[API-Sports] GET ${requestPath} -> ${result.status} in ${durationMs}ms (${responseCount} items)`)
     return payload
   }
 
@@ -357,26 +454,8 @@ function createApiClient(config: IngestConfig): ApiClient {
 }
 
 export async function fetchAvailableSeasons(config: IngestConfig): Promise<AvailableSeason[]> {
-  const apiBaseUrl = config.apiBaseUrl ?? defaultApiBaseUrl
-  const apiHost = config.apiHost ?? defaultApiHost
-  const response = await fetch(`${apiBaseUrl}/seasons`, {
-    headers: {
-      'x-apisports-key': config.apiKey,
-      'x-rapidapi-key': config.apiKey,
-      'x-rapidapi-host': apiHost,
-    },
-  })
-
-  if (!response.ok) {
-    const body = await response.text()
-    throw new Error(`API request failed (${response.status}) ${apiBaseUrl}/seasons\n${body}`)
-  }
-
-  const payload = (await response.json()) as EndpointResponse<number>
-  const apiErrors = describeApiErrors(payload.errors)
-  if (apiErrors) {
-    throw new Error(`API request failed ${apiBaseUrl}/seasons\n${apiErrors}`)
-  }
+  const { fetchEndpoint } = createApiClient(config)
+  const payload = await fetchEndpoint<number>('/seasons', {})
 
   const seasons: AvailableSeason[] = []
   for (const season of payload.response) {
@@ -483,26 +562,96 @@ async function persistGamePayload(
 }
 
 export async function refreshLiveGames(config: IngestConfig): Promise<number[]> {
-  const { supabase, fetchEndpoint } = await createApiClient(config)
+  const client = createApiClient(config)
+  const { supabase, fetchEndpoint } = client
   const leagueId = config.leagueId ?? 1
   const payload = await fetchEndpoint<LiveGameApi>('/games', {
     live: 'all',
     timezone: scheduleTimezone,
   })
   payload.response = payload.response.filter((item) => toInt(item.league?.id) === leagueId)
-  return persistGamePayload(supabase, payload, leagueId)
+  const gameIds = await persistGamePayload(supabase, payload, leagueId)
+
+  for (let index = 0; index < gameIds.length; index += targetedGameRefreshConcurrency) {
+    const batch = gameIds.slice(index, index + targetedGameRefreshConcurrency)
+    const results = await Promise.allSettled(batch.map((gameId) => replaceGameEventsById(client, gameId)))
+    results.forEach((result, resultIndex) => {
+      if (result.status === 'rejected') {
+        console.error(`[Ingest] Could not refresh scoring events for live game ${batch[resultIndex]}`, result.reason)
+      }
+    })
+  }
+
+  return gameIds
 }
 
 export async function refreshGameById(config: IngestConfig, gameId: number): Promise<number> {
-  const { supabase, fetchEndpoint } = await createApiClient(config)
+  return refreshGameByIdWithClient(createApiClient(config), config.leagueId ?? 1, gameId)
+}
+
+async function refreshGameByIdWithClient(client: ApiClient, leagueId: number, gameId: number) {
+  const { supabase, fetchEndpoint } = client
   const payload = await fetchEndpoint<LiveGameApi>('/games', { id: gameId, timezone: scheduleTimezone })
-  const gameIds = await persistGamePayload(supabase, payload, config.leagueId ?? 1)
+  const gameIds = await persistGamePayload(supabase, payload, leagueId)
 
   if (!gameIds.includes(gameId)) {
     throw new Error(`Game ${gameId} was not returned by API-Sports.`)
   }
 
   return gameId
+}
+
+function getTargetedGameRefreshKey(config: IngestConfig, gameId: number) {
+  return [
+    config.supabaseUrl,
+    config.apiBaseUrl ?? defaultApiBaseUrl,
+    config.leagueId ?? 1,
+    gameId,
+  ].join('|')
+}
+
+function refreshTargetedGame(config: IngestConfig, client: ApiClient, gameId: number) {
+  const key = getTargetedGameRefreshKey(config, gameId)
+  const existing = targetedGameRefreshes.get(key)
+  if (existing) {
+    if (existing.completedAt == null) return existing.promise
+    if (Date.now() - existing.completedAt < targetedGameRefreshCooldownMs) return Promise.resolve(0)
+    targetedGameRefreshes.delete(key)
+  }
+
+  const entry: { completedAt: number | null; promise: Promise<number> } = {
+    completedAt: null,
+    promise: Promise.resolve(0),
+  }
+  entry.promise = refreshGameByIdWithClient(client, config.leagueId ?? 1, gameId)
+    .then((refreshedGameId) => {
+      entry.completedAt = Date.now()
+      return refreshedGameId
+    })
+    .catch((error: unknown) => {
+      if (targetedGameRefreshes.get(key) === entry) targetedGameRefreshes.delete(key)
+      throw error
+    })
+  targetedGameRefreshes.set(key, entry)
+  return entry.promise
+}
+
+export async function refreshGamesByIds(config: IngestConfig, gameIds: number[]) {
+  if (gameIds.some((gameId) => !Number.isInteger(gameId) || gameId <= 0)) {
+    throw new Error('gameIds must contain only positive integers.')
+  }
+
+  const uniqueGameIds = Array.from(new Set(gameIds))
+  const client = createApiClient(config)
+  let refreshedGames = 0
+
+  for (let index = 0; index < uniqueGameIds.length; index += targetedGameRefreshConcurrency) {
+    const batch = uniqueGameIds.slice(index, index + targetedGameRefreshConcurrency)
+    const results = await Promise.all(batch.map((gameId) => refreshTargetedGame(config, client, gameId)))
+    refreshedGames += results.filter((gameId) => gameId > 0).length
+  }
+
+  return refreshedGames
 }
 
 async function upsertTeams(config: IngestConfig, season: number) {
@@ -731,7 +880,7 @@ async function upsertGames(config: IngestConfig, season: number) {
     })
     .filter(Boolean) as GameUpsertRow[]
 
-  console.log(`[Ingest] Games endpoint returned ${payload.response.length} items; inserting ${rows.length} games`)
+  console.log(`[Ingest] Games endpoint returned ${payload.response.length} items; upserting ${rows.length} games`)
 
   if (!rows.length) return 0
   const { error } = await supabase.from('games').upsert(rows, { onConflict: 'id' })
@@ -750,7 +899,8 @@ export async function refreshSeasonGames(config: IngestConfig, season: number) {
 }
 
 async function upsertGameEvents(config: IngestConfig, season: number) {
-  const { supabase, fetchEndpointWithRetry } = await createApiClient(config)
+  const client = createApiClient(config)
+  const { supabase } = client
 
   // Fetch all non-scheduled game IDs for the season from the DB
   const { data: gameRows, error: fetchError } = await supabase
@@ -766,85 +916,39 @@ async function upsertGameEvents(config: IngestConfig, season: number) {
     return 0
   }
 
-  type GameEventsApi = {
-    game?: Dict
-    team?: Dict
-    player?: Dict
-    quarter?: unknown
-    time?: unknown
-    type?: unknown
-    comment?: unknown
-    scores?: { home?: { total?: unknown }; away?: { total?: unknown } }
-  }
-  type EventPlayerUpsertRow = {
-    id: number
-    name: string
-    image_url: string | null
-  }
-
-  const CONCURRENCY = 2
   let totalRows = 0
 
-  for (let i = 0; i < gameIds.length; i += CONCURRENCY) {
-    const batch = gameIds.slice(i, i + CONCURRENCY)
-    await Promise.all(
-      batch.map(async (gameId) => {
-        const payload = await fetchEndpointWithRetry<GameEventsApi>('/games/events', { id: gameId })
-        const eventPlayers = new Map<number, EventPlayerUpsertRow>()
-        const rows = payload.response
-          .map((item) => {
-            const teamId = toInt(item.team?.id)
-            if (!teamId) return null
-            const playerId = toInt(item.player?.id)
-
-            if (playerId) {
-              eventPlayers.set(playerId, {
-                id: playerId,
-                name: asString(item.player?.name) ?? `Player ${playerId}`,
-                image_url: asString(item.player?.image),
-              })
-            }
-
-            return {
-              game_id: gameId,
-              team_id: teamId,
-              player_id: playerId,
-              quarter: asString(item.quarter),
-              minute: asString(item.time),
-              event_type: asString(item.type),
-              comment: asString(item.comment),
-              score_home: toInt(item.scores?.home?.total),
-              score_away: toInt(item.scores?.away?.total),
-            }
-          })
-          .filter(Boolean) as Dict[]
-
-        if (!rows.length) return
-
-        if (eventPlayers.size) {
-          const { error: playerError } = await supabase
-            .from('players')
-            .upsert(Array.from(eventPlayers.values()), { onConflict: 'id' })
-          if (playerError) throw playerError
-        }
-
-        // Delete existing events for this game before re-inserting to handle re-runs
-        const { error: delError } = await supabase
-          .from('game_events')
-          .delete()
-          .eq('game_id', gameId)
-        if (delError) throw delError
-
-        const { error: insError } = await supabase.from('game_events').insert(rows)
-        if (insError) throw insError
-
-        totalRows += rows.length
-      }),
-    )
+  for (let index = 0; index < gameIds.length; index += targetedGameRefreshConcurrency) {
+    const batch = gameIds.slice(index, index + targetedGameRefreshConcurrency)
+    const rowCounts = await Promise.all(batch.map((gameId) => replaceGameEventsById(client, gameId)))
+    totalRows += rowCounts.reduce((sum, rowCount) => sum + rowCount, 0)
   }
 
   console.log(`[Ingest] Upserted game_events=${totalRows} across ${gameIds.length} games`)
   return totalRows
+}
+
+async function replaceGameEventsById(client: ApiClient, gameId: number) {
+  const payload = await client.fetchEndpointWithRetry<GameEventApi>('/games/events', { id: gameId })
+  const { players, rows } = mapGameEventRows(gameId, payload.response)
+  if (!rows.length) return 0
+
+  if (players.length) {
+    const { error: playerError } = await client.supabase
+      .from('players')
+      .upsert(players, { onConflict: 'id' })
+    if (playerError) throw playerError
+  }
+
+  const { error: deleteError } = await client.supabase
+    .from('game_events')
+    .delete()
+    .eq('game_id', gameId)
+  if (deleteError) throw deleteError
+
+  const { error: insertError } = await client.supabase.from('game_events').insert(rows)
+  if (insertError) throw insertError
+  return rows.length
 }
 
 async function upsertBookmakers(config: IngestConfig) {

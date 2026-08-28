@@ -1,8 +1,19 @@
-import type { GameRow } from '../types/nfl'
+import type { GameRow, LatestGameEventRow } from '../types/nfl'
 
 type GameStatus = Pick<GameRow, 'status_long' | 'status_short' | 'status_timer'>
 type GameSchedule = Pick<GameRow, 'game_date' | 'game_time'>
 type ScoredGame = Pick<GameRow, 'away_total' | 'home_total' | 'status_short'>
+type ScoringEvent = Pick<LatestGameEventRow, 'comment' | 'event_type' | 'minute' | 'quarter'>
+
+const eventPeriodLabels: Record<string, string> = {
+  first: 'Q1',
+  second: 'Q2',
+  third: 'Q3',
+  fourth: 'Q4',
+  overtime: 'OT',
+  ot: 'OT',
+  ot2: '2OT',
+}
 
 export function formatScheduleGameStatus(game: GameStatus) {
   if (game.status_short === 'FT') return 'Final'
@@ -54,6 +65,15 @@ export function formatValue(value: string | number | null | undefined) {
 
 export function formatScore(value: number | null | undefined) {
   return value == null ? '—' : value
+}
+
+export function formatScoringEventContext(event: ScoringEvent) {
+  const period = eventPeriodLabels[event.quarter.trim().toLowerCase()] ?? event.quarter
+  return [period, event.minute].filter(Boolean).join(' · ')
+}
+
+export function formatScoringEventDescription(event: ScoringEvent) {
+  return event.comment || event.event_type
 }
 
 export function isWinningTeam(game: ScoredGame, team: 'away' | 'home') {

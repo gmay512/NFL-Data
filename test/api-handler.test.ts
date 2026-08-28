@@ -42,6 +42,13 @@ describe('API handler contracts', () => {
     const statsResponse = await request('/api/refresh-game-stats', 'POST', { gameId: 1 })
     assert.equal(statsResponse.status, 400)
     assert.deepEqual(await statsResponse.json(), { error: 'Numeric gameId and teamId values are required.' })
+
+    const gameIdsResponse = await request('/api/refresh-season-games', 'POST', {
+      season: 2026,
+      gameIds: [1, 'invalid'],
+    })
+    assert.equal(gameIdsResponse.status, 400)
+    assert.deepEqual(await gameIdsResponse.json(), { error: 'gameIds must be an array of positive integers.' })
   })
 
   it('preserves API not-found and non-API pass-through behavior', async () => {

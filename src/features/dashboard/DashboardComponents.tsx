@@ -1,23 +1,28 @@
+import { memo } from 'react'
 import { Link } from 'react-router-dom'
 import {
   formatScheduleGameDate,
   formatScheduleGameStatus,
   formatScore,
+  formatScoringEventContext,
+  formatScoringEventDescription,
   isWinningTeam,
 } from '../../lib/game-format'
-import type { GameRow, GameTeamStatRow, TeamRow } from '../../types/nfl'
+import type { GameRow, GameTeamStatRow, LatestGameEventRow, TeamRow } from '../../types/nfl'
 
 function TeamMark({ team, fallback }: { team?: TeamRow; fallback: string }) {
   return <span className="team-mark">{team?.logo_url ? <img src={team.logo_url} alt="" /> : fallback}</span>
 }
 
-export function ScheduleGameCard({
+export const ScheduleGameCard = memo(function ScheduleGameCard({
   game,
   awayTeam,
   homeTeam,
   teamId,
   stats,
   dashboardPath,
+  isUpdated = false,
+  latestEvent,
 }: {
   game: GameRow
   awayTeam?: TeamRow
@@ -25,9 +30,11 @@ export function ScheduleGameCard({
   teamId?: number
   stats?: GameTeamStatRow
   dashboardPath: string
+  isUpdated?: boolean
+  latestEvent?: LatestGameEventRow
 }) {
   return (
-    <article className={`schedule-game ${teamId ? 'has-team-stats' : ''}`}>
+    <article className={`schedule-game ${teamId ? 'has-team-stats' : ''} ${isUpdated ? 'is-updated' : ''}`}>
       <Link className="schedule-game-details" to={`/games/${game.id}`} state={{ dashboardPath }}>
         <div className="schedule-game-meta">
           <span>{[game.stage, game.week, formatScheduleGameStatus(game)].filter(Boolean).join(' · ')}</span>
@@ -51,6 +58,15 @@ export function ScheduleGameCard({
             <b>{formatScore(game.home_total)}</b>
           </div>
         </div>
+        {latestEvent && (
+          <div className="live-game-event">
+            <div className="live-game-event-heading">
+              <span>Latest scoring play</span>
+              <small>{formatScoringEventContext(latestEvent)}</small>
+            </div>
+            <p>{formatScoringEventDescription(latestEvent)}</p>
+          </div>
+        )}
         <span className="game-chevron" aria-hidden="true">›</span>
       </Link>
       {teamId && (
@@ -68,7 +84,7 @@ export function ScheduleGameCard({
       )}
     </article>
   )
-}
+})
 
 export function StatusMessage({ title, message, error = false }: { title: string; message: string; error?: boolean }) {
   return (

@@ -43,8 +43,8 @@ export function refreshSeasonSchedule(season: number) {
   return postJson<RefreshSeasonScheduleResponse>('/api/refresh-season-schedule', { season })
 }
 
-export function refreshSeasonGames(season: number) {
-  return postJson<RefreshSeasonGamesResponse>('/api/refresh-season-games', { season })
+export function refreshSeasonGames(season: number, gameIds?: number[]) {
+  return postJson<RefreshSeasonGamesResponse>('/api/refresh-season-games', { season, gameIds })
 }
 
 export function refreshGame(gameId: number) {

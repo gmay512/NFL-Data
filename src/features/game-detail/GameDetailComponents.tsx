@@ -3,7 +3,10 @@ import { formatValue } from '../../lib/game-format'
 import {
   getPlayerStatCategory,
   getPlayerStatGroupOrder,
+  sortPlayerStatRows,
+  type PlayerStatSortColumn,
   type PlayerStatCategory,
+  type SortDirection,
 } from '../../lib/player-stats'
 import type { GamePlayerStatRow, GameTeamStatRow, PlayerRow, TeamRow } from '../../types/nfl'
 
@@ -14,6 +17,48 @@ const playerStatCategories: Array<{ id: PlayerStatCategory; label: string }> = [
   { id: 'defense', label: 'Defense' },
   { id: 'specialTeams', label: 'Special Teams' },
 ]
+
+type SortDescriptor = {
+  column: PlayerStatSortColumn
+  direction: SortDirection
+}
+
+function isSameSortColumn(left: PlayerStatSortColumn, right: PlayerStatSortColumn) {
+  if (left.type !== right.type) return false
+  if (left.type === 'player') return true
+  return right.type === 'stat' && left.statName === right.statName
+}
+
+function SortableHeading({
+  label,
+  column,
+  sort,
+  onSort,
+}: {
+  label: string
+  column: PlayerStatSortColumn
+  sort?: SortDescriptor
+  onSort: (column: PlayerStatSortColumn) => void
+}) {
+  const isActive = sort ? isSameSortColumn(sort.column, column) : false
+  const nextDirection: SortDirection = isActive && sort?.direction === 'ascending' ? 'descending' : 'ascending'
+
+  return (
+    <th aria-sort={isActive ? sort?.direction : undefined}>
+      <button
+        type="button"
+        className={`player-stat-sort-button ${isActive ? 'is-active' : ''}`}
+        aria-label={`Sort ${label} ${nextDirection}`}
+        onClick={() => onSort(column)}
+      >
+        <span>{label}</span>
+        <span className="player-stat-sort-indicator" aria-hidden="true">
+          {isActive ? (sort?.direction === 'ascending' ? '↑' : '↓') : '↕'}
+        </span>
+      </button>
+    </th>
+  )
+}
 
 export function GameDetailTabButton({
   id,
@@ -80,6 +125,7 @@ export function FullTeamStatsPanel({
   players: PlayerRow[]
 }) {
   const [selectedCategory, setSelectedCategory] = useState<PlayerStatCategory>('offense')
+  const [sortByGroup, setSortByGroup] = useState<Record<string, SortDescriptor>>({})
 
   const statGroups = useMemo(() => {
     const playerById = new Map(players.map((player) => [player.id, player]))
@@ -124,6 +170,7 @@ export function FullTeamStatsPanel({
         getPlayerStatGroupOrder(left.group, selectedCategory) - getPlayerStatGroupOrder(right.group, selectedCategory)
       return orderDifference || left.group.localeCompare(right.group)
     })
+
     .map((group) => {
       if (selectedCategory !== 'offense') return group
 
@@ -141,6 +188,17 @@ export function FullTeamStatsPanel({
         }),
       }
     })
+
+  const handleSort = (group: string, column: PlayerStatSortColumn) => {
+    setSortByGroup((current) => {
+      const activeSort = current[group]
+      const direction: SortDirection =
+        activeSort && isSameSortColumn(activeSort.column, column) && activeSort.direction === 'ascending'
+          ? 'descending'
+          : 'ascending'
+      return { ...current, [group]: { column, direction } }
+    })
+  }
 
   if (isLoading) {
     return <p className="stats-loading-message">Loading player statistics from API-Sports…</p>
@@ -175,32 +233,50 @@ export function FullTeamStatsPanel({
         ))}
       </div>
       <div className="player-stat-tables">
-        {categoryStatGroups.map((group) => (
-          <section key={group.group} className="player-stat-table-section" aria-label={`${group.group} player statistics`}>
-            <h3>{group.group}</h3>
-            <div className="table-wrap">
-              <table className="player-stat-table">
-                <thead>
-                  <tr>
-                    <th>Player</th>
-                    {group.statNames.map((statName) => <th key={statName}>{statName}</th>)}
-                  </tr>
-                </thead>
-                <tbody>
-                  {group.rows.map((row) => (
-                    <tr key={row.playerId}>
-                      <th scope="row">
-                        {row.playerName}
-                        {row.position && <small>{row.position}</small>}
-                      </th>
-                      {group.statNames.map((statName) => <td key={statName}>{formatValue(row.stats.get(statName))}</td>)}
+        {categoryStatGroups.map((group) => {
+          const sort = sortByGroup[group.group]
+          const rows = sort ? sortPlayerStatRows(group.rows, sort.column, sort.direction) : group.rows
+
+          return (
+            <section key={group.group} className="player-stat-table-section" aria-label={`${group.group} player statistics`}>
+              <h3>{group.group}</h3>
+              <div className="table-wrap">
+                <table className="player-stat-table">
+                  <thead>
+                    <tr>
+                      <SortableHeading
+                        label="Player"
+                        column={{ type: 'player' }}
+                        sort={sort}
+                        onSort={(column) => handleSort(group.group, column)}
+                      />
+                      {group.statNames.map((statName) => (
+                        <SortableHeading
+                          key={statName}
+                          label={statName}
+                          column={{ type: 'stat', statName }}
+                          sort={sort}
+                          onSort={(column) => handleSort(group.group, column)}
+                        />
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        ))}
+                  </thead>
+                  <tbody>
+                    {rows.map((row) => (
+                      <tr key={row.playerId}>
+                        <th scope="row">
+                          {row.playerName}
+                          {row.position && <small>{row.position}</small>}
+                        </th>
+                        {group.statNames.map((statName) => <td key={statName}>{formatValue(row.stats.get(statName))}</td>)}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )
+        })}
         {categoryStatGroups.length === 0 && (
           <p className="player-stat-category-empty">
             No {selectedCategory === 'specialTeams' ? 'special teams' : selectedCategory} statistics are available for this team.
@@ -234,7 +310,7 @@ export function GameStatsTable({
   ]
 
   return (
-    <div className="boxscore-table-wrap">
+    <div className="boxscore-table-wrap game-stats-table-wrap">
       <table className="boxscore-table game-stats-table">
         <colgroup>
           <col className="game-stats-team-column" />

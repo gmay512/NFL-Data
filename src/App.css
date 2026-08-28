@@ -166,6 +166,24 @@
   background: var(--surface);
   overflow: hidden;
 }
+@keyframes live-game-update {
+  0% {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    box-shadow: 0 0 0 3px var(--accent-shadow);
+  }
+  35% {
+    border-color: var(--accent-hover-border);
+    background: var(--accent-soft);
+    box-shadow: 0 6px 20px var(--accent-shadow);
+  }
+  100% {
+    border-color: var(--border);
+    background: var(--surface);
+    box-shadow: none;
+  }
+}
+.schedule-game.is-updated { animation: live-game-update 4s ease-out both; }
 .schedule-game-details {
   position: relative;
   display: grid;
@@ -188,6 +206,11 @@
 .schedule-team-name span { color: var(--muted-text); font-size: .62rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .schedule-team strong { font-size: 0.91rem; }
 .schedule-team b { min-width: 24px; color: var(--text); font-size: 1.12rem; text-align: center; }
+.live-game-event { display: grid; gap: 5px; margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--border); }
+.live-game-event-heading { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.live-game-event-heading span { color: var(--accent-dark); font-size: .65rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.live-game-event-heading small { color: var(--muted-text); font-size: .7rem; font-weight: 800; white-space: nowrap; }
+.live-game-event p { margin: 0; padding-right: 5px; color: var(--muted-text); font-size: .78rem; font-weight: 700; line-height: 1.4; }
 .team-mark {
   display: inline-grid;
   width: 32px;
@@ -301,15 +324,16 @@
   font-weight: 700;
 }
 .stats-loading-message.is-error { background: var(--error-soft); color: var(--live-dark); }
+.game-stats-table-wrap { width: 100%; max-width: 720px; margin-inline: auto; }
 .game-stats-table { table-layout: fixed; }
 .game-stats-team-column { width: 28%; }
 .game-stats-label-column { width: 44%; }
 .game-stats-table th:first-child,
-.game-stats-table td:first-child { text-align: left; }
+.game-stats-table td:first-child { text-align: right; }
 .game-stats-table th:nth-child(2),
 .game-stats-table td:nth-child(2) { text-align: center; }
 .game-stats-table th:last-child,
-.game-stats-table td:last-child { text-align: right; }
+.game-stats-table td:last-child { text-align: left; }
 .game-stats-table td:first-child { font-weight: 800; color: var(--accent-dark); }
 .game-stats-table td:last-child { font-weight: 800; color: var(--text); }
 .game-stats-table tbody th { text-align: center; color: var(--muted-text); }
@@ -335,6 +359,29 @@
 .player-stat-table th,
 .player-stat-table td { padding: 10px 12px; border: 1px solid var(--border); text-align: right; }
 .player-stat-table thead th { background: var(--surface-muted); color: var(--text); font-size: .73rem; }
+.player-stat-sort-button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-align: inherit;
+  text-transform: inherit;
+}
+.player-stat-table th:first-child .player-stat-sort-button { justify-content: flex-start; }
+.player-stat-sort-button:hover,
+.player-stat-sort-button:focus-visible,
+.player-stat-sort-button.is-active { color: var(--accent-dark); }
+.player-stat-sort-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+.player-stat-sort-indicator { min-width: 1em; font-size: .85rem; line-height: 1; }
 .player-stat-table th:first-child { min-width: 190px; text-align: left; }
 .player-stat-table tbody th { color: var(--text); font-size: .84rem; font-weight: 800; letter-spacing: 0; text-transform: none; }
 .player-stat-table tbody tr:nth-child(even) { background: var(--subtle-fill); }
@@ -414,6 +461,7 @@
   .schedule-team { grid-template-columns: 32px minmax(0, 1fr) auto; gap: 7px; }
   .schedule-team-home { justify-self: stretch; }
   .schedule-team strong { font-size: .8rem; }
+  .live-game-event-heading { align-items: flex-start; flex-direction: column; gap: 2px; }
   .team-game-stat-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .game-chevron { display: none; }
   .detail-scoreboard, .team-game-header, .roster-grid, .player-stats-explorer { grid-template-columns: 1fr; }
@@ -423,4 +471,13 @@
   .detail-score-divider { width: 100%; height: 1px; }
   .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .detail-panel, .panel-wide { padding: 18px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .schedule-game.is-updated {
+    animation: none;
+    border-color: var(--accent-hover-border);
+    background: var(--accent-soft);
+    box-shadow: 0 0 0 2px var(--accent-shadow);
+  }
 }
