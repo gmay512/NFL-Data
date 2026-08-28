@@ -1,10 +1,23 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import type { AvailableSeason, IngestSummary } from '../src/api/contracts'
+
+export type { AvailableSeason, IngestSummary } from '../src/api/contracts'
 
 type Dict = Record<string, unknown>
 
 type EndpointResponse<T> = {
   response: T[]
   errors?: unknown
+}
+
+type ApiClient = {
+  supabase: SupabaseClient
+  fetchEndpoint: <T>(path: string, params: Record<string, string | number>) => Promise<EndpointResponse<T>>
+  fetchEndpointWithRetry: <T>(
+    path: string,
+    params: Record<string, string | number>,
+    maxRetries?: number,
+  ) => Promise<EndpointResponse<T>>
 }
 
 type GameTeamStatsApi = Dict & { game?: Dict; team?: Dict; statistics?: Dict | Dict[] }
@@ -64,31 +77,6 @@ export type IngestConfig = {
   leagueId?: number
 }
 
-export type IngestSummary = {
-  season: number
-  leagues: number
-  leagueSeasons: number
-  teams: number
-  players: number
-  games: number
-  gameEvents: number
-  injuries: number
-  playerSeasonStats: number
-  standings: number
-  gameTeamStats: number
-  gamePlayerStats: number
-  bookmakers: number
-  betTypes: number
-  odds: number
-}
-
-export type AvailableSeason = {
-  season: number
-  current: boolean
-  startDate: string | null
-  endDate: string | null
-}
-
 type LiveGameApi = {
   game?: Dict
   league?: Dict
@@ -120,6 +108,7 @@ type GamePlayerStatUpsertRow = {
 const defaultApiBaseUrl = 'https://v1.american-football.api-sports.io'
 const defaultApiHost = 'v1.american-football.api-sports.io'
 const scheduleTimezone = 'America/New_York'
+const apiClients = new WeakMap<IngestConfig, ApiClient>()
 
 function toInt(value: unknown): number | null {
   if (value == null || value === '') return null
@@ -294,7 +283,10 @@ function mapGamePlayerStats(payload: EndpointResponse<GamePlayerStatsApi>, fallb
   return { players: Array.from(players.values()), rows }
 }
 
-async function createApiClient(config: IngestConfig) {
+function createApiClient(config: IngestConfig): ApiClient {
+  const cachedClient = apiClients.get(config)
+  if (cachedClient) return cachedClient
+
   if (!config.supabaseUrl || !config.serviceRoleKey) {
     throw new Error('Missing env vars. Required: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY')
   }
@@ -359,7 +351,9 @@ async function createApiClient(config: IngestConfig) {
     throw lastError
   }
 
-  return { supabase, fetchEndpoint, fetchEndpointWithRetry }
+  const client = { supabase, fetchEndpoint, fetchEndpointWithRetry }
+  apiClients.set(config, client)
+  return client
 }
 
 export async function fetchAvailableSeasons(config: IngestConfig): Promise<AvailableSeason[]> {
@@ -565,7 +559,7 @@ async function upsertTeams(config: IngestConfig, season: number) {
       country_flag_url: string | null
     } => Boolean(row))
 
-  console.log(`[Ingest] Teams endpoint returned ${payload.response.length} items, inserting ${rows.length} teams:`, rows.map((r) => r.id).sort((a, b) => a - b))
+  console.log(`[Ingest] Teams endpoint returned ${payload.response.length} items; inserting ${rows.length} teams`)
 
   if (!rows.length) return 0
   const { error } = await supabase.from('teams').upsert(rows, { onConflict: 'id' })
@@ -737,12 +731,7 @@ async function upsertGames(config: IngestConfig, season: number) {
     })
     .filter(Boolean) as GameUpsertRow[]
 
-  const teamIds = new Set<number>()
-  rows.forEach((row) => {
-    if (row.home_team_id) teamIds.add(row.home_team_id)
-    if (row.away_team_id) teamIds.add(row.away_team_id)
-  })
-  console.log(`[Ingest] Games endpoint returned ${payload.response.length} items, inserting ${rows.length} games with team IDs:`, Array.from(teamIds).sort((a, b) => a - b))
+  console.log(`[Ingest] Games endpoint returned ${payload.response.length} items; inserting ${rows.length} games`)
 
   if (!rows.length) return 0
   const { error } = await supabase.from('games').upsert(rows, { onConflict: 'id' })
@@ -954,11 +943,8 @@ async function upsertOdds(config: IngestConfig, season: number) {
 
   if (!rows.length) return 0
 
-  // Delete existing odds for these games before reinserting (handle re-runs)
-  for (const gameId of gameIds) {
-    const { error: delError } = await supabase.from('odds').delete().eq('game_id', gameId)
-    if (delError) throw delError
-  }
+  const { error: deleteError } = await supabase.from('odds').delete().in('game_id', Array.from(gameIds))
+  if (deleteError) throw deleteError
 
   const { error } = await supabase.from('odds').insert(rows)
   if (error) throw error

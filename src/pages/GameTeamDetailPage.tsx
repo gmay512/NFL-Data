@@ -1,21 +1,23 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useLocation, useParams } from 'react-router-dom'
+import { refreshGame, refreshGameStats } from '../api/app-api'
+import {
+  getGame,
+  getGamePlayerStats,
+  getGameTeamStats,
+  getPlayersByIds,
+  getTeamGameOverview,
+} from '../data/nfl-repository'
+import { RosterBucket } from '../features/team-detail/TeamDetailComponents'
+import { formatDetailGameStatus, formatValue } from '../lib/game-format'
 import { hasSupabaseEnv, supabase } from '../lib/supabase'
 import { shouldRefreshGame } from '../lib/game-sync'
+import {
+  getPlayerUnit,
+  groupPlayerStats,
+  type PlayerUnit,
+} from '../lib/player-stats'
 import type { GamePlayerStatRow, GameRow, GameTeamStatRow, PlayerRow, TeamRow } from '../types/nfl'
-
-type PlayerStatsBucket = {
-  offense: GroupedStats[]
-  defense: GroupedStats[]
-  specialTeams: GroupedStats[]
-}
-
-type GroupedStats = {
-  group: string
-  entries: Array<{ statName: string; statValue: string | null }>
-}
-
-type PlayerUnit = keyof PlayerStatsBucket
 
 type TeamPageState = {
   game: GameRow | null
@@ -35,80 +37,11 @@ const INITIAL_STATE: TeamPageState = {
   players: [],
 }
 
-const offenseKeywords = ['passing', 'rushing', 'receiving', 'offense', 'offence']
-const defenseKeywords = ['defense', 'defence', 'tackle', 'interception', 'sack', 'coverage', 'fumble']
-const specialTeamsKeywords = ['special', 'kicking', 'kick', 'punt', 'return', 'field goal']
-
 const playerUnits: Array<{ id: PlayerUnit; label: string }> = [
   { id: 'offense', label: 'Offense' },
   { id: 'defense', label: 'Defense' },
   { id: 'specialTeams', label: 'Special Teams' },
 ]
-
-function formatGameStatus(game: GameRow | null) {
-  if (!game) return 'Loading'
-  if (game.status_short === 'FT') return 'Final'
-  if (game.status_short === 'NS') return 'Scheduled'
-  if (game.status_short === 'PST') return 'Postponed'
-  if (game.status_short === 'CANC') return 'Cancelled'
-  if (game.status_short && game.status_timer) return `${game.status_short} ${game.status_timer}`
-
-  return game.status_long || game.status_short || 'Unknown status'
-}
-
-function renderValue(value: string | number | null | undefined) {
-  if (value == null || value === '') return '—'
-  return String(value)
-}
-
-function classifyGroup(group: string) {
-  const normalized = group.trim().toLowerCase()
-  if (offenseKeywords.some((keyword) => normalized.includes(keyword))) return 'offense' as const
-  if (defenseKeywords.some((keyword) => normalized.includes(keyword))) return 'defense' as const
-  if (specialTeamsKeywords.some((keyword) => normalized.includes(keyword))) return 'specialTeams' as const
-  return 'specialTeams' as const
-}
-
-function getPlayerUnit(positionGroup: string | null | undefined): PlayerUnit | null {
-  const normalized = positionGroup?.trim().toLowerCase()
-  if (normalized === 'offense' || normalized === 'offence') return 'offense'
-  if (normalized === 'defense' || normalized === 'defence') return 'defense'
-  if (normalized === 'special teams' || normalized === 'special team') return 'specialTeams'
-  return null
-}
-
-function groupPlayerStats(rows: GamePlayerStatRow[]): PlayerStatsBucket {
-  const groupedByBucket: Record<PlayerUnit, Map<string, GroupedStats>> = {
-    offense: new Map(),
-    defense: new Map(),
-    specialTeams: new Map(),
-  }
-
-  for (const row of rows) {
-    const group = row.stat_group || 'Unknown'
-    const bucket = classifyGroup(group)
-    const current = groupedByBucket[bucket].get(group)
-
-    if (current) {
-      current.entries.push({ statName: row.stat_name, statValue: row.stat_value })
-      continue
-    }
-
-    groupedByBucket[bucket].set(group, {
-      group,
-      entries: [{ statName: row.stat_name, statValue: row.stat_value }],
-    })
-  }
-
-  const toSortedArray = (map: Map<string, GroupedStats>) =>
-    Array.from(map.values()).sort((left, right) => left.group.localeCompare(right.group))
-
-  return {
-    offense: toSortedArray(groupedByBucket.offense),
-    defense: toSortedArray(groupedByBucket.defense),
-    specialTeams: toSortedArray(groupedByBucket.specialTeams),
-  }
-}
 
 export function GameTeamDetailPage() {
   const { gameId, teamId } = useParams()
@@ -143,40 +76,26 @@ export function GameTeamDetailPage() {
         return
       }
 
-      const [gameResult, teamsResult, teamStatsResult, playerStatsResult] = await Promise.all([
-        supabase.from('games').select('*').eq('id', gameIdValue).maybeSingle(),
-        supabase.from('teams').select('id, name, logo_url, created_at').order('id', { ascending: true }),
-        supabase.from('game_team_stats').select('*').eq('game_id', gameIdValue).eq('team_id', teamIdValue).maybeSingle(),
-        supabase.from('game_player_stats').select('*').eq('game_id', gameIdValue).eq('team_id', teamIdValue),
-      ])
-
-      const firstError = [gameResult, teamsResult, teamStatsResult, playerStatsResult].find((result) => result.error)?.error
-      if (firstError) {
-        setError(firstError.message)
+      let overview
+      try {
+        overview = await getTeamGameOverview(gameIdValue, teamIdValue)
+      } catch (overviewError) {
+        setError(overviewError instanceof Error ? overviewError.message : 'Could not load team details.')
         setIsLoading(false)
         setIsLoadingApiStats(false)
         return
       }
 
-      let game = (gameResult.data ?? null) as GameRow | null
-      const teams = (teamsResult.data ?? []) as TeamRow[]
-      let teamStats = (teamStatsResult.data ?? null) as GameTeamStatRow | null
-      let playerStats = (playerStatsResult.data ?? []) as GamePlayerStatRow[]
+      let game = overview.game
+      const teams = overview.teams
+      let teamStats = overview.teamStats
+      let playerStats = overview.playerStats
       const refreshCurrentGame = refreshFromApi && game ? shouldRefreshGame(game) : false
 
       if (refreshCurrentGame) {
         try {
-          const response = await fetch('/api/refresh-game', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ gameId: gameIdValue }),
-          })
-          const payload = (await response.json()) as { error?: string }
-          if (!response.ok) throw new Error(payload.error ?? 'Failed to refresh game.')
-
-          const refreshedGameResult = await supabase.from('games').select('*').eq('id', gameIdValue).maybeSingle()
-          if (refreshedGameResult.error) throw refreshedGameResult.error
-          game = (refreshedGameResult.data ?? null) as GameRow | null
+          await refreshGame(gameIdValue)
+          game = await getGame(gameIdValue)
         } catch (gameRefreshError) {
           setError(gameRefreshError instanceof Error ? gameRefreshError.message : 'Failed to refresh game.')
         }
@@ -187,25 +106,16 @@ export function GameTeamDetailPage() {
       if (game && (loadTeamStats || loadPlayerStats)) {
         setIsLoadingApiStats(true)
         try {
-          const response = await fetch('/api/refresh-game-stats', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ gameId: gameIdValue, teamId: teamIdValue, loadTeamStats, loadPlayerStats }),
+          await refreshGameStats(gameIdValue, teamIdValue, {
+            loadTeamStats,
+            loadPlayerStats,
           })
-          const payload = (await response.json()) as { error?: string }
-          if (!response.ok) {
-            throw new Error(payload.error ?? 'Failed to load game statistics.')
-          }
-
-          const [refreshedTeamStatsResult, refreshedPlayerStatsResult] = await Promise.all([
-            supabase.from('game_team_stats').select('*').eq('game_id', gameIdValue).eq('team_id', teamIdValue).maybeSingle(),
-            supabase.from('game_player_stats').select('*').eq('game_id', gameIdValue).eq('team_id', teamIdValue),
+          const [refreshedTeamStats, refreshedPlayerStats] = await Promise.all([
+            getGameTeamStats(gameIdValue, teamIdValue),
+            getGamePlayerStats(gameIdValue, teamIdValue),
           ])
-          const refreshError = [refreshedTeamStatsResult, refreshedPlayerStatsResult].find((result) => result.error)?.error
-          if (refreshError) throw refreshError
-
-          teamStats = (refreshedTeamStatsResult.data ?? null) as GameTeamStatRow | null
-          playerStats = (refreshedPlayerStatsResult.data ?? []) as GamePlayerStatRow[]
+          teamStats = refreshedTeamStats[0] ?? null
+          playerStats = refreshedPlayerStats
         } catch (statsLoadError) {
           setError(statsLoadError instanceof Error ? statsLoadError.message : 'Failed to load game statistics.')
         } finally {
@@ -216,19 +126,14 @@ export function GameTeamDetailPage() {
       const uniquePlayerIds = Array.from(new Set(playerStats.map((row) => row.player_id)))
       let players: PlayerRow[] = []
       if (uniquePlayerIds.length > 0) {
-        const playersResult = await supabase
-          .from('players')
-          .select('id, name, image_url, position_group, created_at')
-          .in('id', uniquePlayerIds)
-
-        if (playersResult.error) {
-          setError(playersResult.error.message)
+        try {
+          players = await getPlayersByIds(uniquePlayerIds)
+        } catch (playersError) {
+          setError(playersError instanceof Error ? playersError.message : 'Could not load players.')
           setIsLoading(false)
           setIsLoadingApiStats(false)
           return
         }
-
-        players = (playersResult.data ?? []) as PlayerRow[]
       }
 
       const team = teams.find((item) => item.id === teamIdValue) ?? null
@@ -255,7 +160,8 @@ export function GameTeamDetailPage() {
   )
 
   useEffect(() => {
-    void loadData(true)
+    const timeoutId = window.setTimeout(() => void loadData(true), 0)
+    return () => window.clearTimeout(timeoutId)
   }, [loadData])
 
   const handleRefresh = useCallback(async () => {
@@ -271,30 +177,11 @@ export function GameTeamDetailPage() {
     setError(null)
 
     try {
-      const gameResponse = await fetch('/api/refresh-game', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ gameId: gameIdValue }),
+      await refreshGame(gameIdValue)
+      await refreshGameStats(gameIdValue, Number(teamId), {
+        loadTeamStats: true,
+        loadPlayerStats: true,
       })
-      const gamePayload = (await gameResponse.json()) as { error?: string }
-      if (!gameResponse.ok) {
-        throw new Error(gamePayload.error ?? 'Failed to refresh game.')
-      }
-
-      const statsResponse = await fetch('/api/refresh-game-stats', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          gameId: gameIdValue,
-          teamId: Number(teamId),
-          loadTeamStats: true,
-          loadPlayerStats: true,
-        }),
-      })
-      const statsPayload = (await statsResponse.json()) as { error?: string }
-      if (!statsResponse.ok) {
-        throw new Error(statsPayload.error ?? 'Failed to refresh game statistics.')
-      }
 
       await loadData(false, false)
       setLastRefreshedAt(new Date())
@@ -342,13 +229,10 @@ export function GameTeamDetailPage() {
     [roster, selectedUnit],
   )
 
-  useEffect(() => {
-    if (!unitRoster.some((player) => player.playerId === selectedPlayerId)) {
-      setSelectedPlayerId(unitRoster[0]?.playerId ?? null)
-    }
-  }, [selectedPlayerId, unitRoster])
-
-  const selectedPlayer = unitRoster.find((player) => player.playerId === selectedPlayerId) ?? null
+  const selectedPlayer =
+    unitRoster.find((player) => player.playerId === selectedPlayerId) ??
+    unitRoster[0] ??
+    null
 
   const selectedTeamHref = gameId && teamId ? `/games/${gameId}/teams/${teamId}` : null
   const opponentHref = gameId && data.opponent ? `/games/${gameId}/teams/${data.opponent.id}` : null
@@ -382,7 +266,7 @@ export function GameTeamDetailPage() {
               Last refreshed {lastRefreshedAt.toLocaleString()}
             </span>
           )}
-          {data.game && <span className="detail-status-pill">{formatGameStatus(data.game)}</span>}
+          {data.game && <span className="detail-status-pill">{formatDetailGameStatus(data.game)}</span>}
         </div>
       </section>
 
@@ -467,35 +351,35 @@ export function GameTeamDetailPage() {
             <div className="detail-grid">
               <article className="stat-card detail-stat">
                 <p className="stat-label">Possession</p>
-                <p className="stat-value">{renderValue(data.teamStats?.possession)}</p>
+                <p className="stat-value">{formatValue(data.teamStats?.possession)}</p>
               </article>
               <article className="stat-card detail-stat">
                 <p className="stat-label">Total yards</p>
-                <p className="stat-value">{renderValue(data.teamStats?.yards_total)}</p>
+                <p className="stat-value">{formatValue(data.teamStats?.yards_total)}</p>
               </article>
               <article className="stat-card detail-stat">
                 <p className="stat-label">Passing yards</p>
-                <p className="stat-value">{renderValue(data.teamStats?.pass_yards)}</p>
+                <p className="stat-value">{formatValue(data.teamStats?.pass_yards)}</p>
               </article>
               <article className="stat-card detail-stat">
                 <p className="stat-label">Rushing yards</p>
-                <p className="stat-value">{renderValue(data.teamStats?.rush_yards)}</p>
+                <p className="stat-value">{formatValue(data.teamStats?.rush_yards)}</p>
               </article>
               <article className="stat-card detail-stat">
                 <p className="stat-label">Third down</p>
-                <p className="stat-value">{renderValue(data.teamStats?.third_down_eff)}</p>
+                <p className="stat-value">{formatValue(data.teamStats?.third_down_eff)}</p>
               </article>
               <article className="stat-card detail-stat">
                 <p className="stat-label">Fourth down</p>
-                <p className="stat-value">{renderValue(data.teamStats?.fourth_down_eff)}</p>
+                <p className="stat-value">{formatValue(data.teamStats?.fourth_down_eff)}</p>
               </article>
               <article className="stat-card detail-stat">
                 <p className="stat-label">Turnovers</p>
-                <p className="stat-value">{renderValue(data.teamStats?.turnovers_total)}</p>
+                <p className="stat-value">{formatValue(data.teamStats?.turnovers_total)}</p>
               </article>
               <article className="stat-card detail-stat">
                 <p className="stat-label">Points against</p>
-                <p className="stat-value">{renderValue(data.teamStats?.points_against)}</p>
+                <p className="stat-value">{formatValue(data.teamStats?.points_against)}</p>
               </article>
             </div>
 
@@ -582,30 +466,5 @@ export function GameTeamDetailPage() {
         )}
       </section>
     </main>
-  )
-}
-
-function RosterBucket({ title, groups }: { title: string; groups: GroupedStats[] }) {
-  if (!groups.length) return null
-
-  return (
-    <section className="roster-bucket" aria-label={`${title} stats`}>
-      <h4>{title}</h4>
-      <div className="roster-group-list">
-        {groups.map((group) => (
-          <div key={group.group} className="roster-group">
-            <p>{group.group}</p>
-            <ul>
-              {group.entries.map((entry) => (
-                <li key={`${group.group}-${entry.statName}`}>
-                  <span>{entry.statName}</span>
-                  <strong>{renderValue(entry.statValue)}</strong>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
-      </div>
-    </section>
   )
 }

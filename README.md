@@ -20,7 +20,7 @@ Vite + React app backed by a local Supabase stack running in Docker.
 - Public anon read policies plus service-role full-access policies for ingestion workflows.
 - Dashboard UI that queries these tables through the Supabase client.
 - Dashboard season picker that loads an API-Sports season on demand when it is not yet stored locally.
-- Basic API-Sports ingest script that upserts extended datasets from the CLI as a fallback.
+- Shared API-Sports ingestion engine used by both the app server and the CLI fallback.
 
 ## Local setup
 
@@ -92,7 +92,7 @@ If `--season` is omitted, the script falls back to `API_SPORTS_SEASON` from `.en
 
 The dashboard is the main ingest flow. It loads available seasons from `/seasons`; when the selected season has no local games, the dashboard offers a button that POSTs the season to the local dev server so the documented API-Sports endpoints are ingested with service-role credentials.
 
-The CLI ingest script remains available and currently calls and upserts data from:
+The CLI entry point is a thin adapter over the same ingestion engine used by the app server. It currently calls and upserts data from:
 
 - `/leagues` -> `leagues`, `league_seasons`
 - `/injuries` -> `injuries`

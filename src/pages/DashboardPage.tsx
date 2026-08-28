@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useLocation, useSearchParams } from 'react-router-dom'
+import { useLocation, useSearchParams } from 'react-router-dom'
+import { getAvailableSeasons, ingestSeason, refreshLiveGames as refreshLiveGamesFromApi, refreshSeasonGames } from '../api/app-api'
+import {
+  getDashboardMetadata,
+  getGamesByIds,
+  getSeasonGames,
+  getTeamStatsForGames,
+  getTeams,
+  invalidateReferenceData,
+} from '../data/nfl-repository'
+import { ScheduleGameCard, StatusMessage } from '../features/dashboard/DashboardComponents'
 import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import { hasSupabaseEnv, supabase } from '../lib/supabase'
 import { shouldRefreshGame } from '../lib/game-sync'
@@ -21,51 +31,6 @@ function getWeekLabel(week: string) {
   if (weekLabel === UNASSIGNED_WEEK) return stage
   if (!weekLabel) return stage
   return `${stage} · ${weekLabel}`
-}
-
-function getGameStatus(game: GameRow) {
-  if (game.status_short === 'FT') return 'Final'
-  if (game.status_short === 'NS') return 'Scheduled'
-  if (game.status_short === 'HT') return 'Half time'
-  if (game.status_short && game.status_timer) return `${game.status_short} ${game.status_timer}`
-  return game.status_long || game.status_short || 'Scheduled'
-}
-
-function isWinningTeam(game: GameRow, team: 'away' | 'home') {
-  if (!['FT', 'AOT'].includes(game.status_short ?? '')) return false
-  if (game.away_total == null || game.home_total == null || game.away_total === game.home_total) return false
-
-  return team === 'away' ? game.away_total > game.home_total : game.home_total > game.away_total
-}
-
-function getGameDate(game: GameRow) {
-  if (!game.game_date) return 'Date pending'
-
-  const [year, month, day] = game.game_date.split('-').map(Number)
-  const date = new Date(year, month - 1, day)
-  const formattedDate = Number.isNaN(date.getTime())
-    ? game.game_date
-    : new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).format(date)
-
-  if (!game.game_time) return formattedDate
-
-  const [hours, minutes] = game.game_time.split(':').map(Number)
-  if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return formattedDate
-
-  const meridiem = hours >= 12 ? 'PM' : 'AM'
-  const formattedTime = `${hours % 12 || 12}:${String(minutes).padStart(2, '0')} ${meridiem}`
-  const timeZoneAbbreviation = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    timeZoneName: 'short',
-  })
-    .formatToParts(new Date(Date.UTC(year, month - 1, day, 12)))
-    .find((part) => part.type === 'timeZoneName')?.value ?? 'ET'
-
-  return `${formattedDate} · ${formattedTime} ${timeZoneAbbreviation}`
-}
-
-function renderScore(score: number | null | undefined) {
-  return score == null ? '—' : score
 }
 
 export function DashboardPage() {
@@ -98,30 +63,24 @@ export function DashboardPage() {
         return
       }
 
-      const [seasonsResult, teamsResult] = await Promise.all([
-        supabase.from('league_seasons').select('season_year, is_current').order('season_year', { ascending: false }),
-        supabase.from('teams').select('*').order('name', { ascending: true }),
-      ])
-      const firstError = [seasonsResult, teamsResult].find((result) => result.error)?.error
-
-      if (firstError) {
-        setError(firstError.message)
+      let metadata
+      try {
+        metadata = await getDashboardMetadata()
+      } catch (metadataError) {
+        setError(metadataError instanceof Error ? metadataError.message : 'Could not load dashboard metadata.')
         setIsLoading(false)
         return
       }
 
-      const seasonRows = (seasonsResult.data ?? []) as LeagueSeasonRow[]
+      const seasonRows = metadata.seasons as LeagueSeasonRow[]
       const localSeasons = seasonRows
         .map((row) => ({ season: row.season_year, current: row.is_current }))
         .filter((season, index, all) => all.findIndex((candidate) => candidate.season === season.season) === index)
 
       let apiSeasons: SeasonOption[] = []
       try {
-        const response = await fetch('/api/seasons')
-        const payload = (await response.json()) as { seasons?: Array<{ season: number; current: boolean }> }
-        if (response.ok) {
-          apiSeasons = payload.seasons ?? []
-        }
+        const payload = await getAvailableSeasons()
+        apiSeasons = payload.seasons
       } catch {
         // Local season metadata remains available when the API is not configured.
       }
@@ -133,7 +92,7 @@ export function DashboardPage() {
       const availableSeasons = Array.from(seasonsByYear.values()).sort((left, right) => right.season - left.season)
 
       setSeasons(availableSeasons)
-      setTeams((teamsResult.data ?? []) as TeamRow[])
+      setTeams(metadata.teams)
       setSelectedSeason((current) => current || String((availableSeasons.find((season) => season.current) ?? availableSeasons[0])?.season ?? ''))
       setIsLoading(false)
     }
@@ -146,7 +105,6 @@ export function DashboardPage() {
 
     const loadSeasonGames = async () => {
       if (!supabase || !selectedSeason || (mode !== 'season' && mode !== 'team')) return
-      const client = supabase
       if (mode === 'team' && !selectedTeamId) {
         if (!cancelled) {
           setGames([])
@@ -159,40 +117,16 @@ export function DashboardPage() {
       setIsLoading(true)
       setError(null)
 
-      const fetchGames = async () => {
-        let gamesQuery = client
-          .from('games')
-          .select('*')
-          .eq('season', Number(selectedSeason))
-          .order('game_timestamp', { ascending: true })
-
-        if (mode === 'team' && selectedTeamId) {
-          gamesQuery = gamesQuery.or(`home_team_id.eq.${selectedTeamId},away_team_id.eq.${selectedTeamId}`)
-        }
-
-        const result = await gamesQuery
-        if (result.error) throw result.error
-        return (result.data ?? []) as GameRow[]
-      }
+      const fetchGames = () => getSeasonGames(
+        Number(selectedSeason),
+        mode === 'team' && selectedTeamId ? Number(selectedTeamId) : undefined,
+      )
 
       try {
         let loadedGames = await fetchGames()
-        const visibleGames =
-          mode === 'season' && selectedWeek
-            ? loadedGames.filter((game) => getWeekKey(game) === selectedWeek)
-            : mode === 'team'
-              ? loadedGames
-              : []
-
-        if (visibleGames.some((game) => shouldRefreshGame(game))) {
+        if (loadedGames.some((game) => shouldRefreshGame(game))) {
           try {
-            const response = await fetch('/api/refresh-season-games', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ season: Number(selectedSeason) }),
-            })
-            const payload = (await response.json()) as { error?: string }
-            if (!response.ok) throw new Error(payload.error ?? 'Could not refresh game scores.')
+            await refreshSeasonGames(Number(selectedSeason))
             loadedGames = await fetchGames()
           } catch (refreshError) {
             if (!cancelled) {
@@ -205,18 +139,21 @@ export function DashboardPage() {
         setGames(loadedGames)
 
         if (mode === 'team' && selectedTeamId && loadedGames.length > 0) {
-          const { data: statsData, error: statsError } = await client
-            .from('game_team_stats')
-            .select('*')
-            .eq('team_id', Number(selectedTeamId))
-            .in('game_id', loadedGames.map((game) => game.id))
+          let statsData: GameTeamStatRow[]
+          let statsError: unknown
+          try {
+            statsData = await getTeamStatsForGames(Number(selectedTeamId), loadedGames.map((game) => game.id))
+          } catch (loadStatsError) {
+            statsData = []
+            statsError = loadStatsError
+          }
           if (cancelled) return
           if (statsError) {
-            setError(statsError.message)
+            setError(statsError instanceof Error ? statsError.message : 'Could not load team statistics.')
             setTeamGameStats({})
           } else {
             setTeamGameStats(
-              Object.fromEntries(((statsData ?? []) as GameTeamStatRow[]).map((stats) => [stats.game_id, stats])),
+              Object.fromEntries(statsData.map((stats) => [stats.game_id, stats])),
             )
           }
         } else {
@@ -235,7 +172,7 @@ export function DashboardPage() {
     return () => {
       cancelled = true
     }
-  }, [mode, reloadKey, selectedSeason, selectedTeamId, selectedWeek])
+  }, [mode, reloadKey, selectedSeason, selectedTeamId])
 
   const loadSeason = async () => {
     if (!supabase || !selectedSeason) return
@@ -244,18 +181,9 @@ export function DashboardPage() {
     setError(null)
     setLoadMessage(null)
     try {
-      const response = await fetch('/api/ingest-season', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ season: Number(selectedSeason) }),
-      })
-      const payload = (await response.json()) as { games?: number; error?: string }
-      if (!response.ok) throw new Error(payload.error ?? 'Could not load this season.')
-
-      const { data: updatedTeams, error: teamsError } = await supabase.from('teams').select('*').order('name', { ascending: true })
-      if (teamsError) throw teamsError
-
-      setTeams((updatedTeams ?? []) as TeamRow[])
+      const payload = await ingestSeason(Number(selectedSeason))
+      invalidateReferenceData()
+      setTeams(await getTeams())
       setLoadMessage(`Loaded ${payload.games ?? 0} games for the ${selectedSeason} season.`)
       setReloadKey((key) => key + 1)
     } catch (loadError) {
@@ -273,9 +201,7 @@ export function DashboardPage() {
     setIsLoading(true)
     setError(null)
     try {
-      const response = await fetch('/api/live-games', { method: 'POST' })
-      const payload = (await response.json()) as { gameIds?: number[]; error?: string }
-      if (!response.ok) throw new Error(payload.error ?? 'Could not refresh live games.')
+      const payload = await refreshLiveGamesFromApi()
       if (requestId !== liveRequestId.current) return
 
       const gameIds = payload.gameIds ?? []
@@ -286,11 +212,10 @@ export function DashboardPage() {
         return
       }
 
-      const { data, error: gamesError } = await supabase.from('games').select('*').in('id', gameIds)
-      if (gamesError) throw gamesError
+      const data = await getGamesByIds(gameIds)
       if (requestId !== liveRequestId.current) return
 
-      setGames((data ?? []) as GameRow[])
+      setGames(data)
       setSelectedWeek('')
       setLastLiveCheckedAt(new Date())
     } catch (liveError) {
@@ -320,11 +245,7 @@ export function DashboardPage() {
   const teamById = useMemo(() => Object.fromEntries(teams.map((team) => [team.id, team])) as Record<number, TeamRow>, [teams])
   const selectedTeam = selectedTeamId ? teamById[Number(selectedTeamId)] : undefined
   const weeks = useMemo(() => Array.from(new Set(games.map(getWeekKey))), [games])
-
-  useEffect(() => {
-    if (mode !== 'season' || isLoading || weeks.length === 0) return
-    setSelectedWeek((week) => (weeks.includes(week) ? week : (weeks[0] ?? '')))
-  }, [isLoading, mode, weeks])
+  const activeWeek = weeks.includes(selectedWeek) ? selectedWeek : (weeks[0] ?? '')
 
   useEffect(() => {
     const nextSearchParams = new URLSearchParams()
@@ -334,18 +255,18 @@ export function DashboardPage() {
     } else if (mode === 'team') {
       nextSearchParams.set('view', 'team')
       if (selectedTeamId) nextSearchParams.set('team', selectedTeamId)
-    } else if (selectedWeek) {
-      nextSearchParams.set('week', selectedWeek)
+    } else if (activeWeek) {
+      nextSearchParams.set('week', activeWeek)
     }
 
     if (nextSearchParams.toString() !== searchParams.toString()) {
       setSearchParams(nextSearchParams, { replace: true })
     }
-  }, [mode, searchParams, selectedSeason, selectedTeamId, selectedWeek, setSearchParams])
+  }, [activeWeek, mode, searchParams, selectedSeason, selectedTeamId, setSearchParams])
 
   const displayedGames = useMemo(
-    () => (mode === 'season' ? games.filter((game) => getWeekKey(game) === selectedWeek) : games),
-    [games, mode, selectedWeek],
+    () => (mode === 'season' ? games.filter((game) => getWeekKey(game) === activeWeek) : games),
+    [activeWeek, games, mode],
   )
   const selectedSeasonLabel = seasons.find((season) => String(season.season) === selectedSeason)?.season
   const dashboardPath = `${location.pathname}${location.search}`
@@ -445,7 +366,7 @@ export function DashboardPage() {
               {weeks.map((week) => {
                 const gameCount = games.filter((game) => getWeekKey(game) === week).length
                 return (
-                  <button key={week} className={`week-button ${selectedWeek === week ? 'is-active' : ''}`} type="button" onClick={() => setSelectedWeek(week)}>
+                  <button key={week} className={`week-button ${activeWeek === week ? 'is-active' : ''}`} type="button" onClick={() => setSelectedWeek(week)}>
                     <span>{getWeekLabel(week)}</span>
                     <small>{gameCount}</small>
                   </button>
@@ -468,7 +389,7 @@ export function DashboardPage() {
           <div className="games-panel-header">
             <div>
               <p className="eyebrow">{mode === 'live' ? 'Live scoreboard' : mode === 'team' ? 'Team results' : 'Games'}</p>
-              <h2>{mode === 'live' ? 'In progress' : mode === 'team' ? `${selectedSeasonLabel ?? ''} season` : getWeekLabel(selectedWeek || UNASSIGNED_WEEK)}</h2>
+              <h2>{mode === 'live' ? 'In progress' : mode === 'team' ? `${selectedSeasonLabel ?? ''} season` : getWeekLabel(activeWeek || UNASSIGNED_WEEK)}</h2>
             </div>
             <span>{displayedGames.length} {displayedGames.length === 1 ? 'game' : 'games'}</span>
           </div>
@@ -525,77 +446,5 @@ export function DashboardPage() {
         </div>
       </section>
     </main>
-  )
-}
-
-function TeamMark({ team, fallback }: { team?: TeamRow; fallback: string }) {
-  return <span className="team-mark">{team?.logo_url ? <img src={team.logo_url} alt="" /> : fallback}</span>
-}
-
-function ScheduleGameCard({
-  game,
-  awayTeam,
-  homeTeam,
-  teamId,
-  stats,
-  dashboardPath,
-}: {
-  game: GameRow
-  awayTeam?: TeamRow
-  homeTeam?: TeamRow
-  teamId?: number
-  stats?: GameTeamStatRow
-  dashboardPath: string
-}) {
-  return (
-    <article className={`schedule-game ${teamId ? 'has-team-stats' : ''}`}>
-      <Link className="schedule-game-details" to={`/games/${game.id}`} state={{ dashboardPath }}>
-        <div className="schedule-game-meta">
-          <span>{[game.stage, game.week, getGameStatus(game)].filter(Boolean).join(' · ')}</span>
-          <time>{getGameDate(game)}</time>
-        </div>
-        <div className="schedule-matchup">
-          <div className={`schedule-team ${isWinningTeam(game, 'away') ? 'is-winner' : ''}`}>
-            <TeamMark team={awayTeam} fallback="A" />
-            <div className="schedule-team-name">
-              <span>Away</span>
-              <strong>{awayTeam?.name ?? `Away team ${game.away_team_id ?? ''}`}</strong>
-            </div>
-            <b>{renderScore(game.away_total)}</b>
-          </div>
-          <div className={`schedule-team schedule-team-home ${isWinningTeam(game, 'home') ? 'is-winner' : ''}`}>
-            <TeamMark team={homeTeam} fallback="H" />
-            <div className="schedule-team-name">
-              <span>Home</span>
-              <strong>{homeTeam?.name ?? `Home team ${game.home_team_id ?? ''}`}</strong>
-            </div>
-            <b>{renderScore(game.home_total)}</b>
-          </div>
-        </div>
-        <span className="game-chevron" aria-hidden="true">›</span>
-      </Link>
-      {teamId && (
-        <div className="team-game-stats">
-          <div className="team-game-stat-summary">
-            <span><b>{renderScore(stats?.yards_total)}</b> yards</span>
-            <span><b>{renderScore(stats?.pass_yards)}</b> passing</span>
-            <span><b>{renderScore(stats?.rush_yards)}</b> rushing</span>
-            <span><b>{renderScore(stats?.turnovers_total)}</b> turnovers</span>
-          </div>
-          <Link className="team-game-stats-link" to={`/games/${game.id}/teams/${teamId}`} state={{ dashboardPath }}>
-            View all stats
-          </Link>
-        </div>
-      )}
-    </article>
-  )
-}
-
-function StatusMessage({ title, message, error = false }: { title: string; message: string; error?: boolean }) {
-  return (
-    <section className={`status-message ${error ? 'is-error' : ''}`}>
-      <strong>{title}</strong>
-      <span>{message}</span>
-    </section>
   )
 }

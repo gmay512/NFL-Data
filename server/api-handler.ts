@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { getIngestConfig, type AppEnv } from './config'
+import { readJsonBody, readNumericFields, sendJson } from './api/request'
 import {
   fetchAvailableSeasons,
   ingestSeason,
@@ -9,42 +11,6 @@ import {
   refreshSeasonGames,
   refreshSeasonSchedule,
 } from './ingest-core'
-
-type AppEnv = Record<string, string | undefined>
-
-function getEnv(env: AppEnv, ...names: string[]) {
-  const value = names.map((name) => env[name]).find((entry) => Boolean(entry))
-  if (!value) throw new Error(`Missing required env var: ${names.join(' or ')}`)
-  return value
-}
-
-function getIngestConfig(env: AppEnv) {
-  return {
-    supabaseUrl: getEnv(env, 'SUPABASE_URL', 'VITE_SUPABASE_URL'),
-    serviceRoleKey: getEnv(env, 'SUPABASE_SERVICE_ROLE_KEY'),
-    apiKey: getEnv(env, 'API_SPORTS_KEY', 'API_Sports_KEY'),
-    apiBaseUrl: env.API_SPORTS_BASE_URL,
-    apiHost: env.API_SPORTS_HOST,
-    leagueId: Number(env.API_SPORTS_LEAGUE_ID ?? '1'),
-  }
-}
-
-async function readJsonBody(request: IncomingMessage) {
-  const chunks: Buffer[] = []
-  for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
-  }
-
-  if (!chunks.length) return {}
-  const text = Buffer.concat(chunks).toString('utf8')
-  return text ? JSON.parse(text) : {}
-}
-
-function sendJson(response: ServerResponse, statusCode: number, payload: unknown) {
-  response.statusCode = statusCode
-  response.setHeader('Content-Type', 'application/json')
-  response.end(JSON.stringify(payload))
-}
 
 export async function handleApiRequest(request: IncomingMessage, response: ServerResponse, env: AppEnv) {
   const requestUrl = new URL(request.url ?? '/', 'http://localhost')
@@ -63,76 +29,66 @@ export async function handleApiRequest(request: IncomingMessage, response: Serve
     }
 
     if (request.method === 'POST' && requestUrl.pathname === '/api/ingest-season') {
-      const body = (await readJsonBody(request)) as { season?: unknown }
-      const season = Number(body.season)
-      if (!Number.isFinite(season)) {
+      const values = await readNumericFields(request, ['season'])
+      if (!values) {
         sendJson(response, 400, { error: 'A numeric season is required.' })
         return true
       }
 
-      sendJson(response, 200, await ingestSeason(getIngestConfig(env), season))
+      sendJson(response, 200, await ingestSeason(getIngestConfig(env), values.season))
       return true
     }
 
     if (request.method === 'POST' && requestUrl.pathname === '/api/refresh-season-schedule') {
-      const body = (await readJsonBody(request)) as { season?: unknown }
-      const season = Number(body.season)
-      if (!Number.isFinite(season)) {
+      const values = await readNumericFields(request, ['season'])
+      if (!values) {
         sendJson(response, 400, { error: 'A numeric season is required.' })
         return true
       }
 
-      const summary = await refreshSeasonSchedule(getIngestConfig(env), season)
-      sendJson(response, 200, { season, ...summary })
+      const summary = await refreshSeasonSchedule(getIngestConfig(env), values.season)
+      sendJson(response, 200, { season: values.season, ...summary })
       return true
     }
 
     if (request.method === 'POST' && requestUrl.pathname === '/api/refresh-season-games') {
-      const body = (await readJsonBody(request)) as { season?: unknown }
-      const season = Number(body.season)
-      if (!Number.isFinite(season)) {
+      const values = await readNumericFields(request, ['season'])
+      if (!values) {
         sendJson(response, 400, { error: 'A numeric season is required.' })
         return true
       }
 
-      const games = await refreshSeasonGames(getIngestConfig(env), season)
-      sendJson(response, 200, { season, games })
+      const games = await refreshSeasonGames(getIngestConfig(env), values.season)
+      sendJson(response, 200, { season: values.season, games })
       return true
     }
 
     if (request.method === 'POST' && requestUrl.pathname === '/api/refresh-game-team-stats') {
-      const body = (await readJsonBody(request)) as { gameId?: unknown }
-      const gameId = Number(body.gameId)
-      if (!Number.isFinite(gameId)) {
+      const values = await readNumericFields(request, ['gameId'])
+      if (!values) {
         sendJson(response, 400, { error: 'A numeric gameId is required.' })
         return true
       }
 
-      const rows = await refreshGameTeamStatsByGameId(getIngestConfig(env), gameId)
-      sendJson(response, 200, { gameId, rowsUpserted: rows.length, rows })
+      const rows = await refreshGameTeamStatsByGameId(getIngestConfig(env), values.gameId)
+      sendJson(response, 200, { gameId: values.gameId, rowsUpserted: rows.length, rows })
       return true
     }
 
     if (request.method === 'POST' && requestUrl.pathname === '/api/refresh-game') {
-      const body = (await readJsonBody(request)) as { gameId?: unknown }
-      const gameId = Number(body.gameId)
-      if (!Number.isFinite(gameId)) {
+      const values = await readNumericFields(request, ['gameId'])
+      if (!values) {
         sendJson(response, 400, { error: 'A numeric gameId is required.' })
         return true
       }
 
-      await refreshGameById(getIngestConfig(env), gameId)
-      sendJson(response, 200, { gameId })
+      await refreshGameById(getIngestConfig(env), values.gameId)
+      sendJson(response, 200, { gameId: values.gameId })
       return true
     }
 
     if (request.method === 'POST' && requestUrl.pathname === '/api/refresh-game-stats') {
-      const body = (await readJsonBody(request)) as {
-        gameId?: unknown
-        teamId?: unknown
-        loadPlayerStats?: unknown
-        loadTeamStats?: unknown
-      }
+      const body = await readJsonBody(request)
       const gameId = Number(body.gameId)
       const teamId = Number(body.teamId)
       if (!Number.isFinite(gameId) || !Number.isFinite(teamId)) {
