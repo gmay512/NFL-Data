@@ -113,6 +113,9 @@ export type InjuryRow = {
   injury_date: string | null
   status: string | null
   description: string | null
+  first_seen_at: string
+  last_seen_at: string
+  resolved_at: string | null
   created_at: string
 }
 
@@ -214,4 +217,6 @@ export type OddsRow = {
   bet_id: number
   bet_value: string
   odd: number | null
+  provider_updated_at: string
+  captured_at: string
 }

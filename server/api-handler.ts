@@ -4,13 +4,16 @@ import { readJsonBody, readNumericFields, sendJson } from './api/request'
 import {
   fetchAvailableSeasons,
   ingestSeason,
+  refreshCurrentInjuries,
   refreshGameById,
   refreshGamesByIds,
   refreshGamePlayerStatsByGameId,
   refreshGameTeamStatsByGameId,
   refreshLiveGames,
   refreshSeasonGames,
+  refreshSeasonOdds,
   refreshSeasonSchedule,
+  refreshSeasonStatistics,
 } from './ingest-core'
 
 function isPositiveIntegerArray(value: unknown): value is number[] {
@@ -75,6 +78,42 @@ export async function handleApiRequest(request: IncomingMessage, response: Serve
           ? await refreshSeasonGames(config, season)
           : await refreshGamesByIds(config, body.gameIds)
       sendJson(response, 200, { season, games })
+      return true
+    }
+
+    if (request.method === 'POST' && requestUrl.pathname === '/api/refresh-season-odds') {
+      const values = await readNumericFields(request, ['season'])
+      if (!values) {
+        sendJson(response, 400, { error: 'A numeric season is required.' })
+        return true
+      }
+
+      const summary = await refreshSeasonOdds(getIngestConfig(env), values.season)
+      sendJson(response, 200, { season: values.season, ...summary })
+      return true
+    }
+
+    if (request.method === 'POST' && requestUrl.pathname === '/api/refresh-current-injuries') {
+      const values = await readNumericFields(request, ['season'])
+      if (!values) {
+        sendJson(response, 400, { error: 'A numeric season is required.' })
+        return true
+      }
+
+      const summary = await refreshCurrentInjuries(getIngestConfig(env), values.season)
+      sendJson(response, 200, { season: values.season, ...summary })
+      return true
+    }
+
+    if (request.method === 'POST' && requestUrl.pathname === '/api/refresh-season-statistics') {
+      const values = await readNumericFields(request, ['season'])
+      if (!values) {
+        sendJson(response, 400, { error: 'A numeric season is required.' })
+        return true
+      }
+
+      const summary = await refreshSeasonStatistics(getIngestConfig(env), values.season)
+      sendJson(response, 200, { season: values.season, ...summary })
       return true
     }
 

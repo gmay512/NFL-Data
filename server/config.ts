@@ -16,5 +16,6 @@ export function getIngestConfig(env: AppEnv): IngestConfig {
     apiBaseUrl: env.API_SPORTS_BASE_URL,
     apiHost: env.API_SPORTS_HOST,
     leagueId: Number(env.API_SPORTS_LEAGUE_ID ?? '1'),
+    apiRequestsPerMinute: Number(env.API_SPORTS_REQUESTS_PER_MINUTE ?? '240'),
   }
 }

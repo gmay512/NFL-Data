@@ -16,6 +16,9 @@ Vite + React app backed by a local Supabase stack running in Docker.
   - `public.standings`
   - `public.game_team_stats`
   - `public.game_player_stats`
+  - `public.bookmakers`
+  - `public.bet_types`
+  - `public.odds`
 - Row Level Security (RLS) enabled on all schema tables.
 - Public anon read policies plus service-role full-access policies for ingestion workflows.
 - Dashboard UI that queries these tables through the Supabase client.
@@ -56,6 +59,7 @@ Optional ingest controls:
 - `API_SPORTS_HOST`
 - `API_SPORTS_SEASON`
 - `API_SPORTS_LEAGUE_ID`
+- `API_SPORTS_REQUESTS_PER_MINUTE` (defaults to 240)
 
 Note: the dev server reads `API_SPORTS_KEY` and also accepts the legacy mixed-case `API_Sports_KEY` name if that is already present in your env file.
 
@@ -100,6 +104,58 @@ The CLI entry point is a thin adapter over the same ingestion engine used by the
 - `/standings` -> `standings`
 - `/games/statistics/teams` -> `game_team_stats`
 - `/games/statistics/players` -> `game_player_stats`
+- `/odds/bookmakers` -> `bookmakers`
+- `/odds/bets` -> `bet_types`
+- `/odds?game={id}` -> timestamped `odds` snapshots
+
+API-Sports exposes pre-match odds only around a game's 1–7 day pregame window
+and retains a limited seven-day history. Odds ingestion therefore checks games
+within seven days of the current date and requests each eligible game
+individually. The generic bookmaker, bet type, outcome, and decimal-odds model
+captures all markets returned by the provider, including moneylines, spreads,
+totals, period and team markets, and player props. Re-running an unchanged
+provider snapshot is idempotent; a later provider update is retained as line
+history.
+
+Odds can be refreshed without running the full season ingest:
+
+```text
+POST /api/refresh-season-odds
+{"season": 2026}
+```
+
+The current API requires team-scoped requests for injuries and player season
+statistics, and game-scoped requests for team and player box scores. The ingest
+engine performs those requests with bounded concurrency and a shared request
+pacer, then reports attempted, succeeded, failed, and upserted counts. Injury
+rows retain first-seen, last-seen, and resolved timestamps so status changes
+remain available as history.
+
+These database-only collectors can also be run independently:
+
+```text
+POST /api/refresh-current-injuries
+{"season": 2026}
+
+POST /api/refresh-season-statistics
+{"season": 2026}
+```
+
+`/timezone` is configuration data and `/status` contains account quota data, so
+they are intentionally not persisted with NFL domain records.
+
+The production-only historical runner fills missing 2020–2026 resources, records
+complete and provider-empty checkpoints, preserves season team membership in
+`team_rosters`, and stops before the configured API daily ceiling:
+
+```bash
+npm run backfill -- --dry-run
+npm run backfill -- --confirm-production
+```
+
+Use `--start-season`, `--end-season`, `--daily-ceiling`, and `--verbose-plan` to
+override the safe defaults. The runtime refuses mutating runs against the known
+local Supabase address.
 
 ## Migrations
 
@@ -136,6 +192,15 @@ The first production setup also needs a one-time copy of the local public-schema
 
 The seed command refuses to run after production contains data. App secrets are written
 only to `/home/glenn/srv/nfl-data/deploy/.env.production` on the server with mode `0600`.
+
+After production has been verified, replace local public data with its snapshot:
+
+```bash
+./scripts/sync-production-to-local.sh --confirm production-to-local
+```
+
+The sync resets local migrations, streams the production data without a dump file,
+and fails unless every public table has the same exact row count.
 
 The server's nginx site should use `deploy/nginx.conf`. It serves the web app at
 `http://192.168.4.237`, proxies Supabase API paths to Kong, and limits access to
