@@ -8,7 +8,8 @@ import {
   formatScoringEventDescription,
   isWinningTeam,
 } from '../../lib/game-format'
-import type { GameRow, GameTeamStatRow, LatestGameEventRow, TeamRow } from '../../types/nfl'
+import type { GameOddsRow, GameRow, GameTeamStatRow, LatestGameEventRow, TeamRow } from '../../types/nfl'
+import { GameOddsDisplay } from '../odds/GameOddsDisplay'
 
 function TeamMark({ team, fallback }: { team?: TeamRow; fallback: string }) {
   return <span className="team-mark">{team?.logo_url ? <img src={team.logo_url} alt="" /> : fallback}</span>
@@ -23,6 +24,7 @@ export const ScheduleGameCard = memo(function ScheduleGameCard({
   dashboardPath,
   isUpdated = false,
   latestEvent,
+  odds,
 }: {
   game: GameRow
   awayTeam?: TeamRow
@@ -32,6 +34,7 @@ export const ScheduleGameCard = memo(function ScheduleGameCard({
   dashboardPath: string
   isUpdated?: boolean
   latestEvent?: LatestGameEventRow
+  odds?: GameOddsRow
 }) {
   return (
     <article className={`schedule-game ${teamId ? 'has-team-stats' : ''} ${isUpdated ? 'is-updated' : ''}`}>
@@ -58,6 +61,11 @@ export const ScheduleGameCard = memo(function ScheduleGameCard({
             <b>{formatScore(game.home_total)}</b>
           </div>
         </div>
+        <GameOddsDisplay
+          odds={odds}
+          awayTeamName={awayTeam?.name}
+          homeTeamName={homeTeam?.name}
+        />
         {latestEvent && (
           <div className="live-game-event">
             <div className="live-game-event-heading">

@@ -206,6 +206,11 @@
 .schedule-team-name span { color: var(--muted-text); font-size: .62rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .schedule-team strong { font-size: 0.91rem; }
 .schedule-team b { min-width: 24px; color: var(--text); font-size: 1.12rem; text-align: center; }
+.game-odds { display: flex; flex-wrap: wrap; gap: 8px; }
+.game-odds-schedule { margin-top: 2px; padding-top: 9px; border-top: 1px solid var(--border); }
+.game-odds-item { display: inline-flex; gap: 6px; align-items: baseline; padding: 5px 8px; border-radius: 7px; background: var(--surface-muted); }
+.game-odds-item small { color: var(--muted-text); font-size: .61rem; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }
+.game-odds-item strong { color: var(--text); font-size: .76rem; }
 .live-game-event { display: grid; gap: 5px; margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--border); }
 .live-game-event-heading { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
 .live-game-event-heading span { color: var(--accent-dark); font-size: .65rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
@@ -295,6 +300,9 @@
 .detail-team-mark, .team-game-mark { width: 50px; height: 50px; }
 .detail-team-score { font-size: 2rem; }
 .detail-score-divider { width: 1px; height: 70px; background: var(--border); }
+.game-odds-detail { justify-content: center; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); }
+.game-odds-detail .game-odds-item { min-width: 130px; justify-content: space-between; background: var(--surface-muted); }
+.game-odds-detail .game-odds-item strong { font-size: .86rem; }
 .game-card-label { margin-bottom: 0; color: var(--muted-text); font-size: .67rem; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
 .section-heading { margin-bottom: 14px; }
 .section-heading h2 { margin-bottom: 0; font-size: 1.15rem; letter-spacing: -.025em; }
@@ -461,6 +469,7 @@
   .schedule-team { grid-template-columns: 32px minmax(0, 1fr) auto; gap: 7px; }
   .schedule-team-home { justify-self: stretch; }
   .schedule-team strong { font-size: .8rem; }
+  .game-odds-schedule { gap: 5px; }
   .live-game-event-heading { align-items: flex-start; flex-direction: column; gap: 2px; }
   .team-game-stat-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .game-chevron { display: none; }

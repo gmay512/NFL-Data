@@ -219,7 +219,8 @@ const targetedGameRefreshConcurrency = 2
 const dataRefreshConcurrency = 2
 const oddsRefreshConcurrency = 2
 const oddsUpsertBatchSize = 1_000
-const oddsAvailabilityDays = 7
+const oddsUpcomingDays = 14
+const oddsHistoryDays = 7
 const apiClients = new WeakMap<IngestConfig, ApiClient>()
 const apiRequestSchedulers = new Map<
   string,
@@ -1409,22 +1410,70 @@ function shiftDate(date: string, days: number) {
   return shifted.toISOString().slice(0, 10)
 }
 
-async function getOddsEligibleGameIds(client: ApiClient, season: number, now = new Date()) {
+export type OddsEligibilityGame = {
+  id: number
+  game_date: string | null
+  game_timestamp: number | null
+  status_short: string | null
+}
+
+export function isGameEligibleForOdds(
+  game: OddsEligibilityGame,
+  hasUsableOdds: boolean,
+  now = new Date(),
+) {
   const currentDate = getDateInScheduleTimezone(now)
-  const startDate = shiftDate(currentDate, -oddsAvailabilityDays)
-  const endDate = shiftDate(currentDate, oddsAvailabilityDays)
-  const { data, error } = await client.supabase
+  const startDate = shiftDate(currentDate, -oddsHistoryDays)
+  const endDate = shiftDate(currentDate, oddsUpcomingDays)
+  if (!game.game_date || game.game_date < startDate || game.game_date > endDate) return false
+
+  const kickoffMs = game.game_timestamp == null ? null : game.game_timestamp * 1_000
+  if (kickoffMs != null) return kickoffMs > now.getTime() || !hasUsableOdds
+
+  const status = game.status_short?.trim().toUpperCase()
+  const isUpcoming = status === 'NS' || (!status && game.game_date != null && game.game_date >= currentDate)
+  return isUpcoming || !hasUsableOdds
+}
+
+async function getOddsEligibleGameIds(client: ApiClient, season?: number, now = new Date()) {
+  const currentDate = getDateInScheduleTimezone(now)
+  const startDate = shiftDate(currentDate, -oddsHistoryDays)
+  const endDate = shiftDate(currentDate, oddsUpcomingDays)
+  let query = client.supabase
     .from('games')
-    .select('id')
-    .eq('season', season)
+    .select('id,game_date,game_timestamp,status_short')
     .gte('game_date', startDate)
     .lte('game_date', endDate)
     .order('game_date')
+  if (season != null) query = query.eq('season', season)
 
+  const { data, error } = await query
   if (error) throw error
-  return (data ?? [])
-    .map((game: { id: unknown }) => toInt(game.id))
-    .filter((gameId): gameId is number => gameId !== null)
+  const games = (data ?? [])
+    .map((game) => ({
+      id: toInt(game.id),
+      game_date: asString(game.game_date),
+      game_timestamp: toInt(game.game_timestamp),
+      status_short: asString(game.status_short),
+    }))
+    .filter((game): game is OddsEligibilityGame => game.id !== null)
+  if (!games.length) return []
+
+  const { data: consensusRows, error: consensusError } = await client.supabase
+    .from('game_consensus_odds')
+    .select('game_id,home_spread,total')
+    .in('game_id', games.map((game) => game.id))
+  if (consensusError) throw consensusError
+
+  const gamesWithUsableOdds = new Set(
+    (consensusRows ?? [])
+      .filter((odds) => odds.home_spread != null || odds.total != null)
+      .map((odds) => toInt(odds.game_id))
+      .filter((gameId): gameId is number => gameId !== null),
+  )
+  return games
+    .filter((game) => isGameEligibleForOdds(game, gamesWithUsableOdds.has(game.id), now))
+    .map((game) => game.id)
 }
 
 async function upsertOddsRows(supabase: SupabaseClient, rows: OddsUpsertRow[]) {
@@ -1440,11 +1489,11 @@ async function upsertOddsRows(supabase: SupabaseClient, rows: OddsUpsertRow[]) {
   }
 }
 
-async function upsertOdds(config: IngestConfig, season: number) {
+async function upsertOdds(config: IngestConfig, season?: number) {
   const client = createApiClient(config)
   const gameIds = await getOddsEligibleGameIds(client, season)
   if (!gameIds.length) {
-    console.log(`[Ingest] No games in the odds availability window for season ${season}`)
+    console.log(`[Ingest] No games in the odds availability window${season == null ? '' : ` for season ${season}`}`)
     return 0
   }
 
@@ -1470,6 +1519,13 @@ export async function refreshSeasonOdds(config: IngestConfig, season: number) {
   const bookmakers = await upsertBookmakers(config)
   const betTypes = await upsertBetTypes(config)
   const odds = await upsertOdds(config, season)
+  return { bookmakers, betTypes, odds }
+}
+
+export async function refreshAvailableOdds(config: IngestConfig) {
+  const bookmakers = await upsertBookmakers(config)
+  const betTypes = await upsertBetTypes(config)
+  const odds = await upsertOdds(config)
   return { bookmakers, betTypes, odds }
 }
 

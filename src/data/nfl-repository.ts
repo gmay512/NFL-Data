@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabase'
 import type {
+  GameOddsRow,
   GamePlayerStatRow,
   GameRow,
   GameTeamStatRow,
@@ -87,6 +88,16 @@ export async function getLatestGameEvents(gameIds: number[]) {
   return selectFirstRowsByKey((data ?? []) as LatestGameEventRow[], 'game_id')
 }
 
+export async function getGameOdds(gameIds: number[]) {
+  if (!gameIds.length) return []
+  const { data, error } = await getClient()
+    .from('game_consensus_odds')
+    .select('game_id, home_spread, total')
+    .in('game_id', gameIds)
+  if (error) throw error
+  return (data ?? []) as GameOddsRow[]
+}
+
 export async function getGame(gameId: number) {
   const { data, error } = await getClient().from('games').select('*').eq('id', gameId).maybeSingle()
   if (error) throw error
@@ -133,12 +144,13 @@ export async function getPlayersByIds(playerIds: number[]) {
 }
 
 export async function getGameOverview(gameId: number) {
-  const [game, teams, teamStats] = await Promise.all([
+  const [game, teams, teamStats, odds] = await Promise.all([
     getGame(gameId),
     getTeams(),
     getGameTeamStats(gameId),
+    getGameOdds([gameId]),
   ])
-  return { game, teams, teamStats }
+  return { game, teams, teamStats, odds: odds[0] ?? null }
 }
 
 export async function getTeamGameOverview(gameId: number, teamId: number) {

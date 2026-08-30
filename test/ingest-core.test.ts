@@ -8,6 +8,7 @@ import {
   mapOddsRows,
   mapPlayerSeasonStatRows,
   mapStandingRows,
+  isGameEligibleForOdds,
 } from '../server/ingest-core'
 
 describe('game event ingestion', () => {
@@ -74,6 +75,40 @@ describe('game event ingestion', () => {
 })
 
 describe('odds ingestion', () => {
+    it('selects upcoming games through 14 days and missing recent games through 7 days', () => {
+      const now = new Date('2026-08-30T17:00:00Z')
+      const game = (
+        id: number,
+        gameDate: string,
+        status: string,
+        kickoff = Date.parse(`${gameDate}T17:00:00Z`) / 1_000,
+      ) => ({
+        id,
+        game_date: gameDate,
+        game_timestamp: kickoff,
+        status_short: status,
+      })
+
+      assert.equal(isGameEligibleForOdds(game(1, '2026-09-13', 'NS'), true, now), true)
+      assert.equal(isGameEligibleForOdds(game(2, '2026-09-14', 'NS'), false, now), false)
+      assert.equal(isGameEligibleForOdds(game(3, '2026-08-23', 'FT'), false, now), true)
+      assert.equal(isGameEligibleForOdds(game(4, '2026-08-23', 'FT'), true, now), false)
+      assert.equal(isGameEligibleForOdds(game(5, '2026-08-22', 'FT'), false, now), false)
+    })
+
+    it('uses scheduled status when a game has no kickoff timestamp', () => {
+      const now = new Date('2026-08-30T17:00:00Z')
+      const baseGame = {
+        id: 1,
+        game_date: '2026-09-01',
+        game_timestamp: null,
+      }
+
+      assert.equal(isGameEligibleForOdds({ ...baseGame, status_short: 'NS' }, true, now), true)
+      assert.equal(isGameEligibleForOdds({ ...baseGame, status_short: 'FT' }, true, now), false)
+      assert.equal(isGameEligibleForOdds({ ...baseGame, status_short: 'FT' }, false, now), true)
+    })
+
     it('keeps provider market IDs when display names are duplicated', () => {
       assert.deepEqual(mapBetTypeRows([
         { id: 75, name: 'Player Passing Yards' },

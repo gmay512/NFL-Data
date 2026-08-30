@@ -3,6 +3,7 @@ import { Link, useLocation, useParams } from 'react-router-dom'
 import { refreshGame, refreshGameStats, refreshGameTeamStats } from '../api/app-api'
 import {
   getGameOverview,
+  getGameOdds,
   getGamePlayerStats,
   getGameTeamStats,
   getPlayersByIds,
@@ -14,15 +15,18 @@ import {
   TeamStatSelector,
   type GameDetailTab,
 } from '../features/game-detail/GameDetailComponents'
+import { GameOddsDisplay } from '../features/odds/GameOddsDisplay'
 import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import { formatDetailGameStatus, formatValue } from '../lib/game-format'
 import { hasSupabaseEnv, supabase } from '../lib/supabase'
 import { shouldRefreshGame } from '../lib/game-sync'
-import type { GamePlayerStatRow, GameRow, GameTeamStatRow, PlayerRow, TeamRow } from '../types/nfl'
+import type { GameOddsRow, GamePlayerStatRow, GameRow, GameTeamStatRow, PlayerRow, TeamRow } from '../types/nfl'
 
 function renderQuarterValue(value: number | null | undefined) {
   return value == null ? '—' : String(value)
 }
+
+const ODDS_REFRESH_INTERVAL_MS = 5 * 60_000
 
 export function GameDetailPage() {
   const { id } = useParams()
@@ -30,6 +34,7 @@ export function GameDetailPage() {
   const [game, setGame] = useState<GameRow | null>(null)
   const [teams, setTeams] = useState<TeamRow[]>([])
   const [teamStats, setTeamStats] = useState<GameTeamStatRow[]>([])
+  const [odds, setOdds] = useState<GameOddsRow | null>(null)
   const [activeTab, setActiveTab] = useState<GameDetailTab>('comparison')
   const [selectedTeamId, setSelectedTeamId] = useState<number | null>(null)
   const [playerStats, setPlayerStats] = useState<GamePlayerStatRow[]>([])
@@ -60,6 +65,7 @@ export function GameDetailPage() {
       setError(null)
       setStatsError(null)
       setTeamStats([])
+      setOdds(null)
 
       const gameId = Number(id)
       if (!Number.isFinite(gameId)) {
@@ -82,6 +88,7 @@ export function GameDetailPage() {
       let loadedGame = overview.game
       let loadedTeams = overview.teams
       let storedStats = overview.teamStats
+      let storedOdds = overview.odds
       const refreshCurrentGame = loadedGame ? shouldRefreshGame(loadedGame) : true
       setRefreshStatsOnLoad(refreshCurrentGame)
 
@@ -92,6 +99,7 @@ export function GameDetailPage() {
           loadedGame = persistedOverview.game
           loadedTeams = persistedOverview.teams
           storedStats = persistedOverview.teamStats
+          storedOdds = persistedOverview.odds
         } catch (gameLoadError) {
           const message = gameLoadError instanceof Error ? gameLoadError.message : 'Could not refresh this game.'
           if (!loadedGame) {
@@ -107,6 +115,7 @@ export function GameDetailPage() {
       setGame(loadedGame)
       setTeams(loadedTeams)
       setTeamStats(storedStats)
+      setOdds(storedOdds)
       if (loadedGame) {
         setSelectedTeamId((currentTeamId) =>
           currentTeamId === loadedGame?.away_team_id || currentTeamId === loadedGame?.home_team_id
@@ -147,6 +156,19 @@ export function GameDetailPage() {
     async () => setRefreshKey((current) => current + 1),
     Boolean(game && shouldRefreshGame(game)),
   )
+
+  const refreshStoredOdds = useCallback(async () => {
+    if (!game) return
+    try {
+      const oddsRows = await getGameOdds([game.id])
+      setOdds(oddsRows[0] ?? null)
+    } catch (oddsError) {
+      setError(oddsError instanceof Error ? oddsError.message : 'Could not refresh game odds.')
+    }
+  }, [game])
+
+  const isPregame = game?.status_short?.trim().toUpperCase() === 'NS'
+  useVisiblePolling(refreshStoredOdds, isPregame, ODDS_REFRESH_INTERVAL_MS)
 
   const handleTeamSelect = (teamId: number) => {
     setSelectedTeamId(teamId)
@@ -292,6 +314,13 @@ export function GameDetailPage() {
                 <strong className="detail-team-score">{formatValue(game.home_total)}</strong>
               </div>
             </div>
+
+            <GameOddsDisplay
+              odds={odds}
+              awayTeamName={awayTeam?.name}
+              homeTeamName={homeTeam?.name}
+              variant="detail"
+            />
 
             <section className="detail-boxscore" aria-label="Quarter box score">
               <div className="section-heading detail-section-heading">

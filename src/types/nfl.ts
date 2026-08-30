@@ -220,3 +220,9 @@ export type OddsRow = {
   provider_updated_at: string
   captured_at: string
 }
+
+export type GameOddsRow = {
+  game_id: number
+  home_spread: number | null
+  total: number | null
+}

@@ -3,6 +3,7 @@ import { useLocation, useSearchParams } from 'react-router-dom'
 import { getAvailableSeasons, ingestSeason, refreshLiveGames as refreshLiveGamesFromApi, refreshSeasonGames } from '../api/app-api'
 import {
   getDashboardMetadata,
+  getGameOdds,
   getGamesByIds,
   getLatestGameEvents,
   getSeasonGames,
@@ -14,7 +15,7 @@ import { ScheduleGameCard, StatusMessage } from '../features/dashboard/Dashboard
 import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import { hasSupabaseEnv, supabase } from '../lib/supabase'
 import { getRefreshableGameIds, hasLiveGameChanged, reconcileRowsByKey } from '../lib/game-sync'
-import type { GameRow, GameTeamStatRow, LatestGameEventRow, LeagueSeasonRow, TeamRow } from '../types/nfl'
+import type { GameOddsRow, GameRow, GameTeamStatRow, LatestGameEventRow, LeagueSeasonRow, TeamRow } from '../types/nfl'
 
 type DashboardMode = 'season' | 'live' | 'team'
 type SeasonOption = { season: number; current: boolean }
@@ -22,6 +23,7 @@ type SeasonOption = { season: number; current: boolean }
 const UNASSIGNED_WEEK = '__unassigned__'
 const WEEK_KEY_SEPARATOR = '::'
 const LIVE_UPDATE_HIGHLIGHT_MS = 4_000
+const ODDS_REFRESH_INTERVAL_MS = 5 * 60_000
 
 function getWeekKey(game: GameRow) {
   return [game.stage?.trim() || 'Season', game.week?.trim() || UNASSIGNED_WEEK].join(WEEK_KEY_SEPARATOR)
@@ -46,6 +48,7 @@ export function DashboardPage() {
   const [games, setGames] = useState<GameRow[]>([])
   const [teamGameStats, setTeamGameStats] = useState<Record<number, GameTeamStatRow>>({})
   const [latestGameEvents, setLatestGameEvents] = useState<Record<number, LatestGameEventRow>>({})
+  const [gameOdds, setGameOdds] = useState<Record<number, GameOddsRow>>({})
   const [mode, setMode] = useState<DashboardMode>(() => {
     const view = searchParams.get('view')
     return view === 'live' || view === 'team' ? view : 'season'
@@ -116,6 +119,7 @@ export function DashboardPage() {
         if (!cancelled) {
           setGames([])
           setTeamGameStats({})
+          setGameOdds({})
           displayedGamesKey.current = `team:${selectedSeason}:none`
           setIsLoading(false)
         }
@@ -145,9 +149,22 @@ export function DashboardPage() {
             statsError = loadStatsError
           }
         }
+        let oddsData: GameOddsRow[] = []
+        let oddsError: unknown
+        if (loadedGames.length > 0) {
+          try {
+            oddsData = await getGameOdds(loadedGames.map((game) => game.id))
+          } catch (loadOddsError) {
+            oddsError = loadOddsError
+          }
+        }
 
         if (cancelled) return
         setGames((current) => reconcileRowsByKey(current, loadedGames, 'id'))
+        setGameOdds(Object.fromEntries(oddsData.map((odds) => [odds.game_id, odds])))
+        if (oddsError) {
+          setError(oddsError instanceof Error ? oddsError.message : 'Could not load game odds.')
+        }
         if (mode === 'team' && selectedTeamId && loadedGames.length > 0) {
           if (statsError) {
             setError(statsError instanceof Error ? statsError.message : 'Could not load team statistics.')
@@ -184,6 +201,7 @@ export function DashboardPage() {
         if (isInitialLoad) {
           setGames([])
           setTeamGameStats({})
+          setGameOdds({})
         }
         setIsLoading(false)
       }
@@ -234,15 +252,17 @@ export function DashboardPage() {
         setUpdatedLiveGameIds(new Set())
         setGames((current) => reconcileRowsByKey(current, [], 'id'))
         setLatestGameEvents({})
+        setGameOdds({})
         setSelectedWeek('')
         setLastLiveCheckedAt(new Date())
         displayedGamesKey.current = 'live'
         return
       }
 
-      const [data, latestEvents] = await Promise.all([
+      const [data, latestEvents, oddsData] = await Promise.all([
         getGamesByIds(gameIds),
         getLatestGameEvents(gameIds),
+        getGameOdds(gameIds),
       ])
       if (requestId !== liveRequestId.current) return
 
@@ -278,6 +298,7 @@ export function DashboardPage() {
         reconcileRowsByKey(Object.values(current), latestEvents, 'game_id')
           .map((event) => [event.game_id, event]),
       ))
+      setGameOdds(Object.fromEntries(oddsData.map((odds) => [odds.game_id, odds])))
       setSelectedWeek('')
       setLastLiveCheckedAt(new Date())
       displayedGamesKey.current = 'live'
@@ -287,6 +308,7 @@ export function DashboardPage() {
       if (isInitialLoad) {
         setGames([])
         setLatestGameEvents({})
+        setGameOdds({})
       }
     } finally {
       if (requestId === liveRequestId.current) {
@@ -297,6 +319,25 @@ export function DashboardPage() {
   }, [])
 
   useVisiblePolling(refreshLiveGames, mode === 'live')
+
+  const refreshStoredOdds = useCallback(async () => {
+    if (!supabase || !games.length) return
+    try {
+      const oddsData = await getGameOdds(games.map((game) => game.id))
+      setGameOdds((current) => Object.fromEntries(
+        reconcileRowsByKey(Object.values(current), oddsData, 'game_id')
+          .map((odds) => [odds.game_id, odds]),
+      ))
+    } catch (oddsError) {
+      setError(oddsError instanceof Error ? oddsError.message : 'Could not refresh game odds.')
+    }
+  }, [games])
+
+  useVisiblePolling(
+    refreshStoredOdds,
+    mode !== 'live' && games.length > 0,
+    ODDS_REFRESH_INTERVAL_MS,
+  )
 
   useEffect(() => {
     if (mode !== 'live') return
@@ -511,6 +552,7 @@ export function DashboardPage() {
                       homeTeam={homeTeam}
                       teamId={Number(selectedTeamId)}
                       stats={teamGameStats[game.id]}
+                      odds={gameOdds[game.id]}
                       dashboardPath={dashboardPath}
                     />
                   )
@@ -525,6 +567,7 @@ export function DashboardPage() {
                     dashboardPath={dashboardPath}
                     isUpdated={mode === 'live' && updatedLiveGameIds.has(game.id)}
                     latestEvent={mode === 'live' ? latestGameEvents[game.id] : undefined}
+                    odds={gameOdds[game.id]}
                   />
                 )
               })}

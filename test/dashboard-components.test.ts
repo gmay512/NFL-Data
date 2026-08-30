@@ -4,7 +4,7 @@ import React, { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router-dom'
 import { ScheduleGameCard } from '../src/features/dashboard/DashboardComponents'
-import type { GameRow, LatestGameEventRow } from '../src/types/nfl'
+import type { GameOddsRow, GameRow, LatestGameEventRow } from '../src/types/nfl'
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React
 
@@ -35,7 +35,13 @@ const latestEvent = {
   score_away: 13,
 } satisfies LatestGameEventRow
 
-function renderCard(event?: LatestGameEventRow) {
+const odds = {
+  game_id: 1,
+  home_spread: -3.5,
+  total: 47.5,
+} satisfies GameOddsRow
+
+function renderCard(event?: LatestGameEventRow, gameOdds?: GameOddsRow) {
   return renderToStaticMarkup(
     createElement(
       MemoryRouter,
@@ -44,6 +50,7 @@ function renderCard(event?: LatestGameEventRow) {
         game,
         dashboardPath: '/?view=live',
         latestEvent: event,
+        odds: gameOdds,
       }),
     ),
   )
@@ -60,5 +67,13 @@ describe('live game card', () => {
 
   it('does not add an event footer without a scoring event', () => {
     assert.doesNotMatch(renderCard(), /Latest scoring play/)
+  })
+
+  it('shows consensus odds without bookmaker details', () => {
+    const markup = renderCard(undefined, odds)
+
+    assert.match(markup, /Home -3.5/)
+    assert.match(markup, /O\/U 47.5/)
+    assert.doesNotMatch(markup, /bookmaker/i)
   })
 })

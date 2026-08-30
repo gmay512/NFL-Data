@@ -4,6 +4,7 @@ import { createServer, type ServerResponse } from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { handleApiRequest } from './api-handler'
+import { startOddsRefreshScheduler } from './odds-scheduler'
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
 const distDirectory = path.resolve(serverDirectory, '../dist')
@@ -62,4 +63,5 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, host, () => {
   console.log(`NFL Data listening on http://${host}:${port}`)
+  startOddsRefreshScheduler(process.env)
 })

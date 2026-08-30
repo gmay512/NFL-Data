@@ -108,14 +108,23 @@ The CLI entry point is a thin adapter over the same ingestion engine used by the
 - `/odds/bets` -> `bet_types`
 - `/odds?game={id}` -> timestamped `odds` snapshots
 
-API-Sports exposes pre-match odds only around a game's 1–7 day pregame window
-and retains a limited seven-day history. Odds ingestion therefore checks games
-within seven days of the current date and requests each eligible game
-individually. The generic bookmaker, bet type, outcome, and decimal-odds model
+API-Sports can expose pre-match odds roughly 1–14 days before kickoff and
+retains a limited seven-day history. The production server checks immediately
+at startup and every hour afterward. Each run requests every upcoming game
+within 14 days so new and updated lines are captured, plus games from the prior
+seven days that still have no usable spread or total. The generic bookmaker,
+bet type, outcome, and decimal-odds model
 captures all markets returned by the provider, including moneylines, spreads,
 totals, period and team markets, and player props. Re-running an unchanged
 provider snapshot is idempotent; a later provider update is retained as line
-history.
+history. The `game_consensus_odds` view selects each bookmaker's latest,
+most-balanced full-game spread and total, then exposes their medians to the
+schedule and game-detail UI without bookmaker identities or decimal prices.
+
+Set `ODDS_AUTO_REFRESH_ENABLED=false` to disable the production scheduler.
+`ODDS_REFRESH_INTERVAL_MINUTES` overrides its 60-minute cadence. Visible
+schedule and pregame detail pages re-read stored consensus odds every five
+minutes; those UI reads do not call API-Sports.
 
 Odds can be refreshed without running the full season ingest:
 
