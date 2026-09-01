@@ -1,7 +1,17 @@
 import type { GameTeamStatRow } from '../types/nfl'
+import type {
+  AnalyticsFilters,
+  AnalyticsPreset,
+  AnalyticsSnapshot,
+} from '../../server/analytics-core'
+import type {
+  AnalysisSession,
+  AnalysisSessionSummary,
+} from '../../server/analysis-store'
 
 export type ApiErrorResponse = {
   error: string
+  code?: string
 }
 
 export type HealthResponse = {
@@ -67,3 +77,39 @@ export type RefreshGameStatsResponse = {
 export type RefreshLiveGamesResponse = {
   gameIds: number[]
 }
+
+export type {
+  AnalysisSession,
+  AnalysisSessionSummary,
+  AnalyticsFilters,
+  AnalyticsPreset,
+  AnalyticsSnapshot,
+}
+
+export type AnalyticsFilterMetadata = {
+  seasons: number[]
+  teams: Array<{ id: number; name: string }>
+  selectedSeason: number | null
+  stages: string[]
+  weeks: string[]
+}
+
+export type AnalyticsQueryResponse = {
+  snapshot: AnalyticsSnapshot
+}
+
+export type AnalysisSessionResponse = {
+  session: AnalysisSession
+}
+
+export type AnalysisSessionSummaryResponse = {
+  session: AnalysisSessionSummary
+}
+
+export type AnalysisSessionListResponse = {
+  sessions: AnalysisSessionSummary[]
+}
+
+export type LlmHealthResponse =
+  | { status: 'available'; model: string; models: string[] }
+  | { status: 'unavailable'; code: string; message: string }

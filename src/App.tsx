@@ -4,6 +4,7 @@ import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import { DashboardPage } from './pages/DashboardPage'
 import { GameDetailPage } from './pages/GameDetailPage'
 import { GameTeamDetailPage } from './pages/GameTeamDetailPage'
+import { AnalyticsPage } from './pages/AnalyticsPage'
 
 function App() {
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -26,6 +27,7 @@ function App() {
           <nav className="top-nav-links">
             <NavLink to="/" end>Dashboard</NavLink>
             <NavLink to="/games">Schedule</NavLink>
+            <NavLink to="/analytics">Analytics</NavLink>
           </nav>
           <button
             type="button"
@@ -43,6 +45,7 @@ function App() {
         <Route path="/games" element={<DashboardPage />} />
         <Route path="/games/:id" element={<GameDetailPage />} />
         <Route path="/games/:gameId/teams/:teamId" element={<GameTeamDetailPage />} />
+        <Route path="/analytics" element={<AnalyticsPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

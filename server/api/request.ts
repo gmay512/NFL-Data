@@ -1,14 +1,40 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
-export async function readJsonBody(request: IncomingMessage) {
+export class RequestBodyError extends Error {
+  readonly statusCode: number
+
+  constructor(message: string, statusCode: number) {
+    super(message)
+    this.name = 'RequestBodyError'
+    this.statusCode = statusCode
+  }
+}
+
+export async function readJsonBody(request: IncomingMessage, maxBytes = 1_000_000) {
   const chunks: Buffer[] = []
+  let byteLength = 0
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    byteLength += buffer.length
+    if (byteLength > maxBytes) {
+      throw new RequestBodyError(`Request body exceeds ${maxBytes} bytes.`, 413)
+    }
+    chunks.push(buffer)
   }
 
   if (!chunks.length) return {}
   const text = Buffer.concat(chunks).toString('utf8')
-  return text ? JSON.parse(text) as Record<string, unknown> : {}
+  if (!text) return {}
+  try {
+    const value = JSON.parse(text) as unknown
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new RequestBodyError('JSON request body must be an object.', 400)
+    }
+    return value as Record<string, unknown>
+  } catch (error) {
+    if (error instanceof RequestBodyError) throw error
+    throw new RequestBodyError('Request body contains invalid JSON.', 400)
+  }
 }
 
 export async function readNumericFields(

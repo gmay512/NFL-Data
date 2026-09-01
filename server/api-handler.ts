@@ -1,6 +1,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { getIngestConfig, type AppEnv } from './config'
-import { readJsonBody, readNumericFields, sendJson } from './api/request'
+import { readJsonBody, readNumericFields, RequestBodyError, sendJson } from './api/request'
+import {
+  handleAnalyticsApiRequest,
+  statusForApiError,
+  type AnalyticsApiDependencies,
+} from './analytics-api'
 import {
   fetchAvailableSeasons,
   ingestSeason,
@@ -20,11 +25,18 @@ function isPositiveIntegerArray(value: unknown): value is number[] {
   return Array.isArray(value) && value.every((gameId) => Number.isInteger(gameId) && gameId > 0)
 }
 
-export async function handleApiRequest(request: IncomingMessage, response: ServerResponse, env: AppEnv) {
+export async function handleApiRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  env: AppEnv,
+  analyticsDependencies?: AnalyticsApiDependencies,
+) {
   const requestUrl = new URL(request.url ?? '/', 'http://localhost')
   if (!requestUrl.pathname.startsWith('/api/')) return false
 
   try {
+    if (await handleAnalyticsApiRequest(request, response, requestUrl, env, analyticsDependencies)) return true
+
     if (request.method === 'GET' && requestUrl.pathname === '/api/health') {
       sendJson(response, 200, { status: 'ok' })
       return true
@@ -172,6 +184,19 @@ export async function handleApiRequest(request: IncomingMessage, response: Serve
     sendJson(response, 404, { error: 'API route not found.' })
     return true
   } catch (error) {
+    if (response.headersSent) {
+      if (!response.writableEnded) response.end()
+      return true
+    }
+    const mapped = statusForApiError(error)
+    if (mapped) {
+      sendJson(response, mapped.statusCode, { error: mapped.message, code: mapped.code })
+      return true
+    }
+    if (error instanceof RequestBodyError) {
+      sendJson(response, error.statusCode, { error: error.message, code: 'invalid_request_body' })
+      return true
+    }
     const errorMessage = error instanceof Error ? error.message : String(error)
     console.error('[API Error]', error)
     sendJson(response, 500, { error: errorMessage })
