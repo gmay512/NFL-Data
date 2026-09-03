@@ -37,6 +37,28 @@ const source: AnalyticsSourceData = {
   playerStats: [],
   players: [],
 }
+const manyGamesSource: AnalyticsSourceData = {
+  ...source,
+  games: Array.from({ length: 12 }, (_, index) => ({
+    ...source.games[0],
+    game_id: 200 + index,
+    game_date: `2025-09-${String(index + 1).padStart(2, '0')}`,
+    away_team_id: 100 + index * 2,
+    away_team_name: `Away ${String.fromCharCode(65 + index)}`,
+    home_team_id: 101 + index * 2,
+    home_team_name: `Home ${String.fromCharCode(65 + index)}`,
+    away_score: 14 + index,
+    home_score: 20 + index,
+    final_total: 34 + index * 2,
+    home_margin: 6,
+    closing_home_spread: -1 - index,
+    spread_delta: 5 - index,
+    spread_result: index < 6 ? 'home_cover' : 'away_cover',
+    closing_total: 30 + index,
+    total_delta: 4 + index,
+    total_result: 'over',
+  })),
+}
 const snapshot = buildAnalyticsSnapshot('season_overview', { season: 2025 }, source, '2025-10-01T00:00:00.000Z')
 const session: AnalysisSession = {
   id: 'session-1',
@@ -112,7 +134,7 @@ async function settle() {
   })
 }
 
-function baseFetch(options?: { online?: boolean; empty?: boolean; saved?: boolean }) {
+function baseFetch(options?: { online?: boolean; empty?: boolean; saved?: boolean; many?: boolean }) {
   return async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = new URL(String(input), 'http://localhost').pathname
     if (path === '/api/analytics/metadata') return json({
@@ -130,7 +152,9 @@ function baseFetch(options?: { online?: boolean; empty?: boolean; saved?: boolea
     if (path === '/api/analytics/query') {
       const result = options?.empty
         ? buildAnalyticsSnapshot('season_overview', { season: 2025 }, { ...source, games: [] })
-        : snapshot
+        : options?.many
+          ? buildAnalyticsSnapshot('season_overview', { season: 2025 }, manyGamesSource)
+          : snapshot
       return json({ snapshot: result })
     }
     if (path === '/api/analytics/sessions' && init?.method !== 'POST') {
@@ -164,6 +188,38 @@ describe('AnalyticsPage', () => {
     })
     await settle()
     assert.equal(requestedTeam, 1)
+  })
+
+  it('stacks saved analysis under local analysis beside the conversation and keeps sortable table viewports', async () => {
+    const container = await renderPage(baseFetch({ many: true }))
+    const overview = container.querySelector('.analysis-overview')
+    const sidebar = overview?.querySelector(':scope > .analysis-sidebar')
+    const actions = sidebar?.querySelector(':scope > .analysis-actions')
+    const saved = sidebar?.querySelector(':scope > .saved-analyses')
+    const conversation = overview?.querySelector(':scope > .analysis-chat')
+    assert(overview && sidebar && actions && saved && conversation)
+    assert.deepEqual([...sidebar.children], [actions, saved])
+    assert.equal(actions.querySelector('h2')?.textContent, 'Local analysis')
+    assert.equal(saved.querySelector('h2')?.textContent, 'Saved analyses')
+    assert.equal(conversation.querySelector('h2')?.textContent, 'Grounded conversation')
+
+    const tables = container.querySelectorAll<HTMLTableElement>('.analytics-data-table')
+    const scrollAreas = container.querySelectorAll('.analytics-table-scroll')
+    assert.equal(tables.length, 2)
+    assert.equal(scrollAreas.length, 2)
+    assert.equal(tables[0].querySelectorAll('tbody tr').length, 24)
+    assert.equal(tables[1].querySelectorAll('tbody tr').length, 12)
+
+    for (const table of tables) {
+      const headers = [...table.querySelectorAll<HTMLTableCellElement>('thead th')]
+      assert(headers.length > 0)
+      for (const header of headers) {
+        const button = header.querySelector<HTMLButtonElement>('button')
+        assert(button)
+        await React.act(async () => button.click())
+        assert.notEqual(header.getAttribute('aria-sort'), 'none')
+      }
+    }
   })
 
   it('keeps deterministic empty states available while the local model is offline', async () => {

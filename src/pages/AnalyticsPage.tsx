@@ -63,6 +63,44 @@ function selectedPreset(filters: AnalyticsFilters): AnalyticsPreset {
   return 'season_overview'
 }
 
+type SortDirection = 1 | -1
+type TeamSortField = 'team' | 'ats' | 'atsRate' | 'totals' | 'averageSpreadDelta'
+type GameSortField = 'date' | 'matchup' | 'final' | 'closingSpread' | 'spreadResult' | 'closingTotal' | 'totalResult'
+type TeamTrend = AnalyticsSnapshot['teamTrends']['items'][number]
+type GameResult = AnalyticsSnapshot['games']['items'][number]
+
+function compareValues(left: string | number | null, right: string | number | null, direction: SortDirection) {
+  if (left == null) return right == null ? 0 : 1
+  if (right == null) return -1
+  return (typeof left === 'string'
+    ? left.localeCompare(String(right))
+    : left - Number(right)) * direction
+}
+
+function compareTeamTrends(left: TeamTrend, right: TeamTrend, field: TeamSortField, direction: SortDirection) {
+  const values: Record<TeamSortField, [string | number | null, string | number | null]> = {
+    team: [left.teamName, right.teamName],
+    ats: [left.atsWins - left.atsLosses, right.atsWins - right.atsLosses],
+    atsRate: [left.atsWinRate, right.atsWinRate],
+    totals: [left.overs - left.unders, right.overs - right.unders],
+    averageSpreadDelta: [left.averageTeamSpreadDelta, right.averageTeamSpreadDelta],
+  }
+  return compareValues(...values[field], direction) || left.teamId - right.teamId
+}
+
+function compareGames(left: GameResult, right: GameResult, field: GameSortField, direction: SortDirection) {
+  const values: Record<GameSortField, [string | number | null, string | number | null]> = {
+    date: [left.gameDate, right.gameDate],
+    matchup: [`${left.awayTeamName} at ${left.homeTeamName}`, `${right.awayTeamName} at ${right.homeTeamName}`],
+    final: [left.finalTotal, right.finalTotal],
+    closingSpread: [left.closingHomeSpread, right.closingHomeSpread],
+    spreadResult: [left.spreadDelta, right.spreadDelta],
+    closingTotal: [left.closingTotal, right.closingTotal],
+    totalResult: [left.totalDelta, right.totalDelta],
+  }
+  return compareValues(...values[field], direction) || left.gameId - right.gameId
+}
+
 export function AnalyticsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [metadata, setMetadata] = useState<AnalyticsFilterMetadata | null>(null)
@@ -78,7 +116,11 @@ export function AnalyticsPage() {
   const [lastQuestion, setLastQuestion] = useState('')
   const [streamController, setStreamController] = useState<AbortController | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [sort, setSort] = useState<{ field: 'date' | 'spread' | 'total'; direction: 1 | -1 }>({
+  const [teamSort, setTeamSort] = useState<{ field: TeamSortField; direction: SortDirection }>({
+    field: 'team',
+    direction: 1,
+  })
+  const [gameSort, setGameSort] = useState<{ field: GameSortField; direction: SortDirection }>({
     field: 'date',
     direction: -1,
   })
@@ -173,19 +215,41 @@ export function AnalyticsPage() {
     }
   }, [filters, preset])
 
-  const sortedGames = useMemo(() => {
-    const games = [...(snapshot?.games.items ?? [])]
-    return games.sort((left, right) => {
-      const leftValue = sort.field === 'date' ? left.gameDate ?? '' : sort.field === 'spread' ? left.spreadDelta ?? -Infinity : left.totalDelta ?? -Infinity
-      const rightValue = sort.field === 'date' ? right.gameDate ?? '' : sort.field === 'spread' ? right.spreadDelta ?? -Infinity : right.totalDelta ?? -Infinity
-      return (leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : left.gameId - right.gameId) * sort.direction
-    })
-  }, [snapshot, sort])
+  const sortedTeamTrends = useMemo(() => {
+    return [...(snapshot?.teamTrends.items ?? [])]
+      .sort((left, right) => compareTeamTrends(left, right, teamSort.field, teamSort.direction))
+  }, [snapshot, teamSort])
 
-  const changeSort = (field: typeof sort.field) => {
-    setSort((current) => current.field === field
+  const sortedGames = useMemo(() => {
+    return [...(snapshot?.games.items ?? [])]
+      .sort((left, right) => compareGames(left, right, gameSort.field, gameSort.direction))
+  }, [snapshot, gameSort])
+
+  const changeTeamSort = (field: TeamSortField) => {
+    setTeamSort((current) => current.field === field
+      ? { field, direction: current.direction === 1 ? -1 : 1 }
+      : { field, direction: 1 })
+  }
+
+  const changeGameSort = (field: GameSortField) => {
+    setGameSort((current) => current.field === field
       ? { field, direction: current.direction === 1 ? -1 : 1 }
       : { field, direction: -1 })
+  }
+
+  function sortHeader<Field extends string>(
+    label: string,
+    field: Field,
+    current: { field: Field; direction: SortDirection },
+    change: (field: Field) => void,
+  ) {
+    return (
+    <th aria-sort={current.field === field ? current.direction === 1 ? 'ascending' : 'descending' : 'none'}>
+      <button type="button" onClick={() => change(field)}>
+        {label}<span aria-hidden="true">{current.field === field ? current.direction === 1 ? ' ↑' : ' ↓' : ''}</span>
+      </button>
+    </th>
+    )
   }
 
   const createReport = async (requestedPreset: AnalyticsPreset) => {
@@ -316,28 +380,16 @@ export function AnalyticsPage() {
 
       {error && <StatusMessage title="Analytics error" message={error} error />}
       {isLoading && <StatusMessage title="Calculating analytics" message="Loading deterministic results and supporting context." />}
-      {!isLoading && snapshot && (
-        <>
-          <section className="analytics-kpis">
-            <article className="stat-card"><span className="stat-label">Completed games</span><p className="stat-value">{snapshot.summary.games}</p></article>
-            <article className="stat-card"><span className="stat-label">Over rate</span><p className="stat-value">{percent(snapshot.summary.totals.overRate)}</p><small>{snapshot.summary.totals.overs}-{snapshot.summary.totals.unders}-{snapshot.summary.totals.pushes}</small></article>
-            <article className="stat-card"><span className="stat-label">Home cover rate</span><p className="stat-value">{percent(snapshot.summary.spread.homeCoverRate)}</p><small>{snapshot.summary.spread.homeCovers} home / {snapshot.summary.spread.awayCovers} away</small></article>
-            <article className="stat-card"><span className="stat-label">Ungraded lines</span><p className="stat-value">{snapshot.dataQuality.gamesMissingSpread + snapshot.dataQuality.gamesMissingTotal}</p><small>Spread + total</small></article>
-          </section>
+      {!isLoading && snapshot && <section className="analytics-kpis">
+        <article className="stat-card"><span className="stat-label">Completed games</span><p className="stat-value">{snapshot.summary.games}</p></article>
+        <article className="stat-card"><span className="stat-label">Over rate</span><p className="stat-value">{percent(snapshot.summary.totals.overRate)}</p><small>{snapshot.summary.totals.overs}-{snapshot.summary.totals.unders}-{snapshot.summary.totals.pushes}</small></article>
+        <article className="stat-card"><span className="stat-label">Home cover rate</span><p className="stat-value">{percent(snapshot.summary.spread.homeCoverRate)}</p><small>{snapshot.summary.spread.homeCovers} home / {snapshot.summary.spread.awayCovers} away</small></article>
+        <article className="stat-card"><span className="stat-label">Ungraded lines</span><p className="stat-value">{snapshot.dataQuality.gamesMissingSpread + snapshot.dataQuality.gamesMissingTotal}</p><small>Spread + total</small></article>
+      </section>}
 
-          <section className="analytics-grid">
-            <article className="panel panel-wide">
-              <div className="section-heading"><h2>Team trends</h2></div>
-              {snapshot.teamTrends.items.length ? <div className="table-wrap"><table>
-                <thead><tr><th>Team</th><th>ATS</th><th>ATS rate</th><th>O/U/P</th><th>Avg ATS delta</th></tr></thead>
-                <tbody>{snapshot.teamTrends.items.map((team) => <tr key={team.teamId}>
-                  <th>{team.teamName}</th><td>{team.atsWins}-{team.atsLosses}-{team.atsPushes}</td>
-                  <td><span className="trend-bar"><i style={{ width: `${(team.atsWinRate ?? 0) * 100}%` }} /></span>{percent(team.atsWinRate)}</td>
-                  <td>{team.overs}-{team.unders}-{team.totalPushes}</td><td>{signed(team.averageTeamSpreadDelta)}</td>
-                </tr>)}</tbody>
-              </table></div> : <p className="empty-state">No team trends match these filters.</p>}
-            </article>
-
+      <section className={`analysis-overview ${!snapshot ? 'without-actions' : ''}`}>
+        <div className="analysis-sidebar">
+          {!isLoading && snapshot && (
             <aside className="panel panel-wide analysis-actions">
               <div className="section-heading"><h2>Local analysis</h2></div>
               <p>Generate a saved explanation grounded in the metrics currently shown.</p>
@@ -346,37 +398,19 @@ export function AnalyticsPage() {
               </button>)}
               {llmHealth?.status !== 'available' && <small>Start llama-server to enable model analysis. Historical metrics remain available.</small>}
             </aside>
-          </section>
+          )}
 
-          <section className="panel panel-wide">
-            <div className="section-heading"><h2>Game results</h2><span>{snapshot.games.total} matching games{snapshot.games.truncated ? `; showing ${snapshot.games.included}` : ''}</span></div>
-            {sortedGames.length ? <div className="table-wrap"><table className="analytics-results-table">
-              <thead><tr>
-                <th><button onClick={() => changeSort('date')}>Date</button></th><th>Matchup</th><th>Final</th><th>Closing spread</th>
-                <th><button onClick={() => changeSort('spread')}>ATS result</button></th><th>Closing total</th><th><button onClick={() => changeSort('total')}>Total result</button></th>
-              </tr></thead>
-              <tbody>{sortedGames.map((game) => <tr key={game.gameId}>
-                <td>{game.gameDate ?? '—'}</td><th>{game.awayTeamName} at {game.homeTeamName}<small>Game {game.gameId}</small></th>
-                <td>{game.awayScore}-{game.homeScore}</td><td>{game.closingHomeSpread ?? '—'}</td>
-                <td><b className={`result-pill is-${game.spreadResult}`}>{game.spreadResult.replace('_', ' ')}</b><small>{signed(game.spreadDelta)}</small></td>
-                <td>{game.closingTotal ?? '—'}</td><td><b className={`result-pill is-${game.totalResult}`}>{game.totalResult}</b><small>{signed(game.totalDelta)}</small></td>
-              </tr>)}</tbody>
-            </table></div> : <p className="empty-state">No completed games match these filters.</p>}
-          </section>
-        </>
-      )}
-
-      <section className="analysis-workspace">
-        <aside className="panel saved-analyses">
-          <div className="section-heading"><h2>Saved analyses</h2></div>
-          {sessions.length ? sessions.map((session) => <div className={`saved-analysis ${activeSession?.id === session.id ? 'is-active' : ''}`} key={session.id}>
-            <button className="saved-analysis-open" type="button" onClick={() => void openSession(session.id)}>
-              <strong>{session.title}</strong><small>{presetLabel(session.preset)} · {session.filters.season}</small>
-            </button>
-            <button type="button" aria-label={`Rename ${session.title}`} onClick={() => void renameSession(session)}>✎</button>
-            <button type="button" aria-label={`Delete ${session.title}`} onClick={() => void removeSession(session)}>×</button>
-          </div>) : <p className="empty-state">No saved analyses yet.</p>}
-        </aside>
+          <aside className="panel saved-analyses">
+            <div className="section-heading"><h2>Saved analyses</h2></div>
+            {sessions.length ? sessions.map((session) => <div className={`saved-analysis ${activeSession?.id === session.id ? 'is-active' : ''}`} key={session.id}>
+              <button className="saved-analysis-open" type="button" onClick={() => void openSession(session.id)}>
+                <strong>{session.title}</strong><small>{presetLabel(session.preset)} · {session.filters.season}</small>
+              </button>
+              <button type="button" aria-label={`Rename ${session.title}`} onClick={() => void renameSession(session)}>✎</button>
+              <button type="button" aria-label={`Delete ${session.title}`} onClick={() => void removeSession(session)}>×</button>
+            </div>) : <p className="empty-state">No saved analyses yet.</p>}
+          </aside>
+        </div>
 
         <article className="panel analysis-chat">
           {activeSession ? <>
@@ -407,6 +441,47 @@ export function AnalyticsPage() {
           </> : <div className="analysis-chat-empty"><h2>Grounded conversation</h2><p>Open or generate a saved analysis to ask follow-up questions against its immutable data snapshot.</p></div>}
         </article>
       </section>
+
+      {!isLoading && snapshot && <>
+        <section className="panel panel-wide">
+          <div className="section-heading"><h2>Team trends</h2><span>{snapshot.teamTrends.total} teams</span></div>
+          {sortedTeamTrends.length ? <div className="table-wrap analytics-table-scroll"><table className="analytics-data-table team-trends-table">
+            <thead><tr>
+              {sortHeader('Team', 'team', teamSort, changeTeamSort)}
+              {sortHeader('ATS', 'ats', teamSort, changeTeamSort)}
+              {sortHeader('ATS rate', 'atsRate', teamSort, changeTeamSort)}
+              {sortHeader('O/U/P', 'totals', teamSort, changeTeamSort)}
+              {sortHeader('Avg ATS delta', 'averageSpreadDelta', teamSort, changeTeamSort)}
+            </tr></thead>
+            <tbody>{sortedTeamTrends.map((team) => <tr key={team.teamId}>
+              <th>{team.teamName}</th><td>{team.atsWins}-{team.atsLosses}-{team.atsPushes}</td>
+              <td><span className="trend-bar"><i style={{ width: `${(team.atsWinRate ?? 0) * 100}%` }} /></span>{percent(team.atsWinRate)}</td>
+              <td>{team.overs}-{team.unders}-{team.totalPushes}</td><td>{signed(team.averageTeamSpreadDelta)}</td>
+            </tr>)}</tbody>
+          </table></div> : <p className="empty-state">No team trends match these filters.</p>}
+        </section>
+
+        <section className="panel panel-wide">
+          <div className="section-heading"><h2>Game results</h2><span>{snapshot.games.total} matching games{snapshot.games.truncated ? `; showing ${snapshot.games.included}` : ''}</span></div>
+          {sortedGames.length ? <div className="table-wrap analytics-table-scroll"><table className="analytics-data-table analytics-results-table">
+            <thead><tr>
+              {sortHeader('Date', 'date', gameSort, changeGameSort)}
+              {sortHeader('Matchup', 'matchup', gameSort, changeGameSort)}
+              {sortHeader('Final', 'final', gameSort, changeGameSort)}
+              {sortHeader('Closing spread', 'closingSpread', gameSort, changeGameSort)}
+              {sortHeader('ATS result', 'spreadResult', gameSort, changeGameSort)}
+              {sortHeader('Closing total', 'closingTotal', gameSort, changeGameSort)}
+              {sortHeader('Total result', 'totalResult', gameSort, changeGameSort)}
+            </tr></thead>
+            <tbody>{sortedGames.map((game) => <tr key={game.gameId}>
+              <td>{game.gameDate ?? '—'}</td><th>{game.awayTeamName} at {game.homeTeamName}<small>Game {game.gameId}</small></th>
+              <td>{game.awayScore}-{game.homeScore}</td><td>{game.closingHomeSpread ?? '—'}</td>
+              <td><b className={`result-pill is-${game.spreadResult}`}>{game.spreadResult.replace('_', ' ')}</b><small>{signed(game.spreadDelta)}</small></td>
+              <td>{game.closingTotal ?? '—'}</td><td><b className={`result-pill is-${game.totalResult}`}>{game.totalResult}</b><small>{signed(game.totalDelta)}</small></td>
+            </tr>)}</tbody>
+          </table></div> : <p className="empty-state">No completed games match these filters.</p>}
+        </section>
+      </>}
     </main>
   )
 }
