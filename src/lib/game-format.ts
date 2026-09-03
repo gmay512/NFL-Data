@@ -4,6 +4,7 @@ type GameStatus = Pick<GameRow, 'status_long' | 'status_short' | 'status_timer'>
 type GameSchedule = Pick<GameRow, 'game_date' | 'game_time'>
 type ScoredGame = Pick<GameRow, 'away_total' | 'home_total' | 'status_short'>
 type ScoringEvent = Pick<LatestGameEventRow, 'comment' | 'event_type' | 'minute' | 'quarter'>
+export type GameAnalysisPreset = 'game_review' | 'matchup_preview'
 
 const eventPeriodLabels: Record<string, string> = {
   first: 'Q1',
@@ -13,6 +14,13 @@ const eventPeriodLabels: Record<string, string> = {
   overtime: 'OT',
   ot: 'OT',
   ot2: '2OT',
+}
+
+export function getGameAnalysisPreset(game: Pick<GameRow, 'status_short'>): GameAnalysisPreset | null {
+  const status = game.status_short?.trim().toUpperCase()
+  if (status === 'FT' || status === 'AOT') return 'game_review'
+  if (status === 'NS') return 'matchup_preview'
+  return null
 }
 
 export function formatScheduleGameStatus(game: GameStatus) {

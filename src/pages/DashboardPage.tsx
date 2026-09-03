@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useSearchParams } from 'react-router-dom'
-import { getAvailableSeasons, ingestSeason, refreshLiveGames as refreshLiveGamesFromApi, refreshSeasonGames } from '../api/app-api'
+import {
+  getAvailableSeasons,
+  getLlmHealth,
+  ingestSeason,
+  refreshLiveGames as refreshLiveGamesFromApi,
+  refreshSeasonGames,
+  runAnalysis,
+} from '../api/app-api'
+import type { AnalysisSession, LlmHealthResponse } from '../api/contracts'
 import {
   getDashboardMetadata,
   getGameOdds,
@@ -11,14 +19,24 @@ import {
   getTeams,
   invalidateReferenceData,
 } from '../data/nfl-repository'
-import { ScheduleGameCard, StatusMessage } from '../features/dashboard/DashboardComponents'
+import {
+  GameAnalysisModal,
+  ScheduleGameCard,
+  StatusMessage,
+} from '../features/dashboard/DashboardComponents'
 import { useVisiblePolling } from '../hooks/useVisiblePolling'
+import type { GameAnalysisPreset } from '../lib/game-format'
 import { hasSupabaseEnv, supabase } from '../lib/supabase'
 import { getRefreshableGameIds, hasLiveGameChanged, reconcileRowsByKey } from '../lib/game-sync'
 import type { GameOddsRow, GameRow, GameTeamStatRow, LatestGameEventRow, LeagueSeasonRow, TeamRow } from '../types/nfl'
 
 type DashboardMode = 'season' | 'live' | 'team'
 type SeasonOption = { season: number; current: boolean }
+type AnalysisTarget = {
+  game: GameRow
+  preset: GameAnalysisPreset
+  title: string
+}
 
 const UNASSIGNED_WEEK = '__unassigned__'
 const WEEK_KEY_SEPARATOR = '::'
@@ -61,7 +79,13 @@ export function DashboardPage() {
   const [error, setError] = useState<string | null>(null)
   const [lastLiveCheckedAt, setLastLiveCheckedAt] = useState<Date | null>(null)
   const [updatedLiveGameIds, setUpdatedLiveGameIds] = useState<Set<number>>(() => new Set())
+  const [llmHealth, setLlmHealth] = useState<LlmHealthResponse | null>(null)
+  const [analysisTarget, setAnalysisTarget] = useState<AnalysisTarget | null>(null)
+  const [analysisSession, setAnalysisSession] = useState<AnalysisSession | null>(null)
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [analysisError, setAnalysisError] = useState<string | null>(null)
   const liveRequestId = useRef(0)
+  const analysisRequestId = useRef(0)
   const liveGameSnapshot = useRef<Map<number, GameRow>>(new Map())
   const liveHighlightTimeouts = useRef<Map<number, number>>(new Map())
   const displayedGamesKey = useRef<string | null>(null)
@@ -382,7 +406,79 @@ export function DashboardPage() {
   const selectedSeasonLabel = seasons.find((season) => String(season.season) === selectedSeason)?.season
   const dashboardPath = `${location.pathname}${location.search}`
 
+  const refreshLlmHealth = useCallback(async () => {
+    try {
+      setLlmHealth(await getLlmHealth())
+    } catch (healthError) {
+      setLlmHealth({
+        status: 'unavailable',
+        code: 'health_request_failed',
+        message: healthError instanceof Error ? healthError.message : 'Could not check the local model.',
+      })
+    }
+  }, [])
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => void refreshLlmHealth(), 0)
+    return () => window.clearTimeout(timeoutId)
+  }, [refreshLlmHealth])
+  useVisiblePolling(refreshLlmHealth, true, 30_000)
+
+  const runGameAnalysis = useCallback(async (target: AnalysisTarget) => {
+    const requestId = ++analysisRequestId.current
+    const season = target.game.season
+    setAnalysisTarget(target)
+    setAnalysisSession(null)
+    setAnalysisError(null)
+    setIsAnalyzing(true)
+
+    if (!season) {
+      setAnalysisError('This game does not have a valid season for analytics.')
+      setIsAnalyzing(false)
+      return
+    }
+
+    try {
+      const payload = await runAnalysis(target.title, target.preset, {
+        season,
+        gameId: target.game.id,
+      })
+      if (requestId === analysisRequestId.current) setAnalysisSession(payload.session)
+    } catch (analysisFailure) {
+      if (requestId === analysisRequestId.current) {
+        setAnalysisError(analysisFailure instanceof Error ? analysisFailure.message : 'Could not analyze this matchup.')
+      }
+    } finally {
+      if (requestId === analysisRequestId.current) setIsAnalyzing(false)
+    }
+  }, [])
+
+  const openGameAnalysis = useCallback((
+    game: GameRow,
+    awayTeam: TeamRow | undefined,
+    homeTeam: TeamRow | undefined,
+    preset: GameAnalysisPreset,
+  ) => {
+    const awayName = awayTeam?.name ?? `Away team ${game.away_team_id ?? ''}`
+    const homeName = homeTeam?.name ?? `Home team ${game.home_team_id ?? ''}`
+    const suffix = preset === 'game_review' ? 'review' : 'preview'
+    void runGameAnalysis({
+      game,
+      preset,
+      title: `${awayName} at ${homeName} ${suffix}`,
+    })
+  }, [runGameAnalysis])
+
+  const closeGameAnalysis = useCallback(() => {
+    analysisRequestId.current += 1
+    setAnalysisTarget(null)
+    setAnalysisSession(null)
+    setAnalysisError(null)
+    setIsAnalyzing(false)
+  }, [])
+
   return (
+    <>
     <main className="dashboard-page">
       <section className="dashboard-hero">
         <div className="dashboard-hero-copy">
@@ -554,6 +650,9 @@ export function DashboardPage() {
                       stats={teamGameStats[game.id]}
                       odds={gameOdds[game.id]}
                       dashboardPath={dashboardPath}
+                      onAnalyze={llmHealth?.status === 'available'
+                        ? (preset) => openGameAnalysis(game, awayTeam, homeTeam, preset)
+                        : undefined}
                     />
                   )
                 }
@@ -568,6 +667,9 @@ export function DashboardPage() {
                     isUpdated={mode === 'live' && updatedLiveGameIds.has(game.id)}
                     latestEvent={mode === 'live' ? latestGameEvents[game.id] : undefined}
                     odds={gameOdds[game.id]}
+                    onAnalyze={llmHealth?.status === 'available'
+                      ? (preset) => openGameAnalysis(game, awayTeam, homeTeam, preset)
+                      : undefined}
                   />
                 )
               })}
@@ -576,5 +678,17 @@ export function DashboardPage() {
         </div>
       </section>
     </main>
+    {analysisTarget && (
+      <GameAnalysisModal
+        title={analysisTarget.title}
+        preset={analysisTarget.preset}
+        session={analysisSession}
+        isLoading={isAnalyzing}
+        error={analysisError}
+        onClose={closeGameAnalysis}
+        onRetry={() => void runGameAnalysis(analysisTarget)}
+      />
+    )}
+    </>
   )
 }

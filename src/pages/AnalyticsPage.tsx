@@ -43,6 +43,7 @@ function presetLabel(preset: AnalyticsPreset) {
     season_overview: 'Season overview',
     team_analysis: 'Team analysis',
     game_review: 'Game review',
+    matchup_preview: 'Matchup preview',
     trend_comparison: 'Trend comparison',
   }[preset]
 }
@@ -51,6 +52,7 @@ function defaultTitle(preset: AnalyticsPreset, filters: AnalyticsFilters, metada
   const team = metadata?.teams.find((item) => item.id === filters.teamId)?.name
   const comparison = metadata?.teams.find((item) => item.id === filters.comparisonTeamId)?.name
   if (preset === 'game_review') return `${filters.season} game ${filters.gameId} review`
+  if (preset === 'matchup_preview') return `${filters.season} game ${filters.gameId} preview`
   if (preset === 'team_analysis') return `${filters.season} ${team ?? `team ${filters.teamId}`} analysis`
   if (preset === 'trend_comparison') return `${team ?? filters.teamId} vs ${comparison ?? filters.comparisonTeamId}`
   return `${filters.season} season overview`
@@ -131,6 +133,7 @@ export function AnalyticsPage() {
   const teamId = numberParam(searchParams.get('team'))
   const comparisonTeamId = teamId ? numberParam(searchParams.get('compare')) : undefined
   const gameId = numberParam(searchParams.get('game'))
+  const linkedSessionId = searchParams.get('session')
   const filters = useMemo<AnalyticsFilters | null>(() => season ? {
     season,
     ...(stage ? { stage } : {}),
@@ -193,6 +196,21 @@ export function AnalyticsPage() {
     })
     return () => controller.abort()
   }, [])
+
+  useEffect(() => {
+    if (!linkedSessionId) return
+    const controller = new AbortController()
+    void getAnalysisSession(linkedSessionId, { signal: controller.signal }).then((payload) => {
+      setActiveSession(payload.session)
+      setPendingAnswer('')
+      setError(null)
+    }).catch((sessionError) => {
+      if (!controller.signal.aborted) {
+        setError(sessionError instanceof Error ? sessionError.message : 'Could not load the linked analysis session.')
+      }
+    })
+    return () => controller.abort()
+  }, [linkedSessionId])
 
   useEffect(() => {
     if (!filters) return

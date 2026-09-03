@@ -198,6 +198,7 @@ describe('analytics API contracts', () => {
         incoming.on('data', () => {})
         incoming.on('end', resolve)
       })
+
       response.setHeader('Content-Type', 'application/json')
       response.end(JSON.stringify({
         model: 'test-model',
@@ -228,6 +229,52 @@ describe('analytics API contracts', () => {
     const deleteResponse = await request(`/api/analytics/sessions/${sessionId}`, deps, 'DELETE')
     assert.equal(deleteResponse.status, 204)
     assert.equal(memory.getSession(), null)
+  })
+
+  it('registers matchup previews and persists their preset-specific initial prompt', async () => {
+    const modelUrl = await startServer(async (incoming, response) => {
+      await new Promise<void>((resolve) => {
+        incoming.on('data', () => {})
+        incoming.on('end', resolve)
+      })
+      response.setHeader('Content-Type', 'application/json')
+      response.end(JSON.stringify({
+        model: 'test-model',
+        choices: [{ message: { content: 'Grounded matchup.' }, finish_reason: 'stop' }],
+      }))
+    })
+    const memory = createMemoryStore()
+    const deps = dependencies(llama(modelUrl), memory.store)
+    deps.dataSource = {
+      async load() {
+        return {
+          ...emptySource,
+          targetMatchup: {
+            gameId: 42,
+            season: 2025,
+            status: { short: 'NS', long: 'Not Started' },
+            kickoff: { date: '2025-10-05', timestamp: 1_759_680_000 },
+            stage: 'Regular Season',
+            week: 'Week 5',
+            venue: { name: 'State Farm Stadium', city: 'Glendale' },
+            awayTeam: { id: 2, name: 'Buffalo' },
+            homeTeam: { id: 1, name: 'Arizona' },
+            currentConsensusOdds: { homeSpread: 2.5, total: 47.5 },
+          },
+        }
+      },
+    }
+
+    const response = await request('/api/analytics/analyze', deps, 'POST', {
+      title: 'Pregame matchup',
+      preset: 'matchup_preview',
+      filters: { season: 2025, gameId: 42 },
+    })
+
+    assert.equal(response.status, 201)
+    assert.equal(memory.getSession()?.preset, 'matchup_preview')
+    assert.equal(memory.getSession()?.messages[0].content, 'Generate a grounded pregame matchup preview.')
+    assert.equal(memory.getSession()?.context.targetMatchup?.gameId, 42)
   })
 
   it('streams follow-ups and persists only completed exchanges', async () => {

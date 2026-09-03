@@ -165,6 +165,14 @@ describe('analytics filter validation', () => {
       /gameId is required/,
     )
     assert.throws(
+      () => validateAnalyticsFilters('matchup_preview', { season: 2025 }),
+      /gameId is required for matchup preview/,
+    )
+    assert.deepEqual(
+      validateAnalyticsFilters('matchup_preview', { season: '2025', gameId: '42' }),
+      { season: 2025, gameId: 42 },
+    )
+    assert.throws(
       () => validateAnalyticsFilters('trend_comparison', {
         season: 2025,
         teamId: 1,
@@ -310,6 +318,31 @@ describe('deterministic analytics snapshot', () => {
       balanced.playerStats.items.map((stat) => `${stat.stat_group}:${stat.stat_name}`),
       ['Defensive:sacks', 'Passing:yards'],
     )
+  })
+
+  it('adds the scheduled target matchup and uses its team names for preview context', () => {
+    const targetMatchup = {
+      gameId: 42,
+      season: 2025,
+      status: { short: 'NS', long: 'Not Started' },
+      kickoff: { date: '2025-10-05', timestamp: 1_759_680_000 },
+      stage: 'Regular Season',
+      week: 'Week 5',
+      venue: { name: 'State Farm Stadium', city: 'Glendale' },
+      awayTeam: { id: 2, name: 'Buffalo' },
+      homeTeam: { id: 1, name: 'Arizona' },
+      currentConsensusOdds: { homeSpread: 2.5, total: 47.5 },
+    }
+    const preview = buildAnalyticsSnapshot(
+      'matchup_preview',
+      { season: 2025, gameId: 42 },
+      { ...source, games: [], targetMatchup },
+      '2025-10-01T00:00:00.000Z',
+    )
+
+    assert.deepEqual(preview.targetMatchup, targetMatchup)
+    assert.equal(preview.standings.items[0].teamName, 'Arizona')
+    assert.equal(preview.currentInjuries.items[0].teamName, 'Arizona')
   })
 })
 

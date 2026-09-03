@@ -97,7 +97,7 @@ function json(value: unknown, status = 200) {
   })
 }
 
-async function renderPage(fetchHandler: typeof fetch) {
+async function renderPage(fetchHandler: typeof fetch, initialEntry = '/analytics?season=2025') {
   dom = new JSDOM('<!doctype html><div id="root"></div>', { url: 'http://localhost/analytics' })
   Object.defineProperties(globalThis, {
     window: { configurable: true, value: dom.window },
@@ -120,7 +120,7 @@ async function renderPage(fetchHandler: typeof fetch) {
   await React.act(async () => {
     root?.render(React.createElement(
       MemoryRouter,
-      { initialEntries: ['/analytics?season=2025'] },
+      { initialEntries: [initialEntry] },
       React.createElement(AnalyticsPage),
     ))
   })
@@ -317,5 +317,12 @@ describe('AnalyticsPage', () => {
     await React.act(async () => form.requestSubmit())
     await settle()
     assert.match(container.textContent ?? '', /The home side covered by 3.5 points/)
+  })
+
+  it('opens a saved analysis from a session deep link', async () => {
+    const container = await renderPage(baseFetch({ saved: true }), '/analytics?session=session-1')
+
+    assert.match(container.textContent ?? '', /2025 season overview/)
+    assert.match(container.textContent ?? '', /The supplied game finished over the closing total/)
   })
 })

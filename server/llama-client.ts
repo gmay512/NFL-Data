@@ -85,6 +85,11 @@ const presetInstructions: Record<AnalyticsPreset, string> = {
   season_overview: 'Summarize the supplied season results, data quality, and the strongest supported team trends.',
   team_analysis: 'Analyze the selected team using its ATS, totals, team-stat, standing, player, and current injury context.',
   game_review: 'Explain how the selected completed game finished relative to its closing spread and total using the supplied box-score context.',
+  matchup_preview: [
+    'Analyze the target matchup using its current consensus odds and both teams’ supplied prior performance.',
+    'State uncertainty and any missing data explicitly.',
+    'Do not express predictive certainty or provide betting or financial advice.',
+  ].join(' '),
   trend_comparison: 'Compare the selected teams or cohorts using only the supplied metrics and clearly identify material data gaps.',
 }
 

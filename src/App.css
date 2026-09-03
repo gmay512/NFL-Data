@@ -231,6 +231,123 @@
 }
 .team-mark img { width: 100%; height: 100%; object-fit: contain; }
 .game-chevron { position: absolute; right: 16px; top: 50%; color: var(--muted-text); font-size: 1.65rem; transform: translateY(-50%); }
+.schedule-game-actions { display: flex; justify-content: flex-end; padding: 0 16px 13px; }
+.schedule-game-actions button {
+  min-height: 34px;
+  padding: 6px 11px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  cursor: pointer;
+  font-size: .76rem;
+  font-weight: 800;
+}
+.schedule-game-actions button:hover { background: var(--accent); color: white; }
+.game-analysis-backdrop {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  padding: 24px;
+  place-items: center;
+  background: rgba(8, 15, 27, .68);
+}
+.game-analysis-modal {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(720px, 100%);
+  max-height: min(760px, calc(100svh - 48px));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .32);
+}
+.game-analysis-modal > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: start;
+  padding: 20px 22px;
+  border-bottom: 1px solid var(--border);
+}
+.game-analysis-modal h2 { margin: 0; font-size: 1.25rem; letter-spacing: -.03em; }
+.game-analysis-close {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--muted-text);
+  cursor: pointer;
+  font-size: 1.25rem;
+}
+.game-analysis-close:hover { border-color: var(--accent-hover-border); color: var(--text); }
+.game-analysis-content {
+  min-height: 0;
+  padding: 24px;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.game-analysis-loading, .game-analysis-error {
+  display: grid;
+  min-height: 172px;
+  place-content: center;
+  justify-items: center;
+  text-align: center;
+}
+.game-analysis-loading > span {
+  width: 32px;
+  height: 32px;
+  margin-bottom: 16px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: analysis-spin .8s linear infinite;
+}
+@keyframes analysis-spin { to { transform: rotate(360deg); } }
+.game-analysis-loading p, .game-analysis-error p {
+  max-width: 480px;
+  margin: 7px 0 0;
+  color: var(--muted-text);
+  line-height: 1.5;
+}
+.game-analysis-error button {
+  margin-top: 16px;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+  font-weight: 800;
+}
+.game-analysis-answer > p { margin: 0; line-height: 1.65; white-space: pre-wrap; }
+.game-analysis-answer > small { display: block; margin-top: 18px; color: var(--muted-text); line-height: 1.45; }
+.game-analysis-modal > footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  padding: 15px 22px;
+  border-top: 1px solid var(--border);
+}
+.game-analysis-modal > footer a, .game-analysis-modal > footer button {
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 800;
+  text-decoration: none;
+}
+.game-analysis-modal > footer a { border-color: var(--accent); background: var(--accent); color: white; }
 .empty-state { padding: 44px 0; color: var(--muted-text); text-align: center; }
 .empty-season-state {
   display: grid;
@@ -533,6 +650,10 @@
   .week-button { flex: 0 0 auto; width: auto; gap: 9px; }
   .games-panel { padding: 20px; }
   .schedule-matchup { gap: 12px; }
+  .game-analysis-backdrop { padding: 12px; }
+  .game-analysis-modal { max-height: calc(100svh - 24px); }
+  .game-analysis-modal > header, .game-analysis-content { padding: 18px; }
+  .game-analysis-modal > footer { align-items: stretch; flex-direction: column; padding: 14px 18px; text-align: center; }
   .schedule-team { grid-template-columns: 32px minmax(0, 1fr) auto; gap: 7px; }
   .schedule-team-home { justify-self: stretch; }
   .schedule-team strong { font-size: .8rem; }
@@ -560,4 +681,5 @@
     background: var(--accent-soft);
     box-shadow: 0 0 0 2px var(--accent-shadow);
   }
+  .game-analysis-loading > span { animation: none; }
 }

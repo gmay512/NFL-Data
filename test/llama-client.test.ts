@@ -106,6 +106,30 @@ describe('llama.cpp configuration and grounding', () => {
       hasLlamaCode('context_too_large'),
     )
   })
+
+  it('selects matchup instructions while retaining the shared grounding prompt', () => {
+    const matchup = buildAnalyticsSnapshot(
+      'matchup_preview',
+      { season: 2025, gameId: 42 },
+      {
+        games: [],
+        teamStats: [],
+        standings: [],
+        injuries: [],
+        playerStats: [],
+        players: [],
+        targetMatchup: null,
+      },
+    )
+    const messages = buildGroundedMessages(config('http://localhost'), matchup)
+
+    assert.equal(messages[0].content, ANALYTICS_GROUNDING_PROMPT)
+    assert.match(messages.at(-1)!.content, /current consensus odds/)
+    assert.match(messages.at(-1)!.content, /prior performance/)
+    assert.match(messages.at(-1)!.content, /missing data/)
+    assert.match(messages.at(-1)!.content, /predictive certainty/)
+    assert.match(messages.at(-1)!.content, /advice/)
+  })
 })
 
 describe('llama.cpp health checks', () => {

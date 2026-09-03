@@ -9,6 +9,7 @@ import {
 import {
   createAnalyticsDataSource,
   generateAnalyticsSnapshot,
+  AnalyticsTargetError,
   type AnalyticsDataSource,
 } from './analytics-service'
 import {
@@ -53,6 +54,7 @@ const presets = new Set<AnalyticsPreset>([
   'season_overview',
   'team_analysis',
   'game_review',
+  'matchup_preview',
   'trend_comparison',
 ])
 const sessionPathPattern = /^\/api\/analytics\/sessions\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i
@@ -61,6 +63,7 @@ const presetPrompts: Record<AnalyticsPreset, string> = {
   season_overview: 'Generate a grounded season overview.',
   team_analysis: 'Generate a grounded team analysis.',
   game_review: 'Generate a grounded completed-game review.',
+  matchup_preview: 'Generate a grounded pregame matchup preview.',
   trend_comparison: 'Generate a grounded trend comparison.',
 }
 
@@ -110,6 +113,13 @@ export function statusForApiError(error: unknown) {
   }
   if (error instanceof AnalyticsValidationError) {
     return { statusCode: 400, code: 'invalid_filters', message: error.message }
+  }
+  if (error instanceof AnalyticsTargetError) {
+    return {
+      statusCode: error.code === 'target_game_not_found' ? 404 : 409,
+      code: error.code,
+      message: error.message,
+    }
   }
   if (error instanceof LlamaClientError) {
     return { statusCode: llamaStatus(error), code: error.code, message: error.message }

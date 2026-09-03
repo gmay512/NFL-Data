@@ -1,4 +1,9 @@
-export type AnalyticsPreset = 'game_review' | 'season_overview' | 'team_analysis' | 'trend_comparison'
+export type AnalyticsPreset =
+  | 'game_review'
+  | 'matchup_preview'
+  | 'season_overview'
+  | 'team_analysis'
+  | 'trend_comparison'
 
 export type AnalyticsFilters = {
   season: number
@@ -81,6 +86,37 @@ export type AnalyticsPlayerRow = {
   position: string | null
 }
 
+export type AnalyticsTargetMatchup = {
+  gameId: number
+  season: number
+  status: {
+    short: string
+    long: string | null
+  }
+  kickoff: {
+    date: string | null
+    timestamp: number
+  }
+  stage: string | null
+  week: string | null
+  venue: {
+    name: string | null
+    city: string | null
+  }
+  awayTeam: {
+    id: number
+    name: string
+  }
+  homeTeam: {
+    id: number
+    name: string
+  }
+  currentConsensusOdds: {
+    homeSpread: number | null
+    total: number | null
+  }
+}
+
 export type AnalyticsSourceData = {
   games: BettingGameRow[]
   teamStats: AnalyticsTeamStatRow[]
@@ -88,6 +124,7 @@ export type AnalyticsSourceData = {
   injuries: AnalyticsInjuryRow[]
   playerStats: AnalyticsPlayerStatRow[]
   players: AnalyticsPlayerRow[]
+  targetMatchup?: AnalyticsTargetMatchup | null
 }
 
 export type AnalyticsLimits = {
@@ -117,6 +154,7 @@ export type AnalyticsSnapshot = {
   generatedAt: string
   preset: AnalyticsPreset
   filters: AnalyticsFilters
+  targetMatchup: AnalyticsTargetMatchup | null
   definitions: {
     spreadDelta: string
     totalDelta: string
@@ -294,8 +332,10 @@ export function validateAnalyticsFilters(preset: AnalyticsPreset, value: unknown
   if (preset === 'team_analysis' && filters.teamId == null) {
     throw new AnalyticsValidationError('teamId is required for team analysis.')
   }
-  if (preset === 'game_review' && filters.gameId == null) {
-    throw new AnalyticsValidationError('gameId is required for game review.')
+  if ((preset === 'game_review' || preset === 'matchup_preview') && filters.gameId == null) {
+    throw new AnalyticsValidationError(
+      `gameId is required for ${preset === 'game_review' ? 'game review' : 'matchup preview'}.`,
+    )
   }
   if (preset === 'trend_comparison') {
     if (filters.teamId == null || filters.comparisonTeamId == null) {
@@ -336,11 +376,15 @@ function bounded<T>(items: T[], limit: number): BoundedAnalyticsItems<T> {
   }
 }
 
-function teamNamesById(games: BettingGameRow[]) {
+function teamNamesById(games: BettingGameRow[], targetMatchup?: AnalyticsTargetMatchup | null) {
   const names = new Map<number, string>()
   for (const game of games) {
     names.set(game.away_team_id, game.away_team_name)
     names.set(game.home_team_id, game.home_team_name)
+  }
+  if (targetMatchup) {
+    names.set(targetMatchup.awayTeam.id, targetMatchup.awayTeam.name)
+    names.set(targetMatchup.homeTeam.id, targetMatchup.homeTeam.name)
   }
   return names
 }
@@ -524,9 +568,15 @@ export function buildAnalyticsSnapshot(
   generatedAt = new Date().toISOString(),
   limits: AnalyticsLimits = DEFAULT_ANALYTICS_LIMITS,
 ): AnalyticsSnapshot {
-  const names = teamNamesById(source.games)
+  const names = teamNamesById(source.games, source.targetMatchup)
   const focusTeamIds = new Set(
-    [filters.teamId, filters.comparisonTeamId].filter((teamId): teamId is number => teamId != null),
+    [
+      filters.teamId,
+      filters.comparisonTeamId,
+      ...(preset === 'matchup_preview' && source.targetMatchup
+        ? [source.targetMatchup.awayTeam.id, source.targetMatchup.homeTeam.id]
+        : []),
+    ].filter((teamId): teamId is number => teamId != null),
   )
   const includeTeam = (teamId: number) => !focusTeamIds.size || focusTeamIds.has(teamId)
   const players = new Map(source.players.map((player) => [player.id, player]))
@@ -593,6 +643,7 @@ export function buildAnalyticsSnapshot(
     generatedAt,
     preset,
     filters,
+    targetMatchup: source.targetMatchup ?? null,
     definitions: {
       spreadDelta: 'Home final margin plus closing home spread; positive means home cover.',
       totalDelta: 'Final combined score minus closing total; positive means over.',
