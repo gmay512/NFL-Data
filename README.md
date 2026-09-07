@@ -121,9 +121,12 @@ bet type, outcome, and decimal-odds model
 captures all markets returned by the provider, including moneylines, spreads,
 totals, period and team markets, and player props. Re-running an unchanged
 provider snapshot is idempotent; a later provider update is retained as line
-history. The `game_consensus_odds` view selects each bookmaker's latest,
-most-balanced full-game spread and total, then exposes their medians to the
-schedule and game-detail UI without bookmaker identities or decimal prices.
+history. For Asian Handicap pairs, API-Sports repeats the home-team handicap
+suffix on both the `Home` and `Away` outcomes; the application stores that
+suffix as `home_spread`, where a negative value means the home team is favored.
+The `game_consensus_odds` view selects each bookmaker's latest, most-balanced
+full-game spread and total, then exposes their medians to the schedule and
+game-detail UI without bookmaker identities or decimal prices.
 
 Set `ODDS_AUTO_REFRESH_ENABLED=false` to disable the production scheduler.
 `ODDS_REFRESH_INTERVAL_MINUTES` overrides its 60-minute cadence. Visible

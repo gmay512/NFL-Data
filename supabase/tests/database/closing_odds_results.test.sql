@@ -1,6 +1,6 @@
 begin;
 
-select plan(22);
+select plan(26);
 
 select ok(
   has_table_privilege('service_role', 'public.game_closing_consensus_odds', 'select'),
@@ -32,7 +32,8 @@ insert into public.games (
 values
   (990001, 2099, 'Regular Season', 'Week 1', 990002, 990001, '2099-09-01', extract(epoch from '2099-09-01 18:00:00+00'::timestamptz)::bigint, 'FT', 27, 20),
   (990002, 2099, 'Regular Season', 'Week 2', 990002, 990001, '2099-09-08', extract(epoch from '2099-09-08 18:00:00+00'::timestamptz)::bigint, 'AOT', 24, 21),
-  (990003, 2099, 'Regular Season', 'Week 3', 990002, 990001, '2099-09-15', extract(epoch from '2099-09-15 18:00:00+00'::timestamptz)::bigint, 'FT', 17, 14);
+  (990003, 2099, 'Regular Season', 'Week 3', 990002, 990001, '2099-09-15', extract(epoch from '2099-09-15 18:00:00+00'::timestamptz)::bigint, 'FT', 17, 14),
+  (990004, 2099, 'Regular Season', 'Week 4', 990002, 990001, '2099-09-22', extract(epoch from '2099-09-22 18:00:00+00'::timestamptz)::bigint, 'FT', 24, 17);
 
 insert into public.bookmakers (id, name)
 values
@@ -80,7 +81,13 @@ values
   (990002, 990001, 990002, 'Under 45', 1.91, '2099-09-08 17:50:00+00', '2099-09-08 17:51:00+00'),
   -- Newer partial snapshots must not displace the latest complete market.
   (990002, 990001, 990001, 'Home -6', 1.91, '2099-09-08 17:55:00+00', '2099-09-08 17:56:00+00'),
-  (990002, 990001, 990002, 'Over 50', 1.91, '2099-09-08 17:55:00+00', '2099-09-08 17:56:00+00');
+  (990002, 990001, 990002, 'Over 50', 1.91, '2099-09-08 17:55:00+00', '2099-09-08 17:56:00+00'),
+  -- API-Sports repeats the home handicap suffix for both outcomes. Decimal
+  -- prices must not determine which team owns the sign, and equal prices are valid.
+  (990004, 990001, 990001, 'Home -3.5', 1.95, '2099-09-22 17:50:00+00', '2099-09-22 17:51:00+00'),
+  (990004, 990001, 990001, 'Away -3.5', 1.87, '2099-09-22 17:50:00+00', '2099-09-22 17:51:00+00'),
+  (990004, 990002, 990001, 'Home -4.5', 1.91, '2099-09-22 17:55:00+00', '2099-09-22 17:56:00+00'),
+  (990004, 990002, 990001, 'Away -4.5', 1.91, '2099-09-22 17:55:00+00', '2099-09-22 17:56:00+00');
 
 select is(
   (select home_spread from public.game_closing_consensus_odds where game_id = 990001),
@@ -181,6 +188,26 @@ select is(
   (select total_result from public.game_betting_results where game_id = 990003),
   'ungraded',
   'keeps a completed game without total odds ungraded'
+);
+select is(
+  (select home_spread from public.game_consensus_odds where game_id = 990004),
+  (-4)::numeric,
+  'uses the provider home handicap for current same-sign spread pairs'
+);
+select is(
+  (select home_spread from public.game_closing_consensus_odds where game_id = 990004),
+  (-4)::numeric,
+  'uses the provider home handicap for closing same-sign spread pairs'
+);
+select is(
+  (select spread_bookmaker_count from public.game_closing_consensus_odds where game_id = 990004),
+  2,
+  'retains same-sign spread pairs with equal decimal prices'
+);
+select is(
+  (select spread_delta from public.game_betting_results where game_id = 990004),
+  3::numeric,
+  'grades results against the correctly attributed closing home spread'
 );
 
 select * from finish();
