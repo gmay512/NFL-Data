@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { GameOddsRow } from '../types/nfl'
 
-const consensusGameIdChunkSize = 50
+const consensusGameIdChunkSize = 10
 
 function normalizeNullableNumber(value: unknown) {
   if (value == null) return null

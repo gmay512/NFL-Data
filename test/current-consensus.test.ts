@@ -18,6 +18,17 @@ function clientWithRows(
 }
 
 describe('current consensus odds loader', () => {
+  it('keeps default requests below the production statement timeout', async () => {
+    const { calls, client } = clientWithRows(() => ({ data: [], error: null }))
+
+    await getCurrentConsensusOdds(client, Array.from({ length: 11 }, (_, index) => index + 1))
+
+    assert.deepEqual(calls, [
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      [11],
+    ])
+  })
+
   it('deduplicates, chunks, normalizes, and orders requested games', async () => {
     const { calls, client } = clientWithRows((gameIds) => ({
       data: gameIds.map((gameId) => ({
