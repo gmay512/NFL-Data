@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { getOddsRefreshIntervalMs, startOddsRefreshScheduler } from '../server/odds-scheduler'
+import {
+  describeSchedulerError,
+  getOddsRefreshIntervalMs,
+  startOddsRefreshScheduler,
+} from '../server/odds-scheduler'
 
 type Deferred = {
   promise: Promise<{ odds: number }>
@@ -45,6 +49,19 @@ function schedulerHarness(refresh: () => Promise<{ odds: number }>) {
 }
 
 describe('odds refresh scheduler', () => {
+  it('describes structured Supabase errors', () => {
+    assert.equal(
+      describeSchedulerError({
+        code: '57014',
+        details: 'query exceeded configured limit',
+        hint: 'scope the query',
+        message: 'canceling statement due to statement timeout',
+      }),
+      'message=canceling statement due to statement timeout, code=57014, '
+        + 'details=query exceeded configured limit, hint=scope the query',
+    )
+  })
+
   it('uses an hourly default and validates overrides', () => {
     assert.equal(getOddsRefreshIntervalMs({}), 60 * 60_000)
     assert.equal(getOddsRefreshIntervalMs({ ODDS_REFRESH_INTERVAL_MINUTES: '15' }), 15 * 60_000)

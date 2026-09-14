@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import type { AvailableSeason, IngestSummary } from '../src/api/contracts'
+import { getCurrentConsensusOdds } from '../src/data/current-consensus'
 
 export type { AvailableSeason, IngestSummary } from '../src/api/contracts'
 
@@ -1459,11 +1460,10 @@ async function getOddsEligibleGameIds(client: ApiClient, season?: number, now = 
     .filter((game): game is OddsEligibilityGame => game.id !== null)
   if (!games.length) return []
 
-  const { data: consensusRows, error: consensusError } = await client.supabase
-    .from('game_consensus_odds')
-    .select('game_id,home_spread,total')
-    .in('game_id', games.map((game) => game.id))
-  if (consensusError) throw consensusError
+  const consensusRows = await getCurrentConsensusOdds(
+    client.supabase,
+    games.map((game) => game.id),
+  )
 
   const gamesWithUsableOdds = new Set(
     (consensusRows ?? [])

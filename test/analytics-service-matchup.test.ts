@@ -105,6 +105,11 @@ function fakeClient(status = 'NS') {
     from(table: string) {
       return new Query(table)
     },
+    rpc(name: string, args: { requested_game_ids: number[] }) {
+      assert.equal(name, 'get_game_consensus_odds')
+      assert.deepEqual(args.requested_game_ids, [42])
+      return Promise.resolve({ data: rows.game_consensus_odds, error: null })
+    },
   } as unknown as SupabaseClient
   return { client, logs }
 }

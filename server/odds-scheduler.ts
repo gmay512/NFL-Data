@@ -19,6 +19,22 @@ function isDisabled(value: string | undefined) {
   return value != null && ['0', 'false', 'no', 'off'].includes(value.trim().toLowerCase())
 }
 
+export function describeSchedulerError(error: unknown) {
+  if (error instanceof Error) return error.message
+  if (error && typeof error === 'object') {
+    const details = error as Record<string, unknown>
+    const fields = ['message', 'code', 'details', 'hint']
+      .flatMap((field) => details[field] == null ? [] : [`${field}=${String(details[field])}`])
+    if (fields.length) return fields.join(', ')
+    try {
+      return JSON.stringify(error)
+    } catch {
+      return Object.prototype.toString.call(error)
+    }
+  }
+  return String(error)
+}
+
 export function getOddsRefreshIntervalMs(env: AppEnv) {
   const minutes = Number(env.ODDS_REFRESH_INTERVAL_MINUTES ?? defaultRefreshIntervalMinutes)
   if (!Number.isFinite(minutes) || minutes <= 0) {
@@ -45,8 +61,7 @@ export function startOddsRefreshScheduler(env: AppEnv, options: OddsSchedulerOpt
         const result = await (options.refresh ?? (() => refreshAvailableOdds(getIngestConfig(env))))()
         logger.info(`[Odds Scheduler] Refresh complete: ${result.odds} rows in ${Date.now() - startedAt}ms.`)
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        logger.error(`[Odds Scheduler] Refresh failed: ${message}`)
+        logger.error(`[Odds Scheduler] Refresh failed: ${describeSchedulerError(error)}`)
       }
     })().finally(() => {
       inFlight = null

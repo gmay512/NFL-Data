@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import { getCurrentConsensusOdds } from '../src/data/current-consensus'
 import {
   buildAnalyticsSnapshot,
   DEFAULT_ANALYTICS_LIMITS,
@@ -151,16 +152,12 @@ async function loadMatchupTarget(
   }
 
   const teamIds = [Number(game.away_team_id), Number(game.home_team_id)]
-  const [{ data: teamData, error: teamError }, { data: oddsData, error: oddsError }] = await Promise.all([
+  const [{ data: teamData, error: teamError }, oddsRows] = await Promise.all([
     client.from('teams').select('id,name').in('id', teamIds).order('id'),
-    client
-      .from('game_consensus_odds')
-      .select('game_id,home_spread,total')
-      .eq('game_id', game.id)
-      .maybeSingle(),
+    getCurrentConsensusOdds(client, [game.id]),
   ])
   throwQueryError(teamError)
-  throwQueryError(oddsError)
+  const oddsData = oddsRows[0] ?? null
   const teamNames = new Map((teamData ?? []).map((team) => [Number(team.id), String(team.name)]))
   if (!teamNames.has(teamIds[0]) || !teamNames.has(teamIds[1])) {
     throw new AnalyticsTargetError(

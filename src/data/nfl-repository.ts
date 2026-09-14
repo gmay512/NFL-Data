@@ -1,6 +1,5 @@
 import { supabase } from '../lib/supabase'
 import type {
-  GameOddsRow,
   GamePlayerStatRow,
   GameRow,
   GameTeamStatRow,
@@ -10,6 +9,7 @@ import type {
   TeamRow,
 } from '../types/nfl'
 import { selectFirstRowsByKey } from '../lib/game-sync'
+import { getCurrentConsensusOdds } from './current-consensus'
 
 let teamsRequest: Promise<TeamRow[]> | null = null
 
@@ -89,13 +89,7 @@ export async function getLatestGameEvents(gameIds: number[]) {
 }
 
 export async function getGameOdds(gameIds: number[]) {
-  if (!gameIds.length) return []
-  const { data, error } = await getClient()
-    .from('game_consensus_odds')
-    .select('game_id, home_spread, total')
-    .in('game_id', gameIds)
-  if (error) throw error
-  return (data ?? []) as GameOddsRow[]
+  return getCurrentConsensusOdds(getClient(), gameIds)
 }
 
 export async function getGame(gameId: number) {
