@@ -21,10 +21,10 @@ import {
 const DATABASE_PAGE_SIZE = 1_000
 const MAX_ANALYTICS_GAMES = 1_000
 const POSTGREST_IN_FILTER_CHUNK_SIZE = 200
+const BETTING_RESULTS_CHUNK_SIZE = 10
 const gamePlayerStatGroups = ['Defense', 'Passing', 'Receiving', 'Rushing']
 const seasonPlayerStatGroups = ['Defensive', 'Passing', 'Receiving', 'Rushing']
 
-const bettingGameColumns = 'game_id,season,stage,week,game_date,game_timestamp,away_team_id,away_team_name,home_team_id,home_team_name,away_score,home_score,final_total,home_margin,closing_home_spread,spread_bookmaker_count,spread_delta,spread_result,closing_total,total_bookmaker_count,total_delta,total_result'
 const targetGameColumns = 'id,season,stage,week,game_date,game_timestamp,venue_name,venue_city,status_short,status_long,away_team_id,home_team_id'
 
 export type AnalyticsServiceConfig = {
@@ -90,16 +90,19 @@ function selectedTeamIds(filters: AnalyticsFilters, games: BettingGameRow[]) {
 
 async function loadGames(client: SupabaseClient, filters: AnalyticsFilters) {
   let query = client
-    .from('game_betting_results')
-    .select(bettingGameColumns, { count: 'exact' })
+    .from('games')
+    .select('id,game_timestamp', { count: 'exact' })
     .eq('season', filters.season)
+    .in('status_short', ['FT', 'AOT'])
+    .not('away_total', 'is', null)
+    .not('home_total', 'is', null)
     .order('game_timestamp', { ascending: false })
-    .order('game_id', { ascending: false })
+    .order('id', { ascending: false })
     .limit(MAX_ANALYTICS_GAMES)
 
   if (filters.stage) query = query.eq('stage', filters.stage)
   if (filters.week) query = query.eq('week', filters.week)
-  if (filters.gameId) query = query.eq('game_id', filters.gameId)
+  if (filters.gameId) query = query.eq('id', filters.gameId)
   if (filters.comparisonTeamId && filters.teamId) {
     const teamIds = `${filters.teamId},${filters.comparisonTeamId}`
     query = query.or(`home_team_id.in.(${teamIds}),away_team_id.in.(${teamIds})`)
@@ -115,7 +118,7 @@ async function loadGames(client: SupabaseClient, filters: AnalyticsFilters) {
   if (count != null && (data ?? []).length !== count) {
     throw new Error(`Analytics query returned ${(data ?? []).length} of ${count} games; narrow the filters.`)
   }
-  return (data ?? []) as BettingGameRow[]
+  return loadBettingResults(client, (data ?? []).map((game) => Number(game.id)))
 }
 
 async function loadMatchupTarget(
@@ -194,13 +197,16 @@ async function loadMatchupHistory(
 ) {
   const joinedTeamIds = teamIds.join(',')
   const { data, error, count } = await client
-    .from('game_betting_results')
-    .select(bettingGameColumns, { count: 'exact' })
+    .from('games')
+    .select('id,game_timestamp', { count: 'exact' })
     .eq('season', season)
+    .in('status_short', ['FT', 'AOT'])
+    .not('away_total', 'is', null)
+    .not('home_total', 'is', null)
     .lt('game_timestamp', kickoffTimestamp)
     .or(`home_team_id.in.(${joinedTeamIds}),away_team_id.in.(${joinedTeamIds})`)
     .order('game_timestamp', { ascending: false })
-    .order('game_id', { ascending: false })
+    .order('id', { ascending: false })
     .limit(MAX_ANALYTICS_GAMES)
   throwQueryError(error)
   if ((count ?? 0) > MAX_ANALYTICS_GAMES) {
@@ -209,7 +215,21 @@ async function loadMatchupHistory(
   if (count != null && (data ?? []).length !== count) {
     throw new Error(`Analytics query returned ${(data ?? []).length} of ${count} games; narrow the filters.`)
   }
-  return (data ?? []) as BettingGameRow[]
+  return loadBettingResults(client, (data ?? []).map((game) => Number(game.id)))
+}
+
+async function loadBettingResults(client: SupabaseClient, gameIds: number[]) {
+  const rows: BettingGameRow[] = []
+  for (let index = 0; index < gameIds.length; index += BETTING_RESULTS_CHUNK_SIZE) {
+    const { data, error } = await client.rpc('get_game_betting_results', {
+      requested_game_ids: gameIds.slice(index, index + BETTING_RESULTS_CHUNK_SIZE),
+    })
+    throwQueryError(error)
+    if (!Array.isArray(data)) throw new Error('Betting results returned an invalid response.')
+    rows.push(...data as BettingGameRow[])
+  }
+  return rows.sort((left, right) =>
+    (right.game_timestamp ?? 0) - (left.game_timestamp ?? 0) || right.game_id - left.game_id)
 }
 
 async function loadTeamStats(client: SupabaseClient, gameIds: number[], teamIds: number[]) {

@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { afterEach, describe, it } from 'node:test'
+import type { SupabaseClient } from '@supabase/supabase-js'
 import { handleApiRequest } from '../server/api-handler'
 import { buildAnalyticsSnapshot, type AnalyticsSourceData } from '../server/analytics-core'
-import type { AnalyticsApiDependencies } from '../server/analytics-api'
+import {
+  loadAnalyticsMetadata,
+  type AnalyticsApiDependencies,
+} from '../server/analytics-api'
 import { LlamaClient } from '../server/llama-client'
 import type {
   AnalysisSession,
@@ -168,6 +172,59 @@ function llama(baseUrl: string) {
 }
 
 describe('analytics API contracts', () => {
+  it('loads completed-game filter metadata without querying betting views', async () => {
+    const tables: string[] = []
+    const operations: Array<{ table: string; method: string; args: unknown[] }> = []
+    const rows: Record<string, unknown[]> = {
+      league_seasons: [{ season_year: 2025 }, { season_year: 2024 }],
+      teams: [{ id: 1, name: 'Arizona' }],
+      games: [
+        { stage: 'Regular Season', week: 'Week 2' },
+        { stage: 'Regular Season', week: 'Week 1' },
+      ],
+    }
+    class Query implements PromiseLike<{ data: unknown[]; error: null }> {
+      constructor(private readonly table: string) {
+        tables.push(table)
+      }
+      private add(method: string, args: unknown[]) {
+        operations.push({ table: this.table, method, args })
+        return this
+      }
+      select(...args: unknown[]) { return this.add('select', args) }
+      order(...args: unknown[]) { return this.add('order', args) }
+      eq(...args: unknown[]) { return this.add('eq', args) }
+      in(...args: unknown[]) { return this.add('in', args) }
+      not(...args: unknown[]) { return this.add('not', args) }
+      limit(...args: unknown[]) { return this.add('limit', args) }
+      then<TResult1 = { data: unknown[]; error: null }, TResult2 = never>(
+        onfulfilled?: ((value: { data: unknown[]; error: null }) => TResult1 | PromiseLike<TResult1>) | null,
+        onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+      ): PromiseLike<TResult1 | TResult2> {
+        return Promise.resolve({ data: rows[this.table] ?? [], error: null }).then(onfulfilled, onrejected)
+      }
+    }
+    const client = {
+      from(table: string) {
+        return new Query(table)
+      },
+    } as unknown as SupabaseClient
+
+    const metadata = await loadAnalyticsMetadata(client, 2025)
+
+    assert.deepEqual(metadata.stages, ['Regular Season'])
+    assert.deepEqual(metadata.weeks, ['Week 1', 'Week 2'])
+    assert.equal(tables.includes('game_betting_results'), false)
+    assert.deepEqual(
+      operations.find(({ table, method }) => table === 'games' && method === 'in')?.args,
+      ['status_short', ['FT', 'AOT']],
+    )
+    assert.equal(
+      operations.filter(({ table, method }) => table === 'games' && method === 'not').length,
+      2,
+    )
+  })
+
   it('serves metadata and deterministic analytics without API-Sports configuration', async () => {
     const memory = createMemoryStore()
     const deps = dependencies(llama('http://127.0.0.1:1'), memory.store)

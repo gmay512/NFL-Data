@@ -1,6 +1,6 @@
 begin;
 
-select plan(26);
+select plan(35);
 
 select ok(
   has_table_privilege('service_role', 'public.game_closing_consensus_odds', 'select'),
@@ -9,6 +9,18 @@ select ok(
 select ok(
   has_table_privilege('service_role', 'public.game_betting_results', 'select'),
   'allows the analytics service to read betting results'
+);
+select ok(
+  to_regprocedure('public.get_game_betting_results(integer[])') is not null,
+  'creates the bounded betting results function'
+);
+select ok(
+  has_function_privilege('service_role', 'public.get_game_betting_results(integer[])', 'execute'),
+  'allows the analytics service to request bounded betting results'
+);
+select ok(
+  not has_function_privilege('anon', 'public.get_game_betting_results(integer[])', 'execute'),
+  'does not expose bounded betting results to anonymous clients'
 );
 
 insert into public.teams (id, name)
@@ -33,7 +45,8 @@ values
   (990001, 2099, 'Regular Season', 'Week 1', 990002, 990001, '2099-09-01', extract(epoch from '2099-09-01 18:00:00+00'::timestamptz)::bigint, 'FT', 27, 20),
   (990002, 2099, 'Regular Season', 'Week 2', 990002, 990001, '2099-09-08', extract(epoch from '2099-09-08 18:00:00+00'::timestamptz)::bigint, 'AOT', 24, 21),
   (990003, 2099, 'Regular Season', 'Week 3', 990002, 990001, '2099-09-15', extract(epoch from '2099-09-15 18:00:00+00'::timestamptz)::bigint, 'FT', 17, 14),
-  (990004, 2099, 'Regular Season', 'Week 4', 990002, 990001, '2099-09-22', extract(epoch from '2099-09-22 18:00:00+00'::timestamptz)::bigint, 'FT', 24, 17);
+  (990004, 2099, 'Regular Season', 'Week 4', 990002, 990001, '2099-09-22', extract(epoch from '2099-09-22 18:00:00+00'::timestamptz)::bigint, 'FT', 24, 17),
+  (990005, 2099, 'Regular Season', 'Week 5', 990002, 990001, '2099-09-29', extract(epoch from '2099-09-29 18:00:00+00'::timestamptz)::bigint, 'FT', 21, 20);
 
 insert into public.bookmakers (id, name)
 values
@@ -88,6 +101,26 @@ values
   (990004, 990001, 990001, 'Away -3.5', 1.87, '2099-09-22 17:50:00+00', '2099-09-22 17:51:00+00'),
   (990004, 990002, 990001, 'Home -4.5', 1.91, '2099-09-22 17:55:00+00', '2099-09-22 17:56:00+00'),
   (990004, 990002, 990001, 'Away -4.5', 1.91, '2099-09-22 17:55:00+00', '2099-09-22 17:56:00+00');
+
+insert into public.odds (
+  game_id,
+  bookmaker_id,
+  bet_id,
+  bet_value,
+  odd,
+  provider_updated_at,
+  captured_at
+)
+select
+  990005,
+  990001,
+  990001,
+  outcome || ' -' || line::text,
+  1.91,
+  '2099-09-29 17:50:00+00'::timestamptz,
+  '2099-09-29 17:51:00+00'::timestamptz
+from generate_series(1, 1000) as lines(line)
+cross join (values ('Home'), ('Away')) as outcomes(outcome);
 
 select is(
   (select home_spread from public.game_closing_consensus_odds where game_id = 990001),
@@ -208,6 +241,36 @@ select is(
   (select spread_delta from public.game_betting_results where game_id = 990004),
   3::numeric,
   'grades results against the correctly attributed closing home spread'
+);
+select is(
+  (select closing_home_spread from public.get_game_betting_results(array[990001])),
+  (-4)::numeric,
+  'bounded betting results preserve the closing home spread'
+);
+select is(
+  (select closing_total from public.get_game_betting_results(array[990001])),
+  45::numeric,
+  'bounded betting results preserve the closing total'
+);
+select is(
+  (select spread_result from public.get_game_betting_results(array[990001])),
+  'home_cover',
+  'bounded betting results preserve spread grading'
+);
+select is(
+  (select total_result from public.get_game_betting_results(array[990001])),
+  'over',
+  'bounded betting results preserve total grading'
+);
+select is(
+  (select count(*)::integer from public.get_game_betting_results(array[990001])),
+  1,
+  'bounded betting results exclude substantial unrelated odds history'
+);
+select is(
+  (select count(*)::integer from public.get_game_betting_results(array[]::integer[])),
+  0,
+  'bounded betting results return no rows for an empty request'
 );
 
 select * from finish();

@@ -127,7 +127,10 @@ export function statusForApiError(error: unknown) {
   return null
 }
 
-async function loadMetadata(client: SupabaseClient, requestedSeason?: number): Promise<AnalyticsFilterMetadata> {
+export async function loadAnalyticsMetadata(
+  client: SupabaseClient,
+  requestedSeason?: number,
+): Promise<AnalyticsFilterMetadata> {
   const [{ data: seasonData, error: seasonError }, { data: teamData, error: teamError }] = await Promise.all([
     client.from('league_seasons').select('season_year').order('season_year', { ascending: false }),
     client.from('teams').select('id,name').order('name'),
@@ -144,9 +147,12 @@ async function loadMetadata(client: SupabaseClient, requestedSeason?: number): P
 
   if (selectedSeason != null) {
     const { data, error } = await client
-      .from('game_betting_results')
+      .from('games')
       .select('stage,week')
       .eq('season', selectedSeason)
+      .in('status_short', ['FT', 'AOT'])
+      .not('away_total', 'is', null)
+      .not('home_total', 'is', null)
       .order('game_timestamp')
       .limit(1_000)
     if (error) throw new Error(error.message)
@@ -171,7 +177,7 @@ function createDependencies(env: AppEnv) {
     dataSource: createAnalyticsDataSource({ supabaseUrl, serviceRoleKey }),
     llama: createLlamaClient(env),
     store: createAnalysisStore(client),
-    loadMetadata: (season?: number) => loadMetadata(client, season),
+    loadMetadata: (season?: number) => loadAnalyticsMetadata(client, season),
   } satisfies AnalyticsApiDependencies
 }
 
