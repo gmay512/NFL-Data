@@ -8,6 +8,7 @@ import type {
   AnalysisSession,
   AnalysisSessionSummary,
 } from '../../server/analysis-store'
+import type { WeeklyAnalysisRun } from '../../server/weekly-analysis'
 
 export type ApiErrorResponse = {
   error: string
@@ -56,6 +57,13 @@ export type RefreshSeasonScheduleResponse = {
 export type RefreshSeasonGamesResponse = {
   season: number
   games: number
+}
+
+export type RefreshSeasonOddsResponse = {
+  season: number
+  bookmakers: number
+  betTypes: number
+  odds: number
 }
 
 export type RefreshGameResponse = {
@@ -113,3 +121,17 @@ export type AnalysisSessionListResponse = {
 export type LlmHealthResponse =
   | { status: 'available'; model: string; models: string[] }
   | { status: 'unavailable'; code: string; message: string }
+
+export type WeeklyAnalysisRunResponse = {
+  run: WeeklyAnalysisRun
+}
+
+export type WeeklyAnalysisRunsResponse = {
+  runs: WeeklyAnalysisRun[]
+}
+
+export type WeeklyGradeResponse = {
+  graded: number
+}
+
+export type { WeeklyAnalysisRun }

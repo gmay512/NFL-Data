@@ -160,12 +160,83 @@ function baseFetch(options?: { online?: boolean; empty?: boolean; saved?: boolea
     if (path === '/api/analytics/sessions' && init?.method !== 'POST') {
       return json({ sessions: options?.saved ? [session] : [] })
     }
+    if (path === '/api/analytics/weekly/runs') return json({ runs: [] })
+    if (path === '/api/refresh-season-odds') return json({
+      season: 2025,
+      bookmakers: 0,
+      betTypes: 0,
+      odds: 0,
+    })
     if (path === '/api/analytics/sessions/session-1') return json({ session })
     return json({ error: `Unexpected request: ${path}` }, 500)
   }
 }
 
 describe('AnalyticsPage', () => {
+  it('runs an upcoming-week analysis and shows automatically tracked picks', async () => {
+    let runCreated = false
+    const weeklyRun = {
+      id: 'weekly-1',
+      season: 2025,
+      stage: 'Regular Season',
+      week: 'Week 2',
+      model: 'qwen3-coder-next',
+      context: {
+        schemaVersion: 1,
+        generatedAt: '2025-09-10T00:00:00.000Z',
+        season: 2025,
+        stage: 'Regular Season',
+        week: 'Week 2',
+        matchups: [],
+      },
+      summary: 'The visitor ATS trend supports one cautious position.',
+      createdAt: '2025-09-10T00:00:00.000Z',
+      suggestions: [{
+        id: 1,
+        runId: 'weekly-1',
+        gameId: 102,
+        season: 2025,
+        stage: 'Regular Season',
+        week: 'Week 2',
+        kickoffAt: '2025-09-14T17:00:00.000Z',
+        awayTeamId: 2,
+        awayTeamName: 'Visitors',
+        homeTeamId: 1,
+        homeTeamName: 'Hosts',
+        market: 'spread',
+        selection: 'away',
+        lockedLine: 3.5,
+        confidence: 61,
+        rationale: 'The supplied ATS sample favors the visitor.',
+        supportingGameIds: [101],
+        result: 'ungraded',
+        resultDelta: null,
+        finalAwayScore: null,
+        finalHomeScore: null,
+        gradedAt: null,
+        createdAt: '2025-09-10T00:00:00.000Z',
+      }],
+    }
+    const fetchHandler = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input), 'http://localhost').pathname
+      if (path === '/api/analytics/weekly/analyze' && init?.method === 'POST') {
+        runCreated = true
+        return json({ run: weeklyRun }, 201)
+      }
+      if (path === '/api/analytics/weekly/runs') return json({ runs: runCreated ? [weeklyRun] : [] })
+      return baseFetch()(input, init)
+    }
+    const container = await renderPage(fetchHandler)
+    const button = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((item) => item.textContent === 'Analyze upcoming week')
+    assert(button)
+    await React.act(async () => button.click())
+    await settle()
+    assert.match(container.textContent ?? '', /2025 Week 2/)
+    assert.match(container.textContent ?? '', /Visitors \+3.5/)
+    assert.match(container.textContent ?? '', /1 pending/)
+  })
+
   it('renders historical metrics, team trends, sortable game results, and URL-backed filters', async () => {
     let requestedTeam: number | undefined
     const fetchHandler = async (input: RequestInfo | URL, init?: RequestInit) => {

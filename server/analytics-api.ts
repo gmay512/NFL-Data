@@ -22,6 +22,11 @@ import {
   type AnalysisSession,
   type AnalysisStore,
 } from './analysis-store'
+import {
+  statusForWeeklyError,
+  WeeklyAnalysisService,
+} from './weekly-analysis'
+import { createWeeklyAnalysisStore } from './weekly-analysis-store'
 
 export type AnalyticsFilterMetadata = {
   seasons: number[]
@@ -36,6 +41,7 @@ export type AnalyticsApiDependencies = {
   llama: LlamaClient
   store: AnalysisStore
   loadMetadata: (season?: number) => Promise<AnalyticsFilterMetadata>
+  weekly?: Pick<WeeklyAnalysisService, 'analyze' | 'grade' | 'list'>
 }
 
 export class AnalyticsApiError extends Error {
@@ -124,6 +130,8 @@ export function statusForApiError(error: unknown) {
   if (error instanceof LlamaClientError) {
     return { statusCode: llamaStatus(error), code: error.code, message: error.message }
   }
+  const weekly = statusForWeeklyError(error)
+  if (weekly) return weekly
   return null
 }
 
@@ -173,11 +181,19 @@ function createDependencies(env: AppEnv) {
   const supabaseUrl = getRequiredEnv(env, 'SUPABASE_URL', 'VITE_SUPABASE_URL')
   const serviceRoleKey = getRequiredEnv(env, 'SUPABASE_SERVICE_ROLE_KEY')
   const client = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+  const dataSource = createAnalyticsDataSource({ supabaseUrl, serviceRoleKey })
+  const llama = createLlamaClient(env)
   return {
-    dataSource: createAnalyticsDataSource({ supabaseUrl, serviceRoleKey }),
-    llama: createLlamaClient(env),
+    dataSource,
+    llama,
     store: createAnalysisStore(client),
     loadMetadata: (season?: number) => loadAnalyticsMetadata(client, season),
+    weekly: new WeeklyAnalysisService(
+      client,
+      dataSource,
+      llama,
+      createWeeklyAnalysisStore(client),
+    ),
   } satisfies AnalyticsApiDependencies
 }
 
@@ -283,6 +299,29 @@ export async function handleAnalyticsApiRequest(
       body.filters,
     )
     sendJson(response, 200, { snapshot })
+    return true
+  }
+
+  if (request.method === 'GET' && requestUrl.pathname === '/api/analytics/weekly/runs') {
+    if (!dependencies.weekly) throw new AnalyticsApiError(503, 'weekly_unavailable', 'Weekly analysis is unavailable.')
+    sendJson(response, 200, { runs: await dependencies.weekly.list() })
+    return true
+  }
+
+  if (request.method === 'POST' && requestUrl.pathname === '/api/analytics/weekly/analyze') {
+    if (!dependencies.weekly) throw new AnalyticsApiError(503, 'weekly_unavailable', 'Weekly analysis is unavailable.')
+    const body = await readJsonBody(request)
+    const season = Number(body.season)
+    if (!Number.isInteger(season) || season < 1900 || season > 2100) {
+      throw new AnalyticsApiError(400, 'invalid_season', 'season must be an integer from 1900 through 2100.')
+    }
+    sendJson(response, 201, { run: await dependencies.weekly.analyze(season) })
+    return true
+  }
+
+  if (request.method === 'POST' && requestUrl.pathname === '/api/analytics/weekly/grade') {
+    if (!dependencies.weekly) throw new AnalyticsApiError(503, 'weekly_unavailable', 'Weekly analysis is unavailable.')
+    sendJson(response, 200, await dependencies.weekly.grade())
     return true
   }
 

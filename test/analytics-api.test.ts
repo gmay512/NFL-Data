@@ -237,6 +237,7 @@ describe('analytics API contracts', () => {
       preset: 'season_overview',
       filters: { season: 2025 },
     })
+
     assert.equal(queryResponse.status, 200)
     const queryPayload = await queryResponse.json() as { snapshot: { summary: { games: number } } }
     assert.equal(queryPayload.snapshot.summary.games, 0)
@@ -247,6 +248,57 @@ describe('analytics API contracts', () => {
     })
     assert.equal(invalidResponse.status, 400)
     assert.equal((await invalidResponse.json() as { code: string }).code, 'invalid_preset')
+  })
+
+  it('serves weekly analysis, history, grading, and season validation', async () => {
+    const memory = createMemoryStore()
+    const deps = dependencies(llama('http://127.0.0.1:1'), memory.store)
+    let analyzedSeason: number | null = null
+    const run = {
+      id: '99000000-0000-4000-8000-000000000099',
+      season: 2025,
+      stage: 'Regular Season',
+      week: 'Week 2',
+      model: 'test-model',
+      context: {
+        schemaVersion: 1 as const,
+        generatedAt: '2025-09-10T00:00:00.000Z',
+        season: 2025,
+        stage: 'Regular Season',
+        week: 'Week 2',
+        matchups: [],
+      },
+      summary: 'No supported picks.',
+      createdAt: '2025-09-10T00:00:00.000Z',
+      suggestions: [],
+    }
+    deps.weekly = {
+      async analyze(season) {
+        analyzedSeason = season
+        return run
+      },
+      async list() {
+        return [run]
+      },
+      async grade() {
+        return { graded: 2 }
+      },
+    }
+
+    const listResponse = await request('/api/analytics/weekly/runs', deps)
+    assert.equal(listResponse.status, 200)
+    assert.equal((await listResponse.json() as { runs: unknown[] }).runs.length, 1)
+
+    const analyzeResponse = await request('/api/analytics/weekly/analyze', deps, 'POST', { season: 2025 })
+    assert.equal(analyzeResponse.status, 201)
+    assert.equal(analyzedSeason, 2025)
+
+    const gradeResponse = await request('/api/analytics/weekly/grade', deps, 'POST')
+    assert.deepEqual(await gradeResponse.json(), { graded: 2 })
+
+    const invalidResponse = await request('/api/analytics/weekly/analyze', deps, 'POST', { season: 'invalid' })
+    assert.equal(invalidResponse.status, 400)
+    assert.equal((await invalidResponse.json() as { code: string }).code, 'invalid_season')
   })
 
   it('creates, lists, loads, renames, and deletes completed analysis sessions', async () => {

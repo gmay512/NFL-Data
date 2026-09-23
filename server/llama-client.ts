@@ -391,6 +391,17 @@ export class LlamaClient {
 
   async complete(snapshot: AnalyticsSnapshot, request: GroundedAnalysisRequest = {}, signal?: AbortSignal) {
     const messages = buildGroundedMessages(this.config, snapshot, request)
+    return this.completeMessages(messages, signal)
+  }
+
+  async completeMessages(messages: LlamaChatMessage[], signal?: AbortSignal) {
+    const characterCount = messages.reduce((total, message) => total + message.content.length, 0)
+    if (characterCount > this.config.maxContextChars) {
+      throw new LlamaClientError(
+        'context_too_large',
+        `Grounded prompt is ${characterCount} characters; the configured limit is ${this.config.maxContextChars}.`,
+      )
+    }
     const control = createRequestControl(this.config.timeoutMs, signal)
     const startedAt = performance.now()
     try {

@@ -235,6 +235,29 @@ The page reports missing lines, missing required team statistics, and bounded or
 truncated collections in its deterministic snapshot. Saved sessions retain that
 immutable snapshot so later follow-ups use the same grounding data.
 
+### Upcoming-week suggestions and tracking
+
+The Analytics page can manually analyze the nearest future scheduled week for
+the selected season. It builds a bounded snapshot for every matchup using the
+current consensus spread and total, season-to-date ATS and totals results,
+available team and player statistics, standings, and current injuries. The
+local model must return validated structured suggestions; malformed output,
+unknown games, duplicate markets, unsupported citations, and changed or missing
+lines reject the entire run.
+
+Every valid suggestion is automatically saved in `betting_analysis_runs` and
+`betting_suggestions`. These tables are separate from the source game schema and
+snapshot the matchup, kickoff, rationale, confidence, and consensus line. A
+later analysis of the same week creates a new timestamped run rather than
+replacing earlier predictions. A model decision to make no pick remains in the
+run summary and does not count toward the tracked record.
+
+Use **Grade completed picks** after games finish. Spread and total picks are
+graded against the consensus line locked when the suggestion was generated,
+not the later closing line. Completed `FT` and `AOT` scores produce a win, loss,
+or push; unfinished or missing-score games remain pending. Grading is
+idempotent and never changes the stored recommendation or locked line.
+
 ### Availability and failure behavior
 
 The historical tables and filters continue to work when llama.cpp is stopped,

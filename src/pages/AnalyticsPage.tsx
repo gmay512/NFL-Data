@@ -6,12 +6,16 @@ import {
   getAnalysisSession,
   getAnalyticsMetadata,
   getLlmHealth,
+  gradeWeeklySuggestions,
   listAnalysisSessions,
+  listWeeklyAnalysisRuns,
   postAnalysisFollowUp,
   queryAnalytics,
   readAnalysisStream,
+  refreshSeasonOdds,
   renameAnalysisSession,
   runAnalysis,
+  runWeeklyAnalysis,
 } from '../api/app-api'
 import type {
   AnalysisSession,
@@ -21,6 +25,7 @@ import type {
   AnalyticsPreset,
   AnalyticsSnapshot,
   LlmHealthResponse,
+  WeeklyAnalysisRun,
 } from '../api/contracts'
 import { StatusMessage } from '../features/dashboard/DashboardComponents'
 
@@ -110,9 +115,12 @@ export function AnalyticsPage() {
   const [sessions, setSessions] = useState<AnalysisSessionSummary[]>([])
   const [activeSession, setActiveSession] = useState<AnalysisSession | null>(null)
   const [llmHealth, setLlmHealth] = useState<LlmHealthResponse | null>(null)
+  const [weeklyRuns, setWeeklyRuns] = useState<WeeklyAnalysisRun[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [isStreaming, setIsStreaming] = useState(false)
+  const [isWeeklyAnalyzing, setIsWeeklyAnalyzing] = useState(false)
+  const [isWeeklyGrading, setIsWeeklyGrading] = useState(false)
   const [pendingAnswer, setPendingAnswer] = useState('')
   const [question, setQuestion] = useState('')
   const [lastQuestion, setLastQuestion] = useState('')
@@ -180,6 +188,13 @@ export function AnalyticsPage() {
     }).catch((loadError) => {
       if (!controller.signal.aborted) setError(loadError instanceof Error ? loadError.message : 'Could not load analytics.')
     })
+    void listWeeklyAnalysisRuns({ signal: controller.signal }).then((weekly) => {
+      setWeeklyRuns(weekly.runs)
+    }).catch((loadError) => {
+      if (!controller.signal.aborted) {
+        setError(loadError instanceof Error ? loadError.message : 'Could not load tracked weekly suggestions.')
+      }
+    })
     return () => controller.abort()
   }, [season, setSearchParams])
 
@@ -243,6 +258,16 @@ export function AnalyticsPage() {
       .sort((left, right) => compareGames(left, right, gameSort.field, gameSort.direction))
   }, [snapshot, gameSort])
 
+  const weeklyRecord = useMemo(() => {
+    const suggestions = weeklyRuns.flatMap((run) => run.suggestions)
+    return {
+      wins: suggestions.filter((pick) => pick.result === 'win').length,
+      losses: suggestions.filter((pick) => pick.result === 'loss').length,
+      pushes: suggestions.filter((pick) => pick.result === 'push').length,
+      pending: suggestions.filter((pick) => pick.result === 'ungraded').length,
+    }
+  }, [weeklyRuns])
+
   const changeTeamSort = (field: TeamSortField) => {
     setTeamSort((current) => current.field === field
       ? { field, direction: current.direction === 1 ? -1 : 1 }
@@ -282,6 +307,39 @@ export function AnalyticsPage() {
       setError(analysisError instanceof Error ? analysisError.message : 'Could not run local analysis.')
     } finally {
       setIsAnalyzing(false)
+    }
+  }
+
+  const reloadWeeklyRuns = async () => {
+    const payload = await listWeeklyAnalysisRuns()
+    setWeeklyRuns(payload.runs)
+  }
+
+  const createWeeklyReport = async () => {
+    if (!season) return
+    setIsWeeklyAnalyzing(true)
+    setError(null)
+    try {
+      await refreshSeasonOdds(season)
+      await runWeeklyAnalysis(season)
+      await reloadWeeklyRuns()
+    } catch (analysisError) {
+      setError(analysisError instanceof Error ? analysisError.message : 'Could not analyze the upcoming week.')
+    } finally {
+      setIsWeeklyAnalyzing(false)
+    }
+  }
+
+  const gradeWeeklyPicks = async () => {
+    setIsWeeklyGrading(true)
+    setError(null)
+    try {
+      await gradeWeeklySuggestions()
+      await reloadWeeklyRuns()
+    } catch (gradingError) {
+      setError(gradingError instanceof Error ? gradingError.message : 'Could not grade completed picks.')
+    } finally {
+      setIsWeeklyGrading(false)
     }
   }
 
@@ -404,6 +462,64 @@ export function AnalyticsPage() {
         <article className="stat-card"><span className="stat-label">Home cover rate</span><p className="stat-value">{percent(snapshot.summary.spread.homeCoverRate)}</p><small>{snapshot.summary.spread.homeCovers} home / {snapshot.summary.spread.awayCovers} away</small></article>
         <article className="stat-card"><span className="stat-label">Ungraded lines</span><p className="stat-value">{snapshot.dataQuality.gamesMissingSpread + snapshot.dataQuality.gamesMissingTotal}</p><small>Spread + total</small></article>
       </section>}
+
+      <section className="panel panel-wide weekly-analysis">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Upcoming week</p>
+            <h2>Tracked model suggestions</h2>
+          </div>
+          <div className="weekly-actions">
+            <button
+              type="button"
+              disabled={!season || isWeeklyAnalyzing || llmHealth?.status !== 'available'}
+              onClick={() => void createWeeklyReport()}
+            >
+              {isWeeklyAnalyzing ? 'Analyzing…' : 'Analyze upcoming week'}
+            </button>
+            <button type="button" disabled={isWeeklyGrading || weeklyRecord.pending === 0} onClick={() => void gradeWeeklyPicks()}>
+              {isWeeklyGrading ? 'Grading…' : 'Grade completed picks'}
+            </button>
+          </div>
+        </div>
+        <p className="weekly-disclaimer">
+          Suggestions are automatically tracked with the consensus line available when generated. They are model analysis, not betting advice.
+        </p>
+        <div className="weekly-record" aria-label="Tracked suggestion record">
+          <span><strong>{weeklyRecord.wins}</strong> wins</span>
+          <span><strong>{weeklyRecord.losses}</strong> losses</span>
+          <span><strong>{weeklyRecord.pushes}</strong> pushes</span>
+          <span><strong>{weeklyRecord.pending}</strong> pending</span>
+        </div>
+        {weeklyRuns.length ? <div className="weekly-runs">
+          {weeklyRuns.map((run) => <article className="weekly-run" key={run.id}>
+            <header>
+              <div><strong>{run.season} {run.week}</strong><small>{run.stage ?? 'Scheduled'} · {new Date(run.createdAt).toLocaleString()}</small></div>
+              <span>{run.suggestions.length} pick{run.suggestions.length === 1 ? '' : 's'}</span>
+            </header>
+            <p>{run.summary}</p>
+            {run.suggestions.length ? <div className="weekly-picks">
+              {run.suggestions.map((pick) => {
+                const selectedTeam = pick.selection === 'home' ? pick.homeTeamName : pick.awayTeamName
+                const selection = pick.market === 'spread'
+                  ? `${selectedTeam} ${pick.lockedLine > 0 ? '+' : ''}${pick.lockedLine}`
+                  : `${pick.selection.toUpperCase()} ${pick.lockedLine}`
+                return <div className="weekly-pick" key={pick.id}>
+                  <div>
+                    <strong>{pick.awayTeamName} at {pick.homeTeamName}</strong>
+                    <small>{selection} · {pick.confidence}% confidence</small>
+                  </div>
+                  <b className={`result-pill is-${pick.result}`}>{pick.result}</b>
+                  <p>{pick.rationale}</p>
+                  {pick.finalAwayScore != null && pick.finalHomeScore != null
+                    ? <small>Final {pick.awayTeamName} {pick.finalAwayScore}, {pick.homeTeamName} {pick.finalHomeScore} · margin {signed(pick.resultDelta)}</small>
+                    : <small>Kickoff {new Date(pick.kickoffAt).toLocaleString()}</small>}
+                </div>
+              })}
+            </div> : <p className="empty-state">The model found no supported bets for this run.</p>}
+          </article>)}
+        </div> : <p className="empty-state">No upcoming-week analyses have been saved.</p>}
+      </section>
 
       <section className={`analysis-overview ${!snapshot ? 'without-actions' : ''}`}>
         <div className="analysis-sidebar">

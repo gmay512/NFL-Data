@@ -14,8 +14,12 @@ import type {
   RefreshGameTeamStatsResponse,
   RefreshLiveGamesResponse,
   RefreshSeasonGamesResponse,
+  RefreshSeasonOddsResponse,
   RefreshSeasonScheduleResponse,
   LlmHealthResponse,
+  WeeklyAnalysisRunResponse,
+  WeeklyAnalysisRunsResponse,
+  WeeklyGradeResponse,
 } from './contracts'
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -55,6 +59,10 @@ export function refreshSeasonGames(season: number, gameIds?: number[]) {
   return postJson<RefreshSeasonGamesResponse>('/api/refresh-season-games', { season, gameIds })
 }
 
+export function refreshSeasonOdds(season: number) {
+  return postJson<RefreshSeasonOddsResponse>('/api/refresh-season-odds', { season })
+}
+
 export function refreshGame(gameId: number) {
   return postJson<RefreshGameResponse>('/api/refresh-game', { gameId })
 }
@@ -90,6 +98,18 @@ export function queryAnalytics(preset: AnalyticsPreset, filters: AnalyticsFilter
 
 export function runAnalysis(title: string, preset: AnalyticsPreset, filters: AnalyticsFilters) {
   return postJson<AnalysisSessionResponse>('/api/analytics/analyze', { title, preset, filters })
+}
+
+export function listWeeklyAnalysisRuns(options?: { signal?: AbortSignal }) {
+  return requestJson<WeeklyAnalysisRunsResponse>('/api/analytics/weekly/runs', options)
+}
+
+export function runWeeklyAnalysis(season: number) {
+  return postJson<WeeklyAnalysisRunResponse>('/api/analytics/weekly/analyze', { season })
+}
+
+export function gradeWeeklySuggestions() {
+  return postJson<WeeklyGradeResponse>('/api/analytics/weekly/grade')
 }
 
 export function listAnalysisSessions(options?: { signal?: AbortSignal }) {
