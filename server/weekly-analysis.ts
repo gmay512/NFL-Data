@@ -12,10 +12,13 @@ type WeeklyRecentGame = Pick<
   AnalyticsSnapshot['games']['items'][number],
   | 'gameId'
   | 'gameDate'
+  | 'awayTeamId'
   | 'awayTeamName'
   | 'awayScore'
+  | 'homeTeamId'
   | 'homeTeamName'
   | 'homeScore'
+  | 'finalTotal'
   | 'closingHomeSpread'
   | 'spreadDelta'
   | 'spreadResult'
@@ -23,6 +26,29 @@ type WeeklyRecentGame = Pick<
   | 'totalDelta'
   | 'totalResult'
 >
+
+type WeeklyTeamGame = {
+  gameId: number
+  gameDate: string | null
+  opponentId: number
+  opponentName: string
+  location: 'away' | 'home'
+  pointsFor: number
+  pointsAgainst: number
+  result: 'win' | 'loss' | 'tie'
+  atsResult: 'win' | 'loss' | 'push' | 'ungraded'
+  finalTotal: number
+  totalResult: AnalyticsSnapshot['games']['items'][number]['totalResult']
+}
+
+type WeeklyTeamPerformance = {
+  teamId: number
+  teamName: string
+  games: number
+  averagePointsFor: number | null
+  averagePointsAgainst: number | null
+  recentGames: WeeklyTeamGame[]
+}
 
 type WeeklyInjury = Pick<
   AnalyticsSnapshot['currentInjuries']['items'][number],
@@ -35,7 +61,7 @@ type WeeklyPlayerStat = Pick<
 >
 
 export type WeeklyAnalysisSnapshot = {
-  schemaVersion: 1
+  schemaVersion: 2
   generatedAt: string
   season: number
   stage: string | null
@@ -45,6 +71,7 @@ export type WeeklyAnalysisSnapshot = {
     kickoffAt: string
     target: AnalyticsTargetMatchup
     teamTrends: AnalyticsSnapshot['teamTrends']['items']
+    teamPerformance: WeeklyTeamPerformance[]
     teamStatTrends: AnalyticsSnapshot['teamStatTrends']['items']
     recentGames: WeeklyRecentGame[]
     standings: AnalyticsSnapshot['standings']['items']
@@ -135,7 +162,7 @@ export type WeeklyAnalysisOptions = {
 }
 
 const weeklyLimits = {
-  games: 3,
+  games: 1_000,
   injuries: 2,
   playerStats: 1,
   standings: 2,
@@ -146,6 +173,53 @@ const WEEKLY_MATCHUP_CONCURRENCY = 2
 
 function queryError(error: { message: string } | null) {
   if (error) throw new Error(error.message)
+}
+
+function atsResultForTeam(
+  result: WeeklyRecentGame['spreadResult'],
+  isHome: boolean,
+): WeeklyTeamGame['atsResult'] {
+  if (result === 'ungraded' || result === 'push') return result
+  return result === (isHome ? 'home_cover' : 'away_cover') ? 'win' : 'loss'
+}
+
+export function buildWeeklyTeamPerformance(
+  target: AnalyticsTargetMatchup,
+  trends: AnalyticsSnapshot['teamTrends']['items'],
+  games: WeeklyRecentGame[],
+): WeeklyTeamPerformance[] {
+  return [target.awayTeam, target.homeTeam].map((team) => {
+    const trend = trends.find((item) => item.teamId === team.id)
+    const recentGames = games
+      .filter((game) => game.awayTeamId === team.id || game.homeTeamId === team.id)
+      .slice(0, 3)
+      .map((game): WeeklyTeamGame => {
+        const isHome = game.homeTeamId === team.id
+        const pointsFor = isHome ? game.homeScore : game.awayScore
+        const pointsAgainst = isHome ? game.awayScore : game.homeScore
+        return {
+          gameId: game.gameId,
+          gameDate: game.gameDate,
+          opponentId: isHome ? game.awayTeamId : game.homeTeamId,
+          opponentName: isHome ? game.awayTeamName : game.homeTeamName,
+          location: isHome ? 'home' : 'away',
+          pointsFor,
+          pointsAgainst,
+          result: pointsFor > pointsAgainst ? 'win' : pointsFor < pointsAgainst ? 'loss' : 'tie',
+          atsResult: atsResultForTeam(game.spreadResult, isHome),
+          finalTotal: game.finalTotal,
+          totalResult: game.totalResult,
+        }
+      })
+    return {
+      teamId: team.id,
+      teamName: team.name,
+      games: trend?.games ?? 0,
+      averagePointsFor: trend?.averagePointsFor ?? null,
+      averagePointsAgainst: trend?.averagePointsAgainst ?? null,
+      recentGames,
+    }
+  })
 }
 
 export async function mapInBatches<T, Result>(
@@ -178,7 +252,7 @@ export async function buildWeeklyMatchups(
       analysis = await generateAnalyticsSnapshot(
         dataSource,
         'matchup_preview',
-        { season, stage: 'Regular Season', gameId: Number(game.id) },
+        { season, excludeStage: 'Pre Season', gameId: Number(game.id) },
         { generatedAt: () => generatedAt, limits: weeklyLimits },
       )
     } catch (error) {
@@ -193,26 +267,38 @@ export async function buildWeeklyMatchups(
         `Could not build weekly context for game ${game.id}: matchup context was missing.`,
       )
     }
+    const recentGames: WeeklyRecentGame[] = analysis.games.items.map((item) => ({
+      gameId: item.gameId,
+      gameDate: item.gameDate,
+      awayTeamId: item.awayTeamId,
+      awayTeamName: item.awayTeamName,
+      awayScore: item.awayScore,
+      homeTeamId: item.homeTeamId,
+      homeTeamName: item.homeTeamName,
+      homeScore: item.homeScore,
+      finalTotal: item.finalTotal,
+      closingHomeSpread: item.closingHomeSpread,
+      spreadDelta: item.spreadDelta,
+      spreadResult: item.spreadResult,
+      closingTotal: item.closingTotal,
+      totalDelta: item.totalDelta,
+      totalResult: item.totalResult,
+    }))
+    const teamPerformance = buildWeeklyTeamPerformance(
+      analysis.targetMatchup,
+      analysis.teamTrends.items,
+      recentGames,
+    )
+    const citedGameIds = new Set(teamPerformance.flatMap((team) =>
+      team.recentGames.map((history) => history.gameId)))
     return {
       gameId: Number(game.id),
       kickoffAt: new Date(analysis.targetMatchup.kickoff.timestamp * 1_000).toISOString(),
       target: analysis.targetMatchup,
       teamTrends: analysis.teamTrends.items,
+      teamPerformance,
       teamStatTrends: analysis.teamStatTrends.items,
-      recentGames: analysis.games.items.map((item) => ({
-        gameId: item.gameId,
-        gameDate: item.gameDate,
-        awayTeamName: item.awayTeamName,
-        awayScore: item.awayScore,
-        homeTeamName: item.homeTeamName,
-        homeScore: item.homeScore,
-        closingHomeSpread: item.closingHomeSpread,
-        spreadDelta: item.spreadDelta,
-        spreadResult: item.spreadResult,
-        closingTotal: item.closingTotal,
-        totalDelta: item.totalDelta,
-        totalResult: item.totalResult,
-      })),
+      recentGames: recentGames.filter((item) => citedGameIds.has(item.gameId)),
       standings: analysis.standings.items,
       currentInjuries: analysis.currentInjuries.items.map((item) => ({
         playerName: item.playerName,
@@ -245,7 +331,7 @@ export async function buildUpcomingWeekSnapshot(
     .from('games')
     .select('id,stage,week,game_timestamp')
     .eq('season', season)
-    .eq('stage', 'Regular Season')
+    .neq('stage', 'Pre Season')
     .eq('status_short', 'NS')
     .gt('game_timestamp', now)
     .not('week', 'is', null)
@@ -262,7 +348,7 @@ export async function buildUpcomingWeekSnapshot(
     .from('games')
     .select('id,game_timestamp')
     .eq('season', season)
-    .eq('stage', 'Regular Season')
+    .eq('stage', String(next.stage))
     .eq('status_short', 'NS')
     .eq('week', String(next.week))
     .gt('game_timestamp', now)
@@ -277,7 +363,7 @@ export async function buildUpcomingWeekSnapshot(
   const matchups = await buildWeeklyMatchups(games, dataSource, season, generatedAt)
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt,
     season,
     stage: next.stage == null ? null : String(next.stage),
@@ -302,14 +388,14 @@ export function buildWeeklyMessages(snapshot: WeeklyAnalysisSnapshot): LlamaChat
       role: 'user',
       content: [
         'Review every matchup for supported ATS and over/under trends.',
-        'Return exactly {"summary":string,"picks":[{"gameId":integer,"market":"spread"|"total",',
+        'Return exactly {"picks":[{"gameId":integer,"market":"spread"|"total",',
         '"selection":"away"|"home"|"over"|"under","confidence":integer 1-100,',
-        '"rationale":string,"supportingGameIds":integer[]}]}',
-        'The summary must be at most 1,000 characters. Return at most the 8 strongest picks across the week.',
-        'Each rationale must be at most 240 characters and each pick may cite at most 3 supporting game IDs.',
+        '"supportingGameIds":integer[]}]}',
+        'Return at most the 8 strongest picks across the week.',
+        'Each pick must cite 1 to 3 supplied supporting game IDs. Do not return picks for matchups without prior games.',
         'Use at most one pick per game and market. Do not include a line field; the application locks the supplied',
         'current consensus line after validating the selection. Omit a market when its line is null or evidence is insufficient.',
-        'The rationale must be concise and distinguish evidence from uncertainty.',
+        'Do not return a summary, rationale, or factual prose; the application generates those from validated facts.',
       ].join(' '),
     },
   ]
@@ -330,6 +416,102 @@ function exactKeys(value: Record<string, unknown>, expected: string[], message: 
   }
 }
 
+function formatAverage(value: number | null) {
+  if (value == null) return 'n/a'
+  return Number.isInteger(value) ? String(value) : value.toFixed(1)
+}
+
+function boundedRationale(segments: string[]) {
+  const included: string[] = []
+  for (const segment of segments) {
+    const candidate = [...included, segment].join('; ')
+    if (candidate.length > 240) continue
+    included.push(segment)
+  }
+  const rationale = included.join('; ')
+  return rationale || segments[0].slice(0, 240)
+}
+
+function spreadRecord(matchup: WeeklyAnalysisSnapshot['matchups'][number], teamId: number) {
+  const trend = matchup.teamTrends.find((item) => item.teamId === teamId)
+  if (!trend) return null
+  const pushes = trend.atsPushes ? `-${trend.atsPushes}` : ''
+  return `${trend.teamName} ${trend.atsWins}-${trend.atsLosses}${pushes} ATS`
+}
+
+function totalRecord(matchup: WeeklyAnalysisSnapshot['matchups'][number], teamId: number) {
+  const trend = matchup.teamTrends.find((item) => item.teamId === teamId)
+  if (!trend) return null
+  const pushes = trend.totalPushes ? `-${trend.totalPushes}` : ''
+  return `${trend.teamName} ${trend.overs}-${trend.unders}${pushes} O/U`
+}
+
+function teamScoring(matchup: WeeklyAnalysisSnapshot['matchups'][number], teamId: number) {
+  const performance = matchup.teamPerformance.find((item) => item.teamId === teamId)
+  if (!performance) return null
+  return `${performance.teamName} avg ${formatAverage(performance.averagePointsFor)} PF/`
+    + `${formatAverage(performance.averagePointsAgainst)} PA`
+}
+
+function citedSpreadResult(
+  matchup: WeeklyAnalysisSnapshot['matchups'][number],
+  game: WeeklyRecentGame,
+  selectedTeamId: number,
+) {
+  const targetIds = [selectedTeamId, matchup.target.awayTeam.id, matchup.target.homeTeam.id]
+  const teamId = targetIds.find((id) => game.awayTeamId === id || game.homeTeamId === id)!
+  const isHome = game.homeTeamId === teamId
+  const teamName = isHome ? game.homeTeamName : game.awayTeamName
+  const opponentName = isHome ? game.awayTeamName : game.homeTeamName
+  const pointsFor = isHome ? game.homeScore : game.awayScore
+  const pointsAgainst = isHome ? game.awayScore : game.homeScore
+  const result = pointsFor > pointsAgainst ? 'beat' : pointsFor < pointsAgainst ? 'lost to' : 'tied'
+  return `${teamName} ${result} ${opponentName} ${pointsFor}-${pointsAgainst}`
+}
+
+export function buildWeeklyRationale(
+  matchup: WeeklyAnalysisSnapshot['matchups'][number],
+  pick: Pick<WeeklyPick, 'market' | 'selection' | 'supportingGameIds'>,
+) {
+  const citedGames = pick.supportingGameIds.map((gameId) =>
+    matchup.recentGames.find((game) => game.gameId === gameId)!)
+  if (pick.market === 'spread') {
+    const selectedTeamId = pick.selection === 'home'
+      ? matchup.target.homeTeam.id
+      : matchup.target.awayTeam.id
+    const opponentTeamId = pick.selection === 'home'
+      ? matchup.target.awayTeam.id
+      : matchup.target.homeTeam.id
+    return boundedRationale([
+      ...citedGames.map((game) => citedSpreadResult(matchup, game, selectedTeamId)),
+      spreadRecord(matchup, selectedTeamId),
+      spreadRecord(matchup, opponentTeamId),
+      teamScoring(matchup, selectedTeamId),
+    ].filter((segment): segment is string => Boolean(segment)))
+  }
+  return boundedRationale([
+    ...citedGames.map((game) =>
+      `${game.awayTeamName}-${game.homeTeamName} totaled ${game.finalTotal} (${game.totalResult})`),
+    totalRecord(matchup, matchup.target.awayTeam.id),
+    totalRecord(matchup, matchup.target.homeTeam.id),
+    teamScoring(matchup, matchup.target.awayTeam.id),
+    teamScoring(matchup, matchup.target.homeTeam.id),
+  ].filter((segment): segment is string => Boolean(segment)))
+}
+
+function buildWeeklySummary(picks: WeeklyPick[], snapshot: WeeklyAnalysisSnapshot) {
+  if (!picks.length) return 'No supported bets met the model selection criteria for this run.'
+  const spreads = picks.filter((pick) => pick.market === 'spread').length
+  const totals = picks.length - spreads
+  const strongest = [...picks].sort((left, right) => right.confidence - left.confidence)[0]
+  const matchup = snapshot.matchups.find((item) => item.gameId === strongest.gameId)!
+  return `${picks.length} tracked suggestion${picks.length === 1 ? '' : 's'} generated from validated `
+    + `non-preseason evidence: ${spreads} spread${spreads === 1 ? '' : 's'} and `
+    + `${totals} total${totals === 1 ? '' : 's'}. Highest confidence: `
+    + `${matchup.target.awayTeam.name} at ${matchup.target.homeTeam.name} `
+    + `${strongest.market} ${strongest.selection} (${strongest.confidence}%).`
+}
+
 export function parseWeeklyModelAnalysis(content: string, snapshot: WeeklyAnalysisSnapshot): WeeklyModelAnalysis {
   let parsed: unknown
   try {
@@ -341,10 +523,7 @@ export function parseWeeklyModelAnalysis(content: string, snapshot: WeeklyAnalys
     )
   }
   const root = record(parsed, 'The weekly analysis must be a JSON object.')
-  exactKeys(root, ['summary', 'picks'], 'The weekly analysis has unexpected or missing fields.')
-  if (typeof root.summary !== 'string' || !root.summary.trim() || root.summary.trim().length > 1_000) {
-    throw new WeeklyAnalysisError('invalid_model_output', 'The weekly summary must contain 1 to 1,000 characters.')
-  }
+  exactKeys(root, ['picks'], 'The weekly analysis has unexpected or missing fields.')
   if (!Array.isArray(root.picks)) {
     throw new WeeklyAnalysisError('invalid_model_output', 'Weekly picks must be an array.')
   }
@@ -355,11 +534,12 @@ export function parseWeeklyModelAnalysis(content: string, snapshot: WeeklyAnalys
   const matchups = new Map(snapshot.matchups.map((matchup) => [matchup.gameId, matchup]))
   const seen = new Set<string>()
   let omittedMissingLines = 0
+  let omittedMissingHistory = 0
   const picks = root.picks.map((value, index): WeeklyPick | null => {
     const pick = record(value, `Pick ${index + 1} must be an object.`)
     exactKeys(
       pick,
-      ['gameId', 'market', 'selection', 'confidence', 'rationale', 'supportingGameIds'],
+      ['gameId', 'market', 'selection', 'confidence', 'supportingGameIds'],
       `Pick ${index + 1} has unexpected or missing fields.`,
     )
     const gameId = Number(pick.gameId)
@@ -377,16 +557,19 @@ export function parseWeeklyModelAnalysis(content: string, snapshot: WeeklyAnalys
     if (!Number.isInteger(pick.confidence) || Number(pick.confidence) < 1 || Number(pick.confidence) > 100) {
       throw new WeeklyAnalysisError('invalid_model_output', `Pick ${index + 1} has invalid confidence.`)
     }
-    if (typeof pick.rationale !== 'string' || !pick.rationale.trim() || pick.rationale.trim().length > 240) {
-      throw new WeeklyAnalysisError('invalid_model_output', `Pick ${index + 1} has an invalid rationale.`)
-    }
     if (!Array.isArray(pick.supportingGameIds)
       || pick.supportingGameIds.length > 3
-      || !pick.supportingGameIds.every((id) => Number.isInteger(id) && Number(id) > 0)) {
+      || !pick.supportingGameIds.every((id) => Number.isInteger(id) && Number(id) > 0)
+      || new Set(pick.supportingGameIds).size !== pick.supportingGameIds.length) {
       throw new WeeklyAnalysisError('invalid_model_output', `Pick ${index + 1} has invalid supporting game IDs.`)
     }
     const availableGameIds = new Set(matchup.recentGames.map((game) => game.gameId))
-    if (pick.supportingGameIds.some((id) => !availableGameIds.has(Number(id)))) {
+    if (!availableGameIds.size) {
+      omittedMissingHistory += 1
+      return null
+    }
+    if (!pick.supportingGameIds.length
+      || pick.supportingGameIds.some((id) => !availableGameIds.has(Number(id)))) {
       throw new WeeklyAnalysisError('invalid_model_output', `Pick ${index + 1} cites a game outside its supplied history.`)
     }
     const uniqueKey = `${gameId}:${pick.market}`
@@ -405,20 +588,25 @@ export function parseWeeklyModelAnalysis(content: string, snapshot: WeeklyAnalys
       omittedMissingLines += 1
       return null
     }
-    return {
+    const weeklyPick: WeeklyPick = {
       gameId,
       market: pick.market,
       selection: pick.selection as WeeklyPick['selection'],
       line: suppliedLine,
       confidence: Number(pick.confidence),
-      rationale: pick.rationale.trim(),
+      rationale: '',
       supportingGameIds: pick.supportingGameIds.map(Number),
     }
+    weeklyPick.rationale = buildWeeklyRationale(matchup, weeklyPick)
+    return weeklyPick
   }).filter((pick): pick is WeeklyPick => pick != null)
   const omissionNote = omittedMissingLines
     ? `\n\nApplication note: ${omittedMissingLines} model suggestion${omittedMissingLines === 1 ? '' : 's'} omitted because no consensus line was available.`
     : ''
-  return { summary: `${root.summary.trim()}${omissionNote}`, picks }
+  const historyNote = omittedMissingHistory
+    ? `\n\nApplication note: ${omittedMissingHistory} model suggestion${omittedMissingHistory === 1 ? '' : 's'} omitted because no prior non-preseason games were available.`
+    : ''
+  return { summary: `${buildWeeklySummary(picks, snapshot)}${omissionNote}${historyNote}`, picks }
 }
 
 export class WeeklyAnalysisService {

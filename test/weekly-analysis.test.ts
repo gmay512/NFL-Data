@@ -3,7 +3,9 @@ import { describe, it } from 'node:test'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { buildAnalyticsSnapshot, type AnalyticsTargetMatchup } from '../server/analytics-core'
 import {
+  buildWeeklyMessages,
   buildUpcomingWeekSnapshot,
+  buildWeeklyTeamPerformance,
   buildWeeklyMatchups,
   mapInBatches,
   parseWeeklyModelAnalysis,
@@ -66,8 +68,26 @@ const analysis = buildAnalyticsSnapshot(
   '2026-09-22T20:00:00.000Z',
 )
 
+const recentGames = analysis.games.items.map((item) => ({
+  gameId: item.gameId,
+  gameDate: item.gameDate,
+  awayTeamId: item.awayTeamId,
+  awayTeamName: item.awayTeamName,
+  awayScore: item.awayScore,
+  homeTeamId: item.homeTeamId,
+  homeTeamName: item.homeTeamName,
+  homeScore: item.homeScore,
+  finalTotal: item.finalTotal,
+  closingHomeSpread: item.closingHomeSpread,
+  spreadDelta: item.spreadDelta,
+  spreadResult: item.spreadResult,
+  closingTotal: item.closingTotal,
+  totalDelta: item.totalDelta,
+  totalResult: item.totalResult,
+}))
+
 const snapshot: WeeklyAnalysisSnapshot = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   generatedAt: '2026-09-22T20:00:00.000Z',
   season: 2026,
   stage: 'Regular Season',
@@ -77,21 +97,9 @@ const snapshot: WeeklyAnalysisSnapshot = {
     kickoffAt: '2026-09-27T17:00:00.000Z',
     target,
     teamTrends: analysis.teamTrends.items,
+    teamPerformance: buildWeeklyTeamPerformance(target, analysis.teamTrends.items, recentGames),
     teamStatTrends: analysis.teamStatTrends.items,
-    recentGames: analysis.games.items.map((item) => ({
-      gameId: item.gameId,
-      gameDate: item.gameDate,
-      awayTeamName: item.awayTeamName,
-      awayScore: item.awayScore,
-      homeTeamName: item.homeTeamName,
-      homeScore: item.homeScore,
-      closingHomeSpread: item.closingHomeSpread,
-      spreadDelta: item.spreadDelta,
-      spreadResult: item.spreadResult,
-      closingTotal: item.closingTotal,
-      totalDelta: item.totalDelta,
-      totalResult: item.totalResult,
-    })),
+    recentGames,
     standings: analysis.standings.items,
     currentInjuries: [],
     playerStats: [],
@@ -101,13 +109,11 @@ const snapshot: WeeklyAnalysisSnapshot = {
 
 function output(overrides: Record<string, unknown> = {}) {
   return JSON.stringify({
-    summary: 'The supplied trends support one cautious position.',
     picks: [{
       gameId: 42,
       market: 'spread',
       selection: 'away',
       confidence: 61,
-      rationale: 'Visitors covered in the cited prior game, though the sample is small.',
       supportingGameIds: [31],
       ...overrides,
     }],
@@ -126,14 +132,13 @@ describe('weekly model analysis validation', () => {
       selection: 'away',
       line: 3.5,
       confidence: 61,
-      rationale: 'Visitors covered in the cited prior game, though the sample is small.',
+      rationale: 'Visitors beat Opponent 24-20; Visitors 1-0 ATS; Hosts 0-0 ATS; Visitors avg 24 PF/20 PA',
       supportingGameIds: [31],
     })
   })
 
   it('allows a valid no-pick analysis', () => {
     assert.deepEqual(parseWeeklyModelAnalysis(JSON.stringify({
-      summary: 'No market has sufficient supplied evidence.',
       picks: [],
     }), snapshot).picks, [])
   })
@@ -154,17 +159,149 @@ describe('weekly model analysis validation', () => {
     assert.match(parsed.summary, /1 model suggestion omitted because no consensus line was available/)
   })
 
+  it('omits model suggestions when a matchup has no prior games', () => {
+    const withoutHistory: WeeklyAnalysisSnapshot = {
+      ...snapshot,
+      matchups: [{
+        ...snapshot.matchups[0],
+        teamPerformance: snapshot.matchups[0].teamPerformance.map((team) => ({
+          ...team,
+          games: 0,
+          averagePointsFor: null,
+          averagePointsAgainst: null,
+          recentGames: [],
+        })),
+        recentGames: [],
+      }],
+    }
+    const parsed = parseWeeklyModelAnalysis(output({ supportingGameIds: [] }), withoutHistory)
+    assert.deepEqual(parsed.picks, [])
+    assert.match(parsed.summary, /1 model suggestion omitted because no prior non-preseason games were available/)
+  })
+
   it('rejects line drift, incompatible selections, and unsupported citations', () => {
     assert.throws(() => parseWeeklyModelAnalysis(output({ line: 4 }), snapshot), invalidOutput)
     assert.throws(() => parseWeeklyModelAnalysis(output({ selection: 'over' }), snapshot), invalidOutput)
     assert.throws(() => parseWeeklyModelAnalysis(output({ supportingGameIds: [999] }), snapshot), invalidOutput)
+    assert.throws(() => parseWeeklyModelAnalysis(output({ supportingGameIds: [] }), snapshot), invalidOutput)
+    assert.throws(() => parseWeeklyModelAnalysis(output({ supportingGameIds: [31, 31] }), snapshot), invalidOutput)
   })
 
   it('rejects duplicate game-market picks and non-JSON prose', () => {
-    const pick = JSON.parse(output()) as { summary: string; picks: unknown[] }
+    const pick = JSON.parse(output()) as { picks: unknown[] }
     pick.picks.push(pick.picks[0])
     assert.throws(() => parseWeeklyModelAnalysis(JSON.stringify(pick), snapshot), invalidOutput)
     assert.throws(() => parseWeeklyModelAnalysis('```json\n{}\n```', snapshot), invalidOutput)
+  })
+
+  it('keeps the model contract free of factual prose and within the payload guard', () => {
+    const messages = buildWeeklyMessages(snapshot)
+    assert.doesNotMatch(messages.at(-1)?.content ?? '', /"(?:rationale|summary)"/)
+    assert.ok(messages.reduce((total, message) => total + message.content.length, 0) < 240_000)
+  })
+})
+
+describe('weekly team evidence', () => {
+  it('keeps Seattle points scored and allowed in the correct perspective', () => {
+    const seattleTarget: AnalyticsTargetMatchup = {
+      ...target,
+      awayTeam: { id: 23, name: 'Seattle Seahawks' },
+      homeTeam: { id: 18, name: 'Washington Commanders' },
+    }
+    const seattleGames = [
+      {
+        ...historyGame,
+        game_id: 21541,
+        game_date: '2026-09-20',
+        game_timestamp: 1_790_000_200,
+        away_team_id: 23,
+        away_team_name: 'Seattle Seahawks',
+        away_score: 31,
+        home_team_id: 11,
+        home_team_name: 'Arizona Cardinals',
+        home_score: 7,
+        final_total: 38,
+        total_result: 'under' as const,
+      },
+      {
+        ...historyGame,
+        game_id: 21513,
+        game_date: '2026-09-13',
+        game_timestamp: 1_789_000_200,
+        away_team_id: 3,
+        away_team_name: 'San Francisco 49ers',
+        away_score: 10,
+        home_team_id: 23,
+        home_team_name: 'Seattle Seahawks',
+        home_score: 13,
+        final_total: 23,
+        total_result: 'under' as const,
+      },
+    ]
+    const seattleAnalysis = buildAnalyticsSnapshot(
+      'matchup_preview',
+      { season: 2026, gameId: 42 },
+      {
+        games: seattleGames,
+        teamStats: [],
+        standings: [],
+        injuries: [],
+        playerStats: [],
+        players: [],
+        targetMatchup: seattleTarget,
+      },
+      '2026-09-22T20:00:00.000Z',
+    )
+    const games = seattleAnalysis.games.items.map((item) => ({
+      gameId: item.gameId,
+      gameDate: item.gameDate,
+      awayTeamId: item.awayTeamId,
+      awayTeamName: item.awayTeamName,
+      awayScore: item.awayScore,
+      homeTeamId: item.homeTeamId,
+      homeTeamName: item.homeTeamName,
+      homeScore: item.homeScore,
+      finalTotal: item.finalTotal,
+      closingHomeSpread: item.closingHomeSpread,
+      spreadDelta: item.spreadDelta,
+      spreadResult: item.spreadResult,
+      closingTotal: item.closingTotal,
+      totalDelta: item.totalDelta,
+      totalResult: item.totalResult,
+    }))
+    const teamPerformance = buildWeeklyTeamPerformance(
+      seattleTarget,
+      seattleAnalysis.teamTrends.items,
+      games,
+    )
+    const seattle = teamPerformance.find((team) => team.teamId === 23)!
+    assert.equal(seattle.averagePointsFor, 22)
+    assert.equal(seattle.averagePointsAgainst, 8.5)
+    assert.deepEqual(seattle.recentGames.map((game) => [game.pointsFor, game.pointsAgainst]), [
+      [31, 7],
+      [13, 10],
+    ])
+
+    const parsed = parseWeeklyModelAnalysis(JSON.stringify({
+      picks: [{
+        gameId: 42,
+        market: 'total',
+        selection: 'over',
+        confidence: 55,
+        supportingGameIds: [21541, 21513],
+      }],
+    }), {
+      ...snapshot,
+      matchups: [{
+        ...snapshot.matchups[0],
+        target: seattleTarget,
+        teamTrends: seattleAnalysis.teamTrends.items,
+        teamPerformance,
+        recentGames: games,
+      }],
+    })
+    assert.match(parsed.picks[0].rationale, /Seattle Seahawks avg 22 PF\/8\.5 PA/)
+    assert.doesNotMatch(parsed.picks[0].rationale, /allowed 31|31 PA/)
   })
 })
 
@@ -172,9 +309,10 @@ describe('weekly matchup batching', () => {
   it('skips earlier preseason games and builds only the next regular-season week', async () => {
     const operations: Array<[string, unknown]> = []
     const rows = [
-      { id: 10, season: 2026, stage: 'Preseason', week: 'Pre Season Week 3', game_timestamp: 1_790_000_000, status_short: 'NS' },
+      { id: 10, season: 2026, stage: 'Pre Season', week: 'Pre Season Week 3', game_timestamp: 1_790_000_000, status_short: 'NS' },
       { id: 42, season: 2026, stage: 'Regular Season', week: 'Week 1', game_timestamp: 1_791_000_000, status_short: 'NS' },
       { id: 43, season: 2026, stage: 'Regular Season', week: 'Week 1', game_timestamp: 1_791_003_600, status_short: 'NS' },
+      { id: 50, season: 2026, stage: 'Post Season', week: 'Wild Card', game_timestamp: 1_800_000_000, status_short: 'NS' },
     ]
     const receivedFilters: Array<{ gameId?: number; stage?: string }> = []
     class Query implements PromiseLike<{ data: typeof rows; error: null }> {
@@ -184,6 +322,11 @@ describe('weekly matchup batching', () => {
       eq(column: string, value: unknown) {
         operations.push([column, value])
         this.result = this.result.filter((row) => row[column as keyof typeof row] === value)
+        return this
+      }
+      neq(column: string, value: unknown) {
+        operations.push([`not:${column}`, value])
+        this.result = this.result.filter((row) => row[column as keyof typeof row] !== value)
         return this
       }
       gt(column: string, value: number) {
@@ -248,10 +391,26 @@ describe('weekly matchup batching', () => {
     assert.equal(result.week, 'Week 1')
     assert.deepEqual(result.matchups.map((matchup) => matchup.gameId), [42, 43])
     assert.deepEqual(receivedFilters, [
-      { season: 2026, stage: 'Regular Season', gameId: 42 },
-      { season: 2026, stage: 'Regular Season', gameId: 43 },
+      { season: 2026, excludeStage: 'Pre Season', gameId: 42 },
+      { season: 2026, excludeStage: 'Pre Season', gameId: 43 },
     ])
-    assert.equal(operations.filter(([column, value]) => column === 'stage' && value === 'Regular Season').length, 2)
+    assert.equal(operations.filter(([column, value]) => column === 'not:stage' && value === 'Pre Season').length, 1)
+    assert.equal(operations.filter(([column, value]) => column === 'stage' && value === 'Regular Season').length, 1)
+
+    const postseason = await buildUpcomingWeekSnapshot(
+      client,
+      dataSource,
+      2026,
+      new Date(1_795_000_000 * 1_000).toISOString(),
+    )
+    assert.equal(postseason.stage, 'Post Season')
+    assert.equal(postseason.week, 'Wild Card')
+    assert.deepEqual(postseason.matchups.map((matchup) => matchup.gameId), [50])
+    assert.deepEqual(receivedFilters.at(-1), {
+      season: 2026,
+      excludeStage: 'Pre Season',
+      gameId: 50,
+    })
   })
 
   it('limits workers to two while preserving input order', async () => {
@@ -293,13 +452,17 @@ describe('weekly matchup batching', () => {
 })
 
 describe('weekly analysis history', () => {
-  it('restricts saved-run listing, deletion, and grading to the regular season', async () => {
+  it('excludes only preseason from saved-run listing, deletion, and grading', async () => {
     const operations: Array<[string, unknown]> = []
     class Query implements PromiseLike<{ data: []; error: null }> {
       select() { return this }
       delete() { return this }
       eq(column: string, value: unknown) {
         operations.push([column, value])
+        return this
+      }
+      neq(column: string, value: unknown) {
+        operations.push([`not:${column}`, value])
         return this
       }
       order() { return this }
@@ -318,7 +481,7 @@ describe('weekly analysis history', () => {
     assert.equal(await store.delete('99000000-0000-4000-8000-000000000001'), false)
     assert.equal(await store.gradePending(), 0)
     assert.equal(
-      operations.filter(([column, value]) => column === 'stage' && value === 'Regular Season').length,
+      operations.filter(([column, value]) => column === 'not:stage' && value === 'Pre Season').length,
       3,
     )
   })

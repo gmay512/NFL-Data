@@ -81,6 +81,7 @@ function fakeClient(
 
     select(...args: unknown[]) { return this.add('select', args) }
     eq(...args: unknown[]) { return this.add('eq', args) }
+    neq(...args: unknown[]) { return this.add('neq', args) }
     lt(...args: unknown[]) { return this.add('lt', args) }
     in(...args: unknown[]) { return this.add('in', args) }
     not(...args: unknown[]) { return this.add('not', args) }
@@ -100,9 +101,13 @@ function fakeClient(
       onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
     ): PromiseLike<TResult1 | TResult2> {
       const stage = operation(this.log, 'eq', 'stage')?.args[1]
-      const selectedGames = stage == null
+      const excludedStage = operation(this.log, 'neq', 'stage')?.args[1]
+      const stageGames = stage == null
         ? completedGames
         : completedGames.filter((game) => game.stage === stage)
+      const selectedGames = excludedStage == null
+        ? stageGames
+        : stageGames.filter((game) => game.stage !== excludedStage)
       const data = this.log.table === 'games'
         ? selectedGames.map((game) => ({ id: game.game_id, game_timestamp: game.game_timestamp }))
         : rows[this.log.table] ?? []
@@ -189,6 +194,40 @@ describe('matchup preview data loading', () => {
     assert.deepEqual(rpcCalls.at(-1), { name: 'get_game_betting_results', gameIds: [10] })
     const teamStats = logs.find((log) => log.table === 'game_team_stats')!
     assert.deepEqual(operation(teamStats, 'in', 'game_id')?.args, ['game_id', [10]])
+  })
+
+  it('keeps regular and postseason history while excluding preseason', async () => {
+    const preseasonGame: BettingGameRow = {
+      ...completedGame,
+      game_id: 8,
+      stage: 'Pre Season',
+      week: 'Pre Season Week 3',
+    }
+    const postseasonGame: BettingGameRow = {
+      ...completedGame,
+      game_id: 11,
+      stage: 'Post Season',
+      week: 'Wild Card',
+      game_timestamp: completedGame.game_timestamp + 1,
+    }
+    const { client, logs, rpcCalls } = fakeClient(
+      'NS',
+      [preseasonGame, completedGame, postseasonGame],
+    )
+
+    const source = await createSupabaseAnalyticsDataSource(client).load(
+      { season: 2025, excludeStage: 'Pre Season', gameId: 42 },
+      'matchup_preview',
+    )
+
+    assert.deepEqual(source.games.map((game) => game.game_id), [11, 10])
+    const history = logs.find((log) =>
+      log.table === 'games' && log.operations.some(({ method }) => method === 'lt'))!
+    assert.deepEqual(operation(history, 'neq', 'stage')?.args, ['stage', 'Pre Season'])
+    assert.deepEqual(rpcCalls.at(-1), {
+      name: 'get_game_betting_results',
+      gameIds: [10, 11],
+    })
   })
 
   it('selects eligible games first and chunks bounded betting result requests', async () => {

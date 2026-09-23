@@ -17,7 +17,7 @@ function weeklyRun(id: string, week: string, createdAt: string, summary: string)
     week,
     model: 'test-model',
     context: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       generatedAt: createdAt,
       season: 2025,
       stage: 'Regular Season',
@@ -176,7 +176,17 @@ describe('WeeklyAnalysisPage', () => {
     preseasonRun.stage = 'Preseason'
     preseasonRun.context.stage = 'Preseason'
     preseasonRun.suggestions[0].stage = 'Preseason'
+    const postseasonRun = weeklyRun(
+      '99000000-0000-4000-8000-000000000006',
+      'Wild Card',
+      '2026-01-10T00:00:00.000Z',
+      'Postseason output.',
+    )
+    postseasonRun.stage = 'Post Season'
+    postseasonRun.context.stage = 'Post Season'
+    postseasonRun.suggestions[0].stage = 'Post Season'
     const runs = [
+      postseasonRun,
       weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Newest week two output.'),
       weeklyRun(oldRunId, 'Week 2', '2025-09-11T00:00:00.000Z', 'Older week two output.'),
       weeklyRun(priorWeekRunId, 'Week 1', '2025-09-05T00:00:00.000Z', 'Week one output.'),
@@ -187,12 +197,13 @@ describe('WeeklyAnalysisPage', () => {
     const selects = container.querySelectorAll<HTMLSelectElement>('select')
     assert.equal(selects.length, 2)
     assert.deepEqual([...selects[0].options].map((option) => option.textContent), ['2025'])
-    assert.deepEqual([...selects[1].options].map((option) => option.textContent), ['Week 2', 'Week 1'])
+    assert.deepEqual([...selects[1].options].map((option) => option.textContent), ['Wild Card', 'Week 2', 'Week 1'])
     assert.equal(selects[1].value, 'Week 2')
     assert.match(container.textContent ?? '', /Older week two output\./)
     assert.doesNotMatch(container.querySelector('.weekly-run-detail')?.textContent ?? '', /Newest week two output\./)
     assert.doesNotMatch(container.textContent ?? '', /2024 Regular Season/)
     assert.doesNotMatch(container.textContent ?? '', /Preseason output\./)
+    assert.match(selects[1].textContent ?? '', /Wild Card/)
     assert.doesNotMatch(selects[1].textContent ?? '', /Pre Season Week 3/)
     assert.equal(container.querySelectorAll('.weekly-run-browser .final-badge').length, 1)
     assert.equal(container.querySelector('.weekly-run-detail .final-badge'), null)

@@ -237,13 +237,17 @@ immutable snapshot so later follow-ups use the same grounding data.
 
 ### Upcoming-week suggestions and tracking
 
-The Analytics page can manually analyze the nearest future scheduled week for
-the selected season. It builds a bounded snapshot for every matchup using the
-current consensus spread and total, season-to-date ATS and totals results,
-available team and player statistics, standings, and current injuries. The
-local model must return validated structured suggestions; malformed output,
-unknown games, duplicate markets, unsupported citations, and changed or missing
-lines reject the entire run.
+The Weekly Analysis page can manually analyze the nearest future scheduled week
+for the selected season. Regular-season and postseason games are eligible;
+preseason games are excluded from both target weeks and historical evidence.
+It builds a bounded snapshot for every matchup using the current consensus
+spread and total, team-perspective scoring, season-to-date ATS and totals
+results, available team and player statistics, standings, and current injuries.
+The local model returns only structured pick selections, confidence, and cited
+game IDs. The server validates those fields and generates the displayed summary
+and rationale from recorded scores and trend facts, preventing model-written
+score attribution. Malformed output, unknown games, duplicate markets,
+unsupported citations, and changed or missing lines reject the entire run.
 
 Every valid suggestion is automatically saved in `betting_analysis_runs` and
 `betting_suggestions`. These tables are separate from the source game schema and

@@ -248,6 +248,8 @@ describe('deterministic analytics snapshot', () => {
       totalsUngraded: 1,
       overRate: 0.5,
       averageTeamSpreadDelta: 1.833,
+      averagePointsFor: 25,
+      averagePointsAgainst: 20.333,
     }])
   })
 

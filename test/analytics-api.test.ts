@@ -261,7 +261,7 @@ describe('analytics API contracts', () => {
       week: 'Week 2',
       model: 'test-model',
       context: {
-        schemaVersion: 1 as const,
+        schemaVersion: 2 as const,
         generatedAt: '2025-09-10T00:00:00.000Z',
         season: 2025,
         stage: 'Regular Season',

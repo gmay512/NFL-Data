@@ -101,6 +101,7 @@ async function loadGames(client: SupabaseClient, filters: AnalyticsFilters) {
     .limit(MAX_ANALYTICS_GAMES)
 
   if (filters.stage) query = query.eq('stage', filters.stage)
+  if (filters.excludeStage) query = query.neq('stage', filters.excludeStage)
   if (filters.week) query = query.eq('week', filters.week)
   if (filters.gameId) query = query.eq('id', filters.gameId)
   if (filters.comparisonTeamId && filters.teamId) {
@@ -195,6 +196,7 @@ async function loadMatchupHistory(
   kickoffTimestamp: number,
   teamIds: number[],
   stage?: string,
+  excludeStage?: string,
 ) {
   const joinedTeamIds = teamIds.join(',')
   let query = client
@@ -211,6 +213,7 @@ async function loadMatchupHistory(
     .limit(MAX_ANALYTICS_GAMES)
 
   if (stage) query = query.eq('stage', stage)
+  if (excludeStage) query = query.neq('stage', excludeStage)
 
   const { data, error, count } = await query
   throwQueryError(error)
@@ -358,6 +361,7 @@ export function createSupabaseAnalyticsDataSource(client: SupabaseClient): Analy
             targetMatchup.kickoff.timestamp,
             targetTeamIds!,
             filters.stage,
+            filters.excludeStage,
           )
         : await loadGames(client, filters)
       const gameIds = games.map((game) => game.game_id)

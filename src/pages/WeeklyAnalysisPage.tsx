@@ -24,6 +24,10 @@ function groupKey(run: WeeklyAnalysisRun) {
   return `${run.season}\u0000${run.stage ?? ''}\u0000${run.week}`
 }
 
+function isPreseason(stage: string | null) {
+  return stage != null && /^pre[\s-]*season$/i.test(stage.trim())
+}
+
 function groupWeeklyRuns(runs: WeeklyAnalysisRun[]): WeeklyRunGroup[] {
   const groups = new Map<string, WeeklyRunGroup>()
   for (const run of [...runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt))) {
@@ -78,7 +82,7 @@ export function WeeklyAnalysisPage() {
     () => currentSeason == null
       ? []
       : runs
-          .filter((run) => run.season === currentSeason && run.stage === 'Regular Season')
+          .filter((run) => run.season === currentSeason && !isPreseason(run.stage))
           .sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
     [currentSeason, runs],
   )

@@ -8,6 +8,7 @@ export type AnalyticsPreset =
 export type AnalyticsFilters = {
   season: number
   stage?: string
+  excludeStage?: string
   week?: string
   teamId?: number
   comparisonTeamId?: number
@@ -191,6 +192,8 @@ export type AnalyticsSnapshot = {
     totalsUngraded: number
     overRate: number | null
     averageTeamSpreadDelta: number | null
+    averagePointsFor: number | null
+    averagePointsAgainst: number | null
   }>
   teamStatTrends: BoundedAnalyticsItems<{
     teamId: number
@@ -323,6 +326,7 @@ export function validateAnalyticsFilters(preset: AnalyticsPreset, value: unknown
   const filters: AnalyticsFilters = {
     season,
     stage: optionalFilterText(input.stage, 'stage'),
+    excludeStage: optionalFilterText(input.excludeStage, 'excludeStage'),
     week: optionalFilterText(input.week, 'week'),
     teamId: optionalPositiveInteger(input.teamId, 'teamId'),
     comparisonTeamId: optionalPositiveInteger(input.comparisonTeamId, 'comparisonTeamId'),
@@ -425,6 +429,8 @@ function buildSummary(games: BettingGameRow[]): AnalyticsSnapshot['summary'] {
 function buildTeamTrends(games: BettingGameRow[], names: Map<number, string>) {
   type MutableTrend = AnalyticsSnapshot['teamTrends']['items'][number] & {
     spreadDeltas: number[]
+    pointsFor: number[]
+    pointsAgainst: number[]
   }
   const trends = new Map<number, MutableTrend>()
 
@@ -444,7 +450,11 @@ function buildTeamTrends(games: BettingGameRow[], names: Map<number, string>) {
       totalsUngraded: 0,
       overRate: null,
       averageTeamSpreadDelta: null,
+      averagePointsFor: null,
+      averagePointsAgainst: null,
       spreadDeltas: [],
+      pointsFor: [],
+      pointsAgainst: [],
     })
   }
 
@@ -456,6 +466,8 @@ function buildTeamTrends(games: BettingGameRow[], names: Map<number, string>) {
       const trend = trends.get(teamId)
       if (!trend) continue
       trend.games += 1
+      trend.pointsFor.push(isHome ? game.home_score : game.away_score)
+      trend.pointsAgainst.push(isHome ? game.away_score : game.home_score)
 
       if (game.spread_result === 'ungraded') trend.atsUngraded += 1
       else if (game.spread_result === 'push') trend.atsPushes += 1
@@ -476,11 +488,13 @@ function buildTeamTrends(games: BettingGameRow[], names: Map<number, string>) {
   }
 
   return Array.from(trends.values())
-    .map(({ spreadDeltas, ...trend }) => ({
+    .map(({ spreadDeltas, pointsFor, pointsAgainst, ...trend }) => ({
       ...trend,
       atsWinRate: rate(trend.atsWins, trend.atsWins + trend.atsLosses),
       overRate: rate(trend.overs, trend.overs + trend.unders),
       averageTeamSpreadDelta: average(spreadDeltas),
+      averagePointsFor: average(pointsFor),
+      averagePointsAgainst: average(pointsAgainst),
     }))
     .sort((left, right) =>
       (right.atsWinRate ?? -1) - (left.atsWinRate ?? -1)
