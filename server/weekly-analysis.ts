@@ -120,6 +120,7 @@ export type WeeklySuggestion = {
 export interface WeeklyAnalysisStore {
   save(snapshot: WeeklyAnalysisSnapshot, model: string, analysis: WeeklyModelAnalysis): Promise<WeeklyAnalysisRun>
   list(): Promise<WeeklyAnalysisRun[]>
+  delete(id: string): Promise<boolean>
   gradePending(): Promise<number>
 }
 
@@ -244,6 +245,7 @@ export async function buildUpcomingWeekSnapshot(
     .from('games')
     .select('id,stage,week,game_timestamp')
     .eq('season', season)
+    .eq('stage', 'Regular Season')
     .eq('status_short', 'NS')
     .gt('game_timestamp', now)
     .not('week', 'is', null)
@@ -256,18 +258,16 @@ export async function buildUpcomingWeekSnapshot(
     throw new WeeklyAnalysisError('no_upcoming_week', `Season ${season} has no upcoming scheduled week.`)
   }
 
-  let gamesQuery = client
+  const gamesQuery = client
     .from('games')
     .select('id,game_timestamp')
     .eq('season', season)
+    .eq('stage', 'Regular Season')
     .eq('status_short', 'NS')
     .eq('week', String(next.week))
     .gt('game_timestamp', now)
     .order('game_timestamp')
     .order('id')
-  gamesQuery = next.stage == null
-    ? gamesQuery.is('stage', null)
-    : gamesQuery.eq('stage', String(next.stage))
   const { data: games, error: gamesError } = await gamesQuery
   queryError(gamesError)
   if (!games?.length) {
@@ -474,6 +474,10 @@ export class WeeklyAnalysisService {
 
   list() {
     return this.store.list()
+  }
+
+  delete(id: string) {
+    return this.store.delete(id)
   }
 
   async grade() {

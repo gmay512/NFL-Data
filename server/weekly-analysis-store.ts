@@ -113,6 +113,7 @@ export function createWeeklyAnalysisStore(client: SupabaseClient): WeeklyAnalysi
     const { data: runData, error: runError } = await client
       .from('betting_analysis_runs')
       .select('id,season,stage,week,model_name,context_snapshot,summary,created_at')
+      .eq('stage', 'Regular Season')
       .order('created_at', { ascending: false })
       .limit(100)
     throwError(runError)
@@ -172,11 +173,23 @@ export function createWeeklyAnalysisStore(client: SupabaseClient): WeeklyAnalysi
 
     list,
 
+    async delete(id: string) {
+      const { data, error } = await client
+        .from('betting_analysis_runs')
+        .delete()
+        .eq('id', id)
+        .eq('stage', 'Regular Season')
+        .select('id')
+      throwError(error)
+      return (data?.length ?? 0) > 0
+    },
+
     async gradePending() {
       const { data: pendingData, error: pendingError } = await client
         .from('betting_suggestions')
         .select('id,run_id,game_id,season,stage,week,kickoff_at,away_team_id,away_team_name,home_team_id,home_team_name,market,selection,locked_line,confidence,rationale,supporting_game_ids,result,result_delta,final_away_score,final_home_score,graded_at,created_at')
         .eq('result', 'ungraded')
+        .eq('stage', 'Regular Season')
         .order('id')
       throwError(pendingError)
       const pending = ((pendingData ?? []) as SuggestionRow[]).map(suggestion)

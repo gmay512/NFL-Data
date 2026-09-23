@@ -25,7 +25,7 @@ import type {
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init)
-  const payload = await response.json() as T | ApiErrorResponse
+  const payload = await response.json().catch(() => null) as T | ApiErrorResponse | null
   if (!response.ok) {
     throw new Error(
       typeof payload === 'object' && payload !== null && 'error' in payload
@@ -33,6 +33,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
         : `Request failed with status ${response.status}.`,
     )
   }
+  if (payload == null) throw new Error(`Request to ${path} returned an invalid JSON response.`)
   return payload as T
 }
 
@@ -104,6 +105,14 @@ export function runAnalysis(title: string, preset: AnalyticsPreset, filters: Ana
 
 export function listWeeklyAnalysisRuns(options?: { signal?: AbortSignal }) {
   return requestJson<WeeklyAnalysisRunsResponse>('/api/analytics/weekly/runs', options)
+}
+
+export async function deleteWeeklyAnalysisRun(id: string) {
+  const response = await fetch(`/api/analytics/weekly/runs/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as ApiErrorResponse | null
+    throw new Error(payload?.error || `Request failed with status ${response.status}.`)
+  }
 }
 
 export function runWeeklyAnalysis(season: number) {

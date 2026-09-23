@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
+import type { SupabaseClient } from '@supabase/supabase-js'
 import { buildAnalyticsSnapshot, type AnalyticsTargetMatchup } from '../server/analytics-core'
 import {
+  buildUpcomingWeekSnapshot,
   buildWeeklyMatchups,
   mapInBatches,
   parseWeeklyModelAnalysis,
@@ -9,7 +11,7 @@ import {
   type WeeklyAnalysisSnapshot,
   type WeeklySuggestion,
 } from '../server/weekly-analysis'
-import { gradeWeeklySuggestion } from '../server/weekly-analysis-store'
+import { createWeeklyAnalysisStore, gradeWeeklySuggestion } from '../server/weekly-analysis-store'
 
 const target: AnalyticsTargetMatchup = {
   gameId: 42,
@@ -167,6 +169,85 @@ describe('weekly model analysis validation', () => {
 })
 
 describe('weekly matchup batching', () => {
+  it('skips earlier preseason games and builds only the next regular-season week', async () => {
+    const operations: Array<[string, unknown]> = []
+    const rows = [
+      { id: 10, season: 2026, stage: 'Preseason', week: 'Pre Season Week 3', game_timestamp: 1_790_000_000, status_short: 'NS' },
+      { id: 42, season: 2026, stage: 'Regular Season', week: 'Week 1', game_timestamp: 1_791_000_000, status_short: 'NS' },
+      { id: 43, season: 2026, stage: 'Regular Season', week: 'Week 1', game_timestamp: 1_791_003_600, status_short: 'NS' },
+    ]
+    class Query implements PromiseLike<{ data: typeof rows; error: null }> {
+      private result = [...rows]
+      private maximum: number | null = null
+      select() { return this }
+      eq(column: string, value: unknown) {
+        operations.push([column, value])
+        this.result = this.result.filter((row) => row[column as keyof typeof row] === value)
+        return this
+      }
+      gt(column: string, value: number) {
+        this.result = this.result.filter((row) => Number(row[column as keyof typeof row]) > value)
+        return this
+      }
+      not(column: string) {
+        this.result = this.result.filter((row) => row[column as keyof typeof row] != null)
+        return this
+      }
+      order(column: string) {
+        this.result.sort((left, right) => Number(left[column as keyof typeof left]) - Number(right[column as keyof typeof right]))
+        return this
+      }
+      limit(value: number) {
+        this.maximum = value
+        return this
+      }
+      then<TResult1 = { data: typeof rows; error: null }, TResult2 = never>(
+        onfulfilled?: ((value: { data: typeof rows; error: null }) => TResult1 | PromiseLike<TResult1>) | null,
+        onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+      ): PromiseLike<TResult1 | TResult2> {
+        return Promise.resolve({
+          data: this.maximum == null ? this.result : this.result.slice(0, this.maximum),
+          error: null,
+        }).then(onfulfilled, onrejected)
+      }
+    }
+    const client = { from: () => new Query() } as unknown as SupabaseClient
+    const dataSource = {
+      async load(filters: { gameId?: number }) {
+        const gameId = Number(filters.gameId)
+        return {
+          games: [],
+          teamStats: [],
+          standings: [],
+          injuries: [],
+          playerStats: [],
+          players: [],
+          targetMatchup: {
+            ...target,
+            gameId,
+            kickoff: {
+              date: '2026-09-27',
+              timestamp: rows.find((row) => row.id === gameId)?.game_timestamp ?? target.kickoff.timestamp,
+            },
+            week: 'Week 1',
+          },
+        }
+      },
+    }
+
+    const result = await buildUpcomingWeekSnapshot(
+      client,
+      dataSource,
+      2026,
+      '2026-09-01T00:00:00.000Z',
+    )
+
+    assert.equal(result.stage, 'Regular Season')
+    assert.equal(result.week, 'Week 1')
+    assert.deepEqual(result.matchups.map((matchup) => matchup.gameId), [42, 43])
+    assert.equal(operations.filter(([column, value]) => column === 'stage' && value === 'Regular Season').length, 2)
+  })
+
   it('limits workers to two while preserving input order', async () => {
     let active = 0
     let peak = 0
@@ -201,6 +282,38 @@ describe('weekly matchup batching', () => {
         && error.code === 'context_unavailable'
         && /game 42/.test(error.message)
         && /statement timeout/.test(error.message),
+    )
+  })
+})
+
+describe('weekly analysis history', () => {
+  it('restricts saved-run listing, deletion, and grading to the regular season', async () => {
+    const operations: Array<[string, unknown]> = []
+    class Query implements PromiseLike<{ data: []; error: null }> {
+      select() { return this }
+      delete() { return this }
+      eq(column: string, value: unknown) {
+        operations.push([column, value])
+        return this
+      }
+      order() { return this }
+      limit() { return this }
+      then<TResult1 = { data: []; error: null }, TResult2 = never>(
+        onfulfilled?: ((value: { data: []; error: null }) => TResult1 | PromiseLike<TResult1>) | null,
+        onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+      ): PromiseLike<TResult1 | TResult2> {
+        return Promise.resolve({ data: [], error: null }).then(onfulfilled, onrejected)
+      }
+    }
+    const client = { from: () => new Query() } as unknown as SupabaseClient
+    const store = createWeeklyAnalysisStore(client)
+
+    assert.deepEqual(await store.list(), [])
+    assert.equal(await store.delete('99000000-0000-4000-8000-000000000001'), false)
+    assert.equal(await store.gradePending(), 0)
+    assert.equal(
+      operations.filter(([column, value]) => column === 'stage' && value === 'Regular Season').length,
+      3,
     )
   })
 })

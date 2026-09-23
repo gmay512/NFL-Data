@@ -272,6 +272,7 @@ describe('analytics API contracts', () => {
       createdAt: '2025-09-10T00:00:00.000Z',
       suggestions: [],
     }
+    let runExists = true
     deps.weekly = {
       async analyze(season, options) {
         analyzedSeason = season
@@ -279,7 +280,12 @@ describe('analytics API contracts', () => {
         return run
       },
       async list() {
-        return [run]
+        return runExists ? [run] : []
+      },
+      async delete(id) {
+        if (!runExists || id !== run.id) return false
+        runExists = false
+        return true
       },
       async grade() {
         return { graded: 2 }
@@ -305,6 +311,12 @@ describe('analytics API contracts', () => {
 
     const gradeResponse = await request('/api/analytics/weekly/grade', deps, 'POST')
     assert.deepEqual(await gradeResponse.json(), { graded: 2 })
+
+    const deleteResponse = await request(`/api/analytics/weekly/runs/${run.id}`, deps, 'DELETE')
+    assert.equal(deleteResponse.status, 204)
+    const missingResponse = await request(`/api/analytics/weekly/runs/${run.id}`, deps, 'DELETE')
+    assert.equal(missingResponse.status, 404)
+    assert.equal((await missingResponse.json() as { code: string }).code, 'weekly_run_not_found')
 
     const invalidResponse = await request('/api/analytics/weekly/analyze', deps, 'POST', { season: 'invalid' })
     assert.equal(invalidResponse.status, 400)

@@ -41,7 +41,7 @@ export type AnalyticsApiDependencies = {
   llama: LlamaClient
   store: AnalysisStore
   loadMetadata: (season?: number) => Promise<AnalyticsFilterMetadata>
-  weekly?: Pick<WeeklyAnalysisService, 'analyze' | 'grade' | 'list'>
+  weekly?: Pick<WeeklyAnalysisService, 'analyze' | 'delete' | 'grade' | 'list'>
 }
 
 export class AnalyticsApiError extends Error {
@@ -65,6 +65,7 @@ const presets = new Set<AnalyticsPreset>([
 ])
 const sessionPathPattern = /^\/api\/analytics\/sessions\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i
 const messagePathPattern = /^\/api\/analytics\/sessions\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/messages$/i
+const weeklyRunPathPattern = /^\/api\/analytics\/weekly\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i
 const presetPrompts: Record<AnalyticsPreset, string> = {
   season_overview: 'Generate a grounded season overview.',
   team_analysis: 'Generate a grounded team analysis.',
@@ -364,6 +365,16 @@ export async function handleAnalyticsApiRequest(
   if (request.method === 'GET' && requestUrl.pathname === '/api/analytics/weekly/runs') {
     if (!dependencies.weekly) throw new AnalyticsApiError(503, 'weekly_unavailable', 'Weekly analysis is unavailable.')
     sendJson(response, 200, { runs: await dependencies.weekly.list() })
+    return true
+  }
+
+  const weeklyRunMatch = requestUrl.pathname.match(weeklyRunPathPattern)
+  if (weeklyRunMatch && request.method === 'DELETE') {
+    if (!dependencies.weekly) throw new AnalyticsApiError(503, 'weekly_unavailable', 'Weekly analysis is unavailable.')
+    if (!await dependencies.weekly.delete(weeklyRunMatch[1])) {
+      throw new AnalyticsApiError(404, 'weekly_run_not_found', 'Weekly analysis run was not found.')
+    }
+    response.writeHead(204).end()
     return true
   }
 

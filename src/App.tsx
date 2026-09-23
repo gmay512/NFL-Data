@@ -5,6 +5,7 @@ import { DashboardPage } from './pages/DashboardPage'
 import { GameDetailPage } from './pages/GameDetailPage'
 import { GameTeamDetailPage } from './pages/GameTeamDetailPage'
 import { AnalyticsPage } from './pages/AnalyticsPage'
+import { WeeklyAnalysisPage } from './pages/WeeklyAnalysisPage'
 
 function App() {
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -46,6 +47,7 @@ function App() {
         <Route path="/games/:id" element={<GameDetailPage />} />
         <Route path="/games/:gameId/teams/:teamId" element={<GameTeamDetailPage />} />
         <Route path="/analytics" element={<AnalyticsPage />} />
+        <Route path="/analytics/weekly" element={<WeeklyAnalysisPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
