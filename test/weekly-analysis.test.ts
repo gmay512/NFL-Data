@@ -176,6 +176,7 @@ describe('weekly matchup batching', () => {
       { id: 42, season: 2026, stage: 'Regular Season', week: 'Week 1', game_timestamp: 1_791_000_000, status_short: 'NS' },
       { id: 43, season: 2026, stage: 'Regular Season', week: 'Week 1', game_timestamp: 1_791_003_600, status_short: 'NS' },
     ]
+    const receivedFilters: Array<{ gameId?: number; stage?: string }> = []
     class Query implements PromiseLike<{ data: typeof rows; error: null }> {
       private result = [...rows]
       private maximum: number | null = null
@@ -213,7 +214,8 @@ describe('weekly matchup batching', () => {
     }
     const client = { from: () => new Query() } as unknown as SupabaseClient
     const dataSource = {
-      async load(filters: { gameId?: number }) {
+      async load(filters: { gameId?: number; stage?: string }) {
+        receivedFilters.push(filters)
         const gameId = Number(filters.gameId)
         return {
           games: [],
@@ -245,6 +247,10 @@ describe('weekly matchup batching', () => {
     assert.equal(result.stage, 'Regular Season')
     assert.equal(result.week, 'Week 1')
     assert.deepEqual(result.matchups.map((matchup) => matchup.gameId), [42, 43])
+    assert.deepEqual(receivedFilters, [
+      { season: 2026, stage: 'Regular Season', gameId: 42 },
+      { season: 2026, stage: 'Regular Season', gameId: 43 },
+    ])
     assert.equal(operations.filter(([column, value]) => column === 'stage' && value === 'Regular Season').length, 2)
   })
 

@@ -178,7 +178,7 @@ export async function buildWeeklyMatchups(
       analysis = await generateAnalyticsSnapshot(
         dataSource,
         'matchup_preview',
-        { season, gameId: Number(game.id) },
+        { season, stage: 'Regular Season', gameId: Number(game.id) },
         { generatedAt: () => generatedAt, limits: weeklyLimits },
       )
     } catch (error) {

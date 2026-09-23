@@ -194,9 +194,10 @@ async function loadMatchupHistory(
   season: number,
   kickoffTimestamp: number,
   teamIds: number[],
+  stage?: string,
 ) {
   const joinedTeamIds = teamIds.join(',')
-  const { data, error, count } = await client
+  let query = client
     .from('games')
     .select('id,game_timestamp', { count: 'exact' })
     .eq('season', season)
@@ -208,6 +209,10 @@ async function loadMatchupHistory(
     .order('game_timestamp', { ascending: false })
     .order('id', { ascending: false })
     .limit(MAX_ANALYTICS_GAMES)
+
+  if (stage) query = query.eq('stage', stage)
+
+  const { data, error, count } = await query
   throwQueryError(error)
   if ((count ?? 0) > MAX_ANALYTICS_GAMES) {
     throw new Error(`Analytics selection exceeds ${MAX_ANALYTICS_GAMES} games; narrow the filters.`)
@@ -347,7 +352,13 @@ export function createSupabaseAnalyticsDataSource(client: SupabaseClient): Analy
         ? [targetMatchup.awayTeam.id, targetMatchup.homeTeam.id].sort((left, right) => left - right)
         : null
       const games = targetMatchup
-        ? await loadMatchupHistory(client, filters.season, targetMatchup.kickoff.timestamp, targetTeamIds!)
+        ? await loadMatchupHistory(
+            client,
+            filters.season,
+            targetMatchup.kickoff.timestamp,
+            targetTeamIds!,
+            filters.stage,
+          )
         : await loadGames(client, filters)
       const gameIds = games.map((game) => game.game_id)
       const teamIds = targetTeamIds ?? selectedTeamIds(filters, games)
