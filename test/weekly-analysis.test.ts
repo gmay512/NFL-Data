@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { buildAnalyticsSnapshot, type AnalyticsTargetMatchup } from '../server/analytics-core'
 import {
+  buildWeeklyMatchups,
+  mapInBatches,
   parseWeeklyModelAnalysis,
   WeeklyAnalysisError,
   type WeeklyAnalysisSnapshot,
@@ -161,6 +163,45 @@ describe('weekly model analysis validation', () => {
     pick.picks.push(pick.picks[0])
     assert.throws(() => parseWeeklyModelAnalysis(JSON.stringify(pick), snapshot), invalidOutput)
     assert.throws(() => parseWeeklyModelAnalysis('```json\n{}\n```', snapshot), invalidOutput)
+  })
+})
+
+describe('weekly matchup batching', () => {
+  it('limits workers to two while preserving input order', async () => {
+    let active = 0
+    let peak = 0
+    const completed: number[] = []
+    const results = await mapInBatches([1, 2, 3, 4, 5], 2, async (value) => {
+      active += 1
+      peak = Math.max(peak, active)
+      await new Promise((resolve) => setTimeout(resolve, value % 2 ? 8 : 1))
+      completed.push(value)
+      active -= 1
+      return value * 10
+    })
+
+    assert.equal(peak, 2)
+    assert.deepEqual(results, [10, 20, 30, 40, 50])
+    assert.notDeepEqual(completed, [1, 2, 3, 4, 5])
+  })
+
+  it('attributes matchup context failures to the game and does not return partial context', async () => {
+    await assert.rejects(
+      buildWeeklyMatchups(
+        [{ id: 42 }, { id: 43 }],
+        {
+          async load() {
+            throw new Error('canceling statement due to statement timeout')
+          },
+        },
+        2026,
+        '2026-09-22T20:00:00.000Z',
+      ),
+      (error) => error instanceof WeeklyAnalysisError
+        && error.code === 'context_unavailable'
+        && /game 42/.test(error.message)
+        && /statement timeout/.test(error.message),
+    )
   })
 })
 

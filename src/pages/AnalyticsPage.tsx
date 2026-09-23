@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
@@ -9,13 +9,14 @@ import {
   gradeWeeklySuggestions,
   listAnalysisSessions,
   listWeeklyAnalysisRuns,
+  postWeeklyAnalysisStream,
   postAnalysisFollowUp,
   queryAnalytics,
   readAnalysisStream,
+  readWeeklyAnalysisStream,
   refreshSeasonOdds,
   renameAnalysisSession,
   runAnalysis,
-  runWeeklyAnalysis,
 } from '../api/app-api'
 import type {
   AnalysisSession,
@@ -120,11 +121,13 @@ export function AnalyticsPage() {
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [isStreaming, setIsStreaming] = useState(false)
   const [isWeeklyAnalyzing, setIsWeeklyAnalyzing] = useState(false)
+  const [weeklyAnalysisStatus, setWeeklyAnalysisStatus] = useState('')
   const [isWeeklyGrading, setIsWeeklyGrading] = useState(false)
   const [pendingAnswer, setPendingAnswer] = useState('')
   const [question, setQuestion] = useState('')
   const [lastQuestion, setLastQuestion] = useState('')
   const [streamController, setStreamController] = useState<AbortController | null>(null)
+  const weeklyAnalysisController = useRef<AbortController | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [teamSort, setTeamSort] = useState<{ field: TeamSortField; direction: SortDirection }>({
     field: 'team',
@@ -210,6 +213,11 @@ export function AnalyticsPage() {
       }
     })
     return () => controller.abort()
+  }, [])
+
+  useEffect(() => () => {
+    weeklyAnalysisController.current?.abort()
+    weeklyAnalysisController.current = null
   }, [])
 
   useEffect(() => {
@@ -317,16 +325,34 @@ export function AnalyticsPage() {
 
   const createWeeklyReport = async () => {
     if (!season) return
+    const controller = new AbortController()
+    weeklyAnalysisController.current = controller
     setIsWeeklyAnalyzing(true)
+    setWeeklyAnalysisStatus('Refreshing odds…')
     setError(null)
     try {
-      await refreshSeasonOdds(season)
-      await runWeeklyAnalysis(season)
+      await refreshSeasonOdds(season, { signal: controller.signal })
+      const stream = await postWeeklyAnalysisStream(season, controller.signal)
+      let streamError: string | null = null
+      let completedRun: WeeklyAnalysisRun | null = null
+      await readWeeklyAnalysisStream(stream, (event) => {
+        if (event.type === 'progress') setWeeklyAnalysisStatus(event.message)
+        if (event.type === 'complete') completedRun = event.run
+        if (event.type === 'error') streamError = event.error
+      })
+      if (streamError) throw new Error(streamError)
+      if (!completedRun) throw new Error('Weekly analysis ended without a completed run.')
       await reloadWeeklyRuns()
     } catch (analysisError) {
-      setError(analysisError instanceof Error ? analysisError.message : 'Could not analyze the upcoming week.')
+      if (!controller.signal.aborted) {
+        setError(analysisError instanceof Error ? analysisError.message : 'Could not analyze the upcoming week.')
+      }
     } finally {
-      setIsWeeklyAnalyzing(false)
+      if (weeklyAnalysisController.current === controller) {
+        weeklyAnalysisController.current = null
+        setIsWeeklyAnalyzing(false)
+        setWeeklyAnalysisStatus('')
+      }
     }
   }
 
@@ -475,7 +501,7 @@ export function AnalyticsPage() {
               disabled={!season || isWeeklyAnalyzing || llmHealth?.status !== 'available'}
               onClick={() => void createWeeklyReport()}
             >
-              {isWeeklyAnalyzing ? 'Analyzing…' : 'Analyze upcoming week'}
+              {isWeeklyAnalyzing ? weeklyAnalysisStatus || 'Analyzing…' : 'Analyze upcoming week'}
             </button>
             <button type="button" disabled={isWeeklyGrading || weeklyRecord.pending === 0} onClick={() => void gradeWeeklyPicks()}>
               {isWeeklyGrading ? 'Grading…' : 'Grade completed picks'}

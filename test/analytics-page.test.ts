@@ -219,9 +219,13 @@ describe('AnalyticsPage', () => {
     }
     const fetchHandler = async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = new URL(String(input), 'http://localhost').pathname
-      if (path === '/api/analytics/weekly/analyze' && init?.method === 'POST') {
+      if (path === '/api/analytics/weekly/analyze-stream' && init?.method === 'POST') {
         runCreated = true
-        return json({ run: weeklyRun }, 201)
+        return new Response(
+          `event: progress\ndata: {"stage":"running_model","message":"Running local model analysis…"}\n\n`
+          + `event: complete\ndata: ${JSON.stringify({ run: weeklyRun })}\n\n`,
+          { headers: { 'Content-Type': 'text/event-stream' } },
+        )
       }
       if (path === '/api/analytics/weekly/runs') return json({ runs: runCreated ? [weeklyRun] : [] })
       return baseFetch()(input, init)
@@ -235,6 +239,33 @@ describe('AnalyticsPage', () => {
     assert.match(container.textContent ?? '', /2025 Week 2/)
     assert.match(container.textContent ?? '', /Visitors \+3.5/)
     assert.match(container.textContent ?? '', /1 pending/)
+  })
+
+  it('cancels an in-flight weekly analysis when the page unmounts', async () => {
+    let analysisSignal: AbortSignal | undefined
+    const fetchHandler = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input), 'http://localhost').pathname
+      if (path === '/api/analytics/weekly/analyze-stream' && init?.method === 'POST') {
+        analysisSignal = init.signal ?? undefined
+        return await new Promise<Response>((_resolve, reject) => {
+          analysisSignal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'))
+          }, { once: true })
+        })
+      }
+      return baseFetch()(input, init)
+    }
+    const container = await renderPage(fetchHandler)
+    const button = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((item) => item.textContent === 'Analyze upcoming week')
+    assert(button)
+    await React.act(async () => button.click())
+    await settle()
+    assert(analysisSignal)
+    assert.equal(analysisSignal.aborted, false)
+    await React.act(() => root?.unmount())
+    root = null
+    assert.equal(analysisSignal.aborted, true)
   })
 
   it('renders historical metrics, team trends, sortable game results, and URL-backed filters', async () => {

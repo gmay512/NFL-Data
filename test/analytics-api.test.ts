@@ -273,8 +273,9 @@ describe('analytics API contracts', () => {
       suggestions: [],
     }
     deps.weekly = {
-      async analyze(season) {
+      async analyze(season, options) {
         analyzedSeason = season
+        options?.onProgress?.({ stage: 'running_model', message: 'Running model.' })
         return run
       },
       async list() {
@@ -292,6 +293,15 @@ describe('analytics API contracts', () => {
     const analyzeResponse = await request('/api/analytics/weekly/analyze', deps, 'POST', { season: 2025 })
     assert.equal(analyzeResponse.status, 201)
     assert.equal(analyzedSeason, 2025)
+
+    const streamResponse = await request('/api/analytics/weekly/analyze-stream', deps, 'POST', { season: 2025 })
+    assert.equal(streamResponse.status, 200)
+    assert.match(streamResponse.headers.get('content-type') ?? '', /text\/event-stream/)
+    const streamBody = await streamResponse.text()
+    assert.match(streamBody, /event: progress/)
+    assert.match(streamBody, /Running model\./)
+    assert.match(streamBody, /event: complete/)
+    assert.match(streamBody, new RegExp(run.id))
 
     const gradeResponse = await request('/api/analytics/weekly/grade', deps, 'POST')
     assert.deepEqual(await gradeResponse.json(), { graded: 2 })

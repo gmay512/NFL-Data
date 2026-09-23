@@ -105,6 +105,14 @@ function parseSeason(value: string | null) {
   return season
 }
 
+function parseRequiredSeason(value: unknown) {
+  const season = Number(value)
+  if (!Number.isInteger(season) || season < 1900 || season > 2100) {
+    throw new AnalyticsApiError(400, 'invalid_season', 'season must be an integer from 1900 through 2100.')
+  }
+  return season
+}
+
 function llamaStatus(error: LlamaClientError) {
   if (error.code === 'timeout') return 504
   if (error.code === 'malformed_response' || error.code === 'http_error') return 502
@@ -221,6 +229,7 @@ async function streamFollowUp(
   const abort = () => {
     if (!response.writableEnded) controller.abort()
   }
+
   request.once('aborted', abort)
   response.once('close', abort)
   response.writeHead(200, {
@@ -256,6 +265,56 @@ async function streamFollowUp(
       code: mapped?.code ?? 'internal_error',
     })
   } finally {
+    request.removeListener('aborted', abort)
+    response.removeListener('close', abort)
+    if (!response.writableEnded && !response.destroyed) response.end()
+  }
+}
+
+async function streamWeeklyAnalysis(
+  request: IncomingMessage,
+  response: ServerResponse,
+  dependencies: AnalyticsApiDependencies,
+  season: number,
+) {
+  if (!dependencies.weekly) {
+    throw new AnalyticsApiError(503, 'weekly_unavailable', 'Weekly analysis is unavailable.')
+  }
+  const controller = new AbortController()
+  const abort = () => {
+    if (!response.writableEnded) controller.abort()
+  }
+  request.once('aborted', abort)
+  response.once('close', abort)
+  response.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  })
+  writeSse(response, 'progress', {
+    stage: 'building_context',
+    message: 'Starting upcoming-week analysis…',
+  })
+  const heartbeat = setInterval(() => {
+    if (!response.writableEnded && !response.destroyed) response.write(': heartbeat\n\n')
+  }, 10_000)
+
+  try {
+    const run = await dependencies.weekly.analyze(season, {
+      signal: controller.signal,
+      onProgress: (progress) => writeSse(response, 'progress', progress),
+    })
+    if (!controller.signal.aborted) writeSse(response, 'complete', { run })
+  } catch (error) {
+    if (controller.signal.aborted || response.destroyed) return
+    const mapped = statusForApiError(error)
+    writeSse(response, 'error', {
+      error: mapped?.message ?? (error instanceof Error ? error.message : String(error)),
+      code: mapped?.code ?? 'internal_error',
+    })
+  } finally {
+    clearInterval(heartbeat)
     request.removeListener('aborted', abort)
     response.removeListener('close', abort)
     if (!response.writableEnded && !response.destroyed) response.end()
@@ -311,11 +370,14 @@ export async function handleAnalyticsApiRequest(
   if (request.method === 'POST' && requestUrl.pathname === '/api/analytics/weekly/analyze') {
     if (!dependencies.weekly) throw new AnalyticsApiError(503, 'weekly_unavailable', 'Weekly analysis is unavailable.')
     const body = await readJsonBody(request)
-    const season = Number(body.season)
-    if (!Number.isInteger(season) || season < 1900 || season > 2100) {
-      throw new AnalyticsApiError(400, 'invalid_season', 'season must be an integer from 1900 through 2100.')
-    }
+    const season = parseRequiredSeason(body.season)
     sendJson(response, 201, { run: await dependencies.weekly.analyze(season) })
+    return true
+  }
+
+  if (request.method === 'POST' && requestUrl.pathname === '/api/analytics/weekly/analyze-stream') {
+    const body = await readJsonBody(request)
+    await streamWeeklyAnalysis(request, response, dependencies, parseRequiredSeason(body.season))
     return true
   }
 

@@ -20,6 +20,7 @@ import type {
   WeeklyAnalysisRunResponse,
   WeeklyAnalysisRunsResponse,
   WeeklyGradeResponse,
+  WeeklyAnalysisRun,
 } from './contracts'
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -35,11 +36,12 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return payload as T
 }
 
-function postJson<T>(path: string, body?: unknown) {
+function postJson<T>(path: string, body?: unknown, options?: { signal?: AbortSignal }) {
   return requestJson<T>(path, {
     method: 'POST',
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal: options?.signal,
   })
 }
 
@@ -59,8 +61,8 @@ export function refreshSeasonGames(season: number, gameIds?: number[]) {
   return postJson<RefreshSeasonGamesResponse>('/api/refresh-season-games', { season, gameIds })
 }
 
-export function refreshSeasonOdds(season: number) {
-  return postJson<RefreshSeasonOddsResponse>('/api/refresh-season-odds', { season })
+export function refreshSeasonOdds(season: number, options?: { signal?: AbortSignal }) {
+  return postJson<RefreshSeasonOddsResponse>('/api/refresh-season-odds', { season }, options)
 }
 
 export function refreshGame(gameId: number) {
@@ -106,6 +108,67 @@ export function listWeeklyAnalysisRuns(options?: { signal?: AbortSignal }) {
 
 export function runWeeklyAnalysis(season: number) {
   return postJson<WeeklyAnalysisRunResponse>('/api/analytics/weekly/analyze', { season })
+}
+
+export async function postWeeklyAnalysisStream(season: number, signal?: AbortSignal) {
+  const response = await fetch('/api/analytics/weekly/analyze-stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ season }),
+    signal,
+  })
+  if (!response.ok) {
+    const payload = await response.json() as ApiErrorResponse
+    throw new Error(payload.error || `Request failed with status ${response.status}.`)
+  }
+  if (!response.body || !response.headers.get('content-type')?.includes('text/event-stream')) {
+    throw new Error('Weekly analysis did not provide an event stream.')
+  }
+  return response.body
+}
+
+export type WeeklyAnalysisStreamEvent =
+  | { type: 'progress'; stage: string; message: string }
+  | { type: 'complete'; run: WeeklyAnalysisRun }
+  | { type: 'error'; error: string; code: string }
+
+export async function readWeeklyAnalysisStream(
+  stream: ReadableStream<Uint8Array>,
+  onEvent: (event: WeeklyAnalysisStreamEvent) => void,
+) {
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    buffer += decoder.decode(value, { stream: !done })
+    const blocks = buffer.split(/\r?\n\r?\n/)
+    buffer = blocks.pop() ?? ''
+
+    for (const block of blocks) {
+      const event = block.split(/\r?\n/).find((line) => line.startsWith('event:'))?.slice(6).trim()
+      const data = block.split(/\r?\n/).find((line) => line.startsWith('data:'))?.slice(5).trim()
+      if (!event || !data) continue
+      const payload = JSON.parse(data) as Record<string, unknown>
+      if (event === 'progress') {
+        onEvent({
+          type: 'progress',
+          stage: typeof payload.stage === 'string' ? payload.stage : '',
+          message: typeof payload.message === 'string' ? payload.message : 'Analyzing upcoming week…',
+        })
+      } else if (event === 'complete' && payload.run && typeof payload.run === 'object') {
+        onEvent({ type: 'complete', run: payload.run as WeeklyAnalysisRun })
+      } else if (event === 'error') {
+        onEvent({
+          type: 'error',
+          error: typeof payload.error === 'string' ? payload.error : 'Weekly analysis failed.',
+          code: typeof payload.code === 'string' ? payload.code : 'stream_error',
+        })
+      }
+    }
+    if (done) break
+  }
 }
 
 export function gradeWeeklySuggestions() {

@@ -70,7 +70,7 @@ export type WeeklyModelAnalysis = {
 }
 
 export class WeeklyAnalysisError extends Error {
-  readonly code: 'invalid_model_output' | 'no_upcoming_week'
+  readonly code: 'context_unavailable' | 'invalid_model_output' | 'no_upcoming_week'
 
   constructor(code: WeeklyAnalysisError['code'], message: string) {
     super(message)
@@ -123,17 +123,114 @@ export interface WeeklyAnalysisStore {
   gradePending(): Promise<number>
 }
 
+export type WeeklyAnalysisProgress = {
+  stage: 'building_context' | 'running_model' | 'saving'
+  message: string
+}
+
+export type WeeklyAnalysisOptions = {
+  signal?: AbortSignal
+  onProgress?: (progress: WeeklyAnalysisProgress) => void
+}
+
 const weeklyLimits = {
-  games: 5,
-  injuries: 4,
-  playerStats: 4,
+  games: 3,
+  injuries: 2,
+  playerStats: 1,
   standings: 2,
   teamStatTrends: 2,
   teamTrends: 2,
 }
+const WEEKLY_MATCHUP_CONCURRENCY = 2
 
 function queryError(error: { message: string } | null) {
   if (error) throw new Error(error.message)
+}
+
+export async function mapInBatches<T, Result>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<Result>,
+) {
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new Error('Batch concurrency must be a positive integer.')
+  }
+  const results: Result[] = []
+  for (let index = 0; index < items.length; index += concurrency) {
+    const batch = items.slice(index, index + concurrency)
+    results.push(...await Promise.all(
+      batch.map((item, batchIndex) => worker(item, index + batchIndex)),
+    ))
+  }
+  return results
+}
+
+export async function buildWeeklyMatchups(
+  games: Array<{ id: unknown }>,
+  dataSource: AnalyticsDataSource,
+  season: number,
+  generatedAt: string,
+): Promise<WeeklyAnalysisSnapshot['matchups']> {
+  return mapInBatches(games, WEEKLY_MATCHUP_CONCURRENCY, async (game) => {
+    let analysis: AnalyticsSnapshot
+    try {
+      analysis = await generateAnalyticsSnapshot(
+        dataSource,
+        'matchup_preview',
+        { season, gameId: Number(game.id) },
+        { generatedAt: () => generatedAt, limits: weeklyLimits },
+      )
+    } catch (error) {
+      throw new WeeklyAnalysisError(
+        'context_unavailable',
+        `Could not build weekly context for game ${game.id}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    if (!analysis.targetMatchup) {
+      throw new WeeklyAnalysisError(
+        'context_unavailable',
+        `Could not build weekly context for game ${game.id}: matchup context was missing.`,
+      )
+    }
+    return {
+      gameId: Number(game.id),
+      kickoffAt: new Date(analysis.targetMatchup.kickoff.timestamp * 1_000).toISOString(),
+      target: analysis.targetMatchup,
+      teamTrends: analysis.teamTrends.items,
+      teamStatTrends: analysis.teamStatTrends.items,
+      recentGames: analysis.games.items.map((item) => ({
+        gameId: item.gameId,
+        gameDate: item.gameDate,
+        awayTeamName: item.awayTeamName,
+        awayScore: item.awayScore,
+        homeTeamName: item.homeTeamName,
+        homeScore: item.homeScore,
+        closingHomeSpread: item.closingHomeSpread,
+        spreadDelta: item.spreadDelta,
+        spreadResult: item.spreadResult,
+        closingTotal: item.closingTotal,
+        totalDelta: item.totalDelta,
+        totalResult: item.totalResult,
+      })),
+      standings: analysis.standings.items,
+      currentInjuries: analysis.currentInjuries.items.map((item) => ({
+        playerName: item.playerName,
+        teamName: item.teamName,
+        injury_date: item.injury_date,
+        status: item.status,
+        description: item.description,
+      })),
+      playerStats: analysis.playerStats.items.map((item) => ({
+        team_id: item.team_id,
+        playerName: item.playerName,
+        position: item.position,
+        stat_group: item.stat_group,
+        stat_name: item.stat_name,
+        stat_value: item.stat_value,
+      })),
+      dataQuality: analysis.dataQuality,
+    }
+  })
 }
 
 export async function buildUpcomingWeekSnapshot(
@@ -177,55 +274,7 @@ export async function buildUpcomingWeekSnapshot(
     throw new WeeklyAnalysisError('no_upcoming_week', `Season ${season} has no eligible upcoming games.`)
   }
 
-  const matchups = await Promise.all(games.map(async (game) => {
-    const analysis = await generateAnalyticsSnapshot(
-      dataSource,
-      'matchup_preview',
-      { season, gameId: Number(game.id) },
-      { generatedAt: () => generatedAt, limits: weeklyLimits },
-    )
-    if (!analysis.targetMatchup) {
-      throw new Error(`Upcoming game ${game.id} did not produce matchup context.`)
-    }
-    return {
-      gameId: Number(game.id),
-      kickoffAt: new Date(analysis.targetMatchup.kickoff.timestamp * 1_000).toISOString(),
-      target: analysis.targetMatchup,
-      teamTrends: analysis.teamTrends.items,
-      teamStatTrends: analysis.teamStatTrends.items,
-      recentGames: analysis.games.items.map((item) => ({
-        gameId: item.gameId,
-        gameDate: item.gameDate,
-        awayTeamName: item.awayTeamName,
-        awayScore: item.awayScore,
-        homeTeamName: item.homeTeamName,
-        homeScore: item.homeScore,
-        closingHomeSpread: item.closingHomeSpread,
-        spreadDelta: item.spreadDelta,
-        spreadResult: item.spreadResult,
-        closingTotal: item.closingTotal,
-        totalDelta: item.totalDelta,
-        totalResult: item.totalResult,
-      })),
-      standings: analysis.standings.items,
-      currentInjuries: analysis.currentInjuries.items.map((item) => ({
-        playerName: item.playerName,
-        teamName: item.teamName,
-        injury_date: item.injury_date,
-        status: item.status,
-        description: item.description,
-      })),
-      playerStats: analysis.playerStats.items.map((item) => ({
-        team_id: item.team_id,
-        playerName: item.playerName,
-        position: item.position,
-        stat_group: item.stat_group,
-        stat_name: item.stat_name,
-        stat_value: item.stat_value,
-      })),
-      dataQuality: analysis.dataQuality,
-    }
-  }))
+  const matchups = await buildWeeklyMatchups(games, dataSource, season, generatedAt)
 
   return {
     schemaVersion: 1,
@@ -378,6 +427,7 @@ export class WeeklyAnalysisService {
   private readonly llama: LlamaClient
   private readonly store: WeeklyAnalysisStore
   private readonly now: () => string
+  private readonly log: (message: string) => void
 
   constructor(
     client: SupabaseClient,
@@ -385,17 +435,30 @@ export class WeeklyAnalysisService {
     llama: LlamaClient,
     store: WeeklyAnalysisStore,
     now: () => string = () => new Date().toISOString(),
+    log: (message: string) => void = console.info,
   ) {
     this.client = client
     this.dataSource = dataSource
     this.llama = llama
     this.store = store
     this.now = now
+    this.log = log
   }
 
-  async analyze(season: number) {
+  async analyze(season: number, options: WeeklyAnalysisOptions = {}) {
+    options.onProgress?.({ stage: 'building_context', message: 'Building matchup context…' })
+    const snapshotStartedAt = Date.now()
     const snapshot = await buildUpcomingWeekSnapshot(this.client, this.dataSource, season, this.now())
-    const completion = await this.llama.completeMessages(buildWeeklyMessages(snapshot))
+    const messages = buildWeeklyMessages(snapshot)
+    const promptCharacters = messages.reduce((total, message) => total + message.content.length, 0)
+    this.log(
+      `[Weekly Analysis] Built ${snapshot.matchups.length} matchup contexts in `
+      + `${Date.now() - snapshotStartedAt}ms; prompt=${promptCharacters} chars.`,
+    )
+    options.onProgress?.({ stage: 'running_model', message: 'Running local model analysis…' })
+    const modelStartedAt = Date.now()
+    const completion = await this.llama.completeMessages(messages, options.signal)
+    this.log(`[Weekly Analysis] Model completed in ${Date.now() - modelStartedAt}ms.`)
     if (completion.finishReason !== 'stop') {
       throw new WeeklyAnalysisError(
         'invalid_model_output',
@@ -403,7 +466,10 @@ export class WeeklyAnalysisService {
       )
     }
     const analysis = parseWeeklyModelAnalysis(completion.content, snapshot)
-    return this.store.save(snapshot, completion.model, analysis)
+    options.onProgress?.({ stage: 'saving', message: 'Saving tracked suggestions…' })
+    const saved = await this.store.save(snapshot, completion.model, analysis)
+    this.log(`[Weekly Analysis] Saved run ${saved.id} with ${saved.suggestions.length} picks.`)
+    return saved
   }
 
   list() {
@@ -418,7 +484,11 @@ export class WeeklyAnalysisService {
 export function statusForWeeklyError(error: unknown) {
   if (error instanceof WeeklyAnalysisError) {
     return {
-      statusCode: error.code === 'no_upcoming_week' ? 409 : 502,
+      statusCode: error.code === 'no_upcoming_week'
+        ? 409
+        : error.code === 'context_unavailable'
+          ? 503
+          : 502,
       code: error.code,
       message: error.message,
     }
