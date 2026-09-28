@@ -283,6 +283,56 @@ describe('WeeklyAnalysisPage', () => {
     assert.match(container.querySelector('.weekly-run-detail .final-badge')?.textContent ?? '', /Final analysis/)
   })
 
+  it('refreshes displayed records and reports grading results', async () => {
+    const run = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Ready to grade.')
+    let graded = false
+    const fetchHandler = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input), 'http://localhost').pathname
+      if (path === '/api/analytics/weekly/grade' && init?.method === 'POST') {
+        graded = true
+        run.suggestions[0] = {
+          ...run.suggestions[0],
+          result: 'win',
+          resultDelta: 4.5,
+          finalAwayScore: 24,
+          finalHomeScore: 20,
+          gradedAt: '2025-09-22T00:00:00.000Z',
+        }
+        return json({ requestedGames: 1, refreshedGames: 1, graded: 1 })
+      }
+      return baseFetch(() => [run])(input)
+    }
+    const container = await renderPage(fetchHandler)
+    const gradeButton = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Grade completed picks')
+    assert(gradeButton)
+    await React.act(async () => gradeButton.click())
+    await settle()
+    assert.equal(graded, true)
+    assert.match(container.textContent ?? '', /Graded 1 pick after refreshing 1 game\./)
+    assert.match(container.querySelector('.weekly-run-detail')?.textContent ?? '', /1 wins/)
+    assert.match(container.querySelector('.result-pill')?.textContent ?? '', /win/)
+  })
+
+  it('reports when refreshed games do not have completed results yet', async () => {
+    const run = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Still pending.')
+    const fetchHandler = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input), 'http://localhost').pathname
+      if (path === '/api/analytics/weekly/grade' && init?.method === 'POST') {
+        return json({ requestedGames: 1, refreshedGames: 1, graded: 0 })
+      }
+      return baseFetch(() => [run])(input)
+    }
+    const container = await renderPage(fetchHandler)
+    const gradeButton = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Grade completed picks')
+    assert(gradeButton)
+    await React.act(async () => gradeButton.click())
+    await settle()
+    assert.match(container.textContent ?? '', /Refreshed 1 game, but no completed results were available yet\./)
+    assert.match(container.querySelector('.weekly-run-detail')?.textContent ?? '', /1 pending/)
+  })
+
   it('cancels an in-flight weekly analysis when the page unmounts', async () => {
     let analysisSignal: AbortSignal | undefined
     const fetchHandler = async (input: RequestInfo | URL, init?: RequestInit) => {

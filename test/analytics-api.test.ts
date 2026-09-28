@@ -288,7 +288,7 @@ describe('analytics API contracts', () => {
         return true
       },
       async grade() {
-        return { graded: 2 }
+        return { requestedGames: 1, refreshedGames: 1, graded: 2 }
       },
     }
 
@@ -310,7 +310,7 @@ describe('analytics API contracts', () => {
     assert.match(streamBody, new RegExp(run.id))
 
     const gradeResponse = await request('/api/analytics/weekly/grade', deps, 'POST')
-    assert.deepEqual(await gradeResponse.json(), { graded: 2 })
+    assert.deepEqual(await gradeResponse.json(), { requestedGames: 1, refreshedGames: 1, graded: 2 })
 
     const deleteResponse = await request(`/api/analytics/weekly/runs/${run.id}`, deps, 'DELETE')
     assert.equal(deleteResponse.status, 204)

@@ -131,6 +131,8 @@ export type WeeklyAnalysisRunsResponse = {
 }
 
 export type WeeklyGradeResponse = {
+  requestedGames: number
+  refreshedGames: number
   graded: number
 }
 

@@ -1,7 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { readJsonBody, sendJson } from './api/request'
-import { getRequiredEnv, type AppEnv } from './config'
+import { getIngestConfig, getRequiredEnv, type AppEnv } from './config'
+import { refreshGamesByIds } from './ingest-core'
 import {
   AnalyticsValidationError,
   type AnalyticsPreset,
@@ -202,6 +203,7 @@ function createDependencies(env: AppEnv) {
       dataSource,
       llama,
       createWeeklyAnalysisStore(client),
+      (gameIds) => refreshGamesByIds(getIngestConfig(env), gameIds),
     ),
   } satisfies AnalyticsApiDependencies
 }

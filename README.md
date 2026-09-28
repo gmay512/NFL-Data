@@ -260,7 +260,10 @@ Use **Grade completed picks** after games finish. Spread and total picks are
 graded against the consensus line locked when the suggestion was generated,
 not the later closing line. Completed `FT` and `AOT` scores produce a win, loss,
 or push; unfinished or missing-score games remain pending. Grading is
-idempotent and never changes the stored recommendation or locked line.
+idempotent and never changes the stored recommendation or locked line. Before
+grading, the server refreshes only the distinct games referenced by pending
+picks whose kickoff has passed, then reports how many games were checked and
+how many suggestions were graded.
 
 ### Availability and failure behavior
 

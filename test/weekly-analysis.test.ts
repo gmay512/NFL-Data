@@ -9,8 +9,10 @@ import {
   buildWeeklyMatchups,
   mapInBatches,
   parseWeeklyModelAnalysis,
+  WeeklyAnalysisService,
   WeeklyAnalysisError,
   type WeeklyAnalysisSnapshot,
+  type WeeklyAnalysisStore,
   type WeeklySuggestion,
 } from '../server/weekly-analysis'
 import { createWeeklyAnalysisStore, gradeWeeklySuggestion } from '../server/weekly-analysis-store'
@@ -135,6 +137,24 @@ describe('weekly model analysis validation', () => {
       rationale: 'Visitors beat Opponent 24-20; Visitors 1-0 ATS; Hosts 0-0 ATS; Visitors avg 24 PF/20 PA',
       supportingGameIds: [31],
     })
+  })
+
+  it('normalizes a top-level picks array and ignores legacy prose fields', () => {
+    const legacy = JSON.parse(output()) as { picks: Array<Record<string, unknown>> }
+    legacy.picks[0].rationale = 'Untrusted model prose.'
+    const parsed = parseWeeklyModelAnalysis(JSON.stringify(legacy.picks), snapshot)
+    assert.equal(parsed.picks.length, 1)
+    assert.equal(
+      parsed.picks[0].rationale,
+      'Visitors beat Opponent 24-20; Visitors 1-0 ATS; Hosts 0-0 ATS; Visitors avg 24 PF/20 PA',
+    )
+
+    const withSummary = parseWeeklyModelAnalysis(JSON.stringify({
+      summary: 'Untrusted model summary.',
+      picks: legacy.picks,
+    }), snapshot)
+    assert.match(withSummary.summary, /1 tracked suggestion generated from validated non-preseason evidence/)
+    assert.doesNotMatch(withSummary.summary, /Untrusted/)
   })
 
   it('allows a valid no-pick analysis', () => {
@@ -465,6 +485,10 @@ describe('weekly analysis history', () => {
         operations.push([`not:${column}`, value])
         return this
       }
+      lte(column: string, value: unknown) {
+        operations.push([`lte:${column}`, value])
+        return this
+      }
       order() { return this }
       limit() { return this }
       then<TResult1 = { data: []; error: null }, TResult2 = never>(
@@ -479,11 +503,106 @@ describe('weekly analysis history', () => {
 
     assert.deepEqual(await store.list(), [])
     assert.equal(await store.delete('99000000-0000-4000-8000-000000000001'), false)
+    assert.deepEqual(await store.listPendingGameIds('2026-09-28T00:00:00.000Z'), [])
     assert.equal(await store.gradePending(), 0)
     assert.equal(
       operations.filter(([column, value]) => column === 'not:stage' && value === 'Pre Season').length,
-      3,
+      4,
     )
+    assert.deepEqual(
+      operations.find(([column]) => column === 'lte:kickoff_at'),
+      ['lte:kickoff_at', '2026-09-28T00:00:00.000Z'],
+    )
+  })
+
+  it('deduplicates pending game IDs before refresh', async () => {
+    class Query implements PromiseLike<{ data: Array<{ game_id: number }>; error: null }> {
+      select() { return this }
+      eq() { return this }
+      neq() { return this }
+      lte() { return this }
+      order() { return this }
+      then<TResult1 = { data: Array<{ game_id: number }>; error: null }, TResult2 = never>(
+        onfulfilled?: ((value: { data: Array<{ game_id: number }>; error: null }) => TResult1 | PromiseLike<TResult1>) | null,
+        onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+      ): PromiseLike<TResult1 | TResult2> {
+        return Promise.resolve({
+          data: [{ game_id: 42 }, { game_id: 42 }, { game_id: 43 }],
+          error: null,
+        }).then(onfulfilled, onrejected)
+      }
+    }
+    const store = createWeeklyAnalysisStore({
+      from: () => new Query(),
+    } as unknown as SupabaseClient)
+    assert.deepEqual(await store.listPendingGameIds('2026-09-28T00:00:00.000Z'), [42, 43])
+  })
+})
+
+describe('weekly grading orchestration', () => {
+  function service(
+    store: WeeklyAnalysisStore,
+    refreshGames: (gameIds: number[]) => Promise<number>,
+  ) {
+    return new WeeklyAnalysisService(
+      {} as SupabaseClient,
+      {} as never,
+      {} as never,
+      store,
+      refreshGames,
+      () => '2026-09-28T12:00:00.000Z',
+    )
+  }
+
+  function gradingStore(overrides: Partial<WeeklyAnalysisStore> = {}): WeeklyAnalysisStore {
+    return {
+      async save() { throw new Error('not used') },
+      async list() { return [] },
+      async delete() { return false },
+      async listPendingGameIds() { return [42, 43] },
+      async gradePending() { return 3 },
+      ...overrides,
+    }
+  }
+
+  it('refreshes eligible pending games before grading', async () => {
+    const calls: string[] = []
+    const store = gradingStore({
+      async listPendingGameIds(through) {
+        calls.push(`list:${through}`)
+        return [42, 43]
+      },
+      async gradePending() {
+        calls.push('grade')
+        return 3
+      },
+    })
+    const result = await service(store, async (gameIds) => {
+      calls.push(`refresh:${gameIds.join(',')}`)
+      return 2
+    }).grade()
+
+    assert.deepEqual(calls, [
+      'list:2026-09-28T12:00:00.000Z',
+      'refresh:42,43',
+      'grade',
+    ])
+    assert.deepEqual(result, { requestedGames: 2, refreshedGames: 2, graded: 3 })
+  })
+
+  it('surfaces refresh failures without grading stale rows', async () => {
+    let graded = false
+    const store = gradingStore({
+      async gradePending() {
+        graded = true
+        return 0
+      },
+    })
+    await assert.rejects(
+      service(store, async () => { throw new Error('API-Sports unavailable') }).grade(),
+      /API-Sports unavailable/,
+    )
+    assert.equal(graded, false)
   })
 })
 

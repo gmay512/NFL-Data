@@ -73,6 +73,7 @@ export function WeeklyAnalysisPage() {
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisStatus, setAnalysisStatus] = useState('')
   const [isGrading, setIsGrading] = useState(false)
+  const [gradingStatus, setGradingStatus] = useState<string | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const analysisController = useRef<AbortController | null>(null)
@@ -192,6 +193,7 @@ export function WeeklyAnalysisPage() {
     setIsAnalyzing(true)
     setAnalysisStatus('Refreshing odds…')
     setError(null)
+    setGradingStatus(null)
     try {
       await refreshSeasonOdds(currentSeason, { signal: controller.signal })
       const stream = await postWeeklyAnalysisStream(currentSeason, controller.signal)
@@ -222,9 +224,15 @@ export function WeeklyAnalysisPage() {
   const gradePicks = async () => {
     setIsGrading(true)
     setError(null)
+    setGradingStatus(null)
     try {
-      await gradeWeeklySuggestions()
+      const result = await gradeWeeklySuggestions()
       await reloadRuns()
+      setGradingStatus(result.graded
+        ? `Graded ${result.graded} pick${result.graded === 1 ? '' : 's'} after refreshing ${result.refreshedGames} game${result.refreshedGames === 1 ? '' : 's'}.`
+        : result.requestedGames
+          ? `Refreshed ${result.refreshedGames} game${result.refreshedGames === 1 ? '' : 's'}, but no completed results were available yet.`
+          : 'No pending picks have reached kickoff yet.')
     } catch (gradingError) {
       setError(gradingError instanceof Error ? gradingError.message : 'Could not grade completed picks.')
     } finally {
@@ -236,6 +244,7 @@ export function WeeklyAnalysisPage() {
     if (!selectedRun || !window.confirm(`Delete the analysis from ${new Date(selectedRun.createdAt).toLocaleString()}?`)) return
     setIsDeleting(true)
     setError(null)
+    setGradingStatus(null)
     const deletedGroupKey = groupKey(selectedRun)
     try {
       await deleteWeeklyAnalysisRun(selectedRun.id)
@@ -316,6 +325,7 @@ export function WeeklyAnalysisPage() {
       </section>
 
       {error && <div className="weekly-screen-only"><StatusMessage title="Weekly analysis error" message={error} error /></div>}
+      {gradingStatus && <div className="weekly-screen-only"><StatusMessage title="Weekly grading complete" message={gradingStatus} /></div>}
       {isLoading && <div className="weekly-screen-only"><StatusMessage title="Loading weekly analyses" message="Loading saved model outputs and tracked picks." /></div>}
 
       {!isLoading && <section className="weekly-workspace">

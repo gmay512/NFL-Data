@@ -148,6 +148,7 @@ export interface WeeklyAnalysisStore {
   save(snapshot: WeeklyAnalysisSnapshot, model: string, analysis: WeeklyModelAnalysis): Promise<WeeklyAnalysisRun>
   list(): Promise<WeeklyAnalysisRun[]>
   delete(id: string): Promise<boolean>
+  listPendingGameIds(through: string): Promise<number[]>
   gradePending(): Promise<number>
 }
 
@@ -522,7 +523,9 @@ export function parseWeeklyModelAnalysis(content: string, snapshot: WeeklyAnalys
       `The model did not return valid weekly-analysis JSON: ${error instanceof Error ? error.message : String(error)}`,
     )
   }
-  const root = record(parsed, 'The weekly analysis must be a JSON object.')
+  const normalized = Array.isArray(parsed) ? { picks: parsed } : parsed
+  const root = record(normalized, 'The weekly analysis must be a JSON object or picks array.')
+  if (typeof root.summary === 'string') delete root.summary
   exactKeys(root, ['picks'], 'The weekly analysis has unexpected or missing fields.')
   if (!Array.isArray(root.picks)) {
     throw new WeeklyAnalysisError('invalid_model_output', 'Weekly picks must be an array.')
@@ -537,6 +540,7 @@ export function parseWeeklyModelAnalysis(content: string, snapshot: WeeklyAnalys
   let omittedMissingHistory = 0
   const picks = root.picks.map((value, index): WeeklyPick | null => {
     const pick = record(value, `Pick ${index + 1} must be an object.`)
+    if (typeof pick.rationale === 'string') delete pick.rationale
     exactKeys(
       pick,
       ['gameId', 'market', 'selection', 'confidence', 'supportingGameIds'],
@@ -614,6 +618,7 @@ export class WeeklyAnalysisService {
   private readonly dataSource: AnalyticsDataSource
   private readonly llama: LlamaClient
   private readonly store: WeeklyAnalysisStore
+  private readonly refreshGames: (gameIds: number[]) => Promise<number>
   private readonly now: () => string
   private readonly log: (message: string) => void
 
@@ -622,6 +627,7 @@ export class WeeklyAnalysisService {
     dataSource: AnalyticsDataSource,
     llama: LlamaClient,
     store: WeeklyAnalysisStore,
+    refreshGames: (gameIds: number[]) => Promise<number>,
     now: () => string = () => new Date().toISOString(),
     log: (message: string) => void = console.info,
   ) {
@@ -629,6 +635,7 @@ export class WeeklyAnalysisService {
     this.dataSource = dataSource
     this.llama = llama
     this.store = store
+    this.refreshGames = refreshGames
     this.now = now
     this.log = log
   }
@@ -669,7 +676,13 @@ export class WeeklyAnalysisService {
   }
 
   async grade() {
-    return { graded: await this.store.gradePending() }
+    const gameIds = await this.store.listPendingGameIds(this.now())
+    const refreshedGames = gameIds.length ? await this.refreshGames(gameIds) : 0
+    return {
+      requestedGames: gameIds.length,
+      refreshedGames,
+      graded: await this.store.gradePending(),
+    }
   }
 }
 

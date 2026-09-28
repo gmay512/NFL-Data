@@ -184,6 +184,18 @@ export function createWeeklyAnalysisStore(client: SupabaseClient): WeeklyAnalysi
       return (data?.length ?? 0) > 0
     },
 
+    async listPendingGameIds(through: string) {
+      const { data, error } = await client
+        .from('betting_suggestions')
+        .select('game_id')
+        .eq('result', 'ungraded')
+        .neq('stage', 'Pre Season')
+        .lte('kickoff_at', through)
+        .order('game_id')
+      throwError(error)
+      return [...new Set((data ?? []).map((row) => Number(row.game_id)))]
+    },
+
     async gradePending() {
       const { data: pendingData, error: pendingError } = await client
         .from('betting_suggestions')
