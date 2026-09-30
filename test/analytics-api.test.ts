@@ -273,6 +273,39 @@ describe('analytics API contracts', () => {
       suggestions: [],
     }
     let runExists = true
+    let analyzedSuggestionId: number | null = null
+    let lossAnalysisExists = true
+    const lossAnalysis = {
+      id: 12,
+      suggestionId: 8,
+      analysisVersion: 1,
+      model: 'test-model',
+      evidence: {
+        schemaVersion: 1 as const,
+        suggestionId: 8,
+        gameId: 42,
+        market: 'spread' as const,
+        selection: 'away' as const,
+        lockedLine: 3.5,
+        matchup: {
+          awayTeamId: 2,
+          awayTeamName: 'Visitors',
+          homeTeamId: 1,
+          homeTeamName: 'Hosts',
+        },
+        metrics: {},
+        missingMetrics: [],
+      },
+      summary: 'Test loss analysis.',
+      clues: [{
+        category: 'insufficient_evidence' as const,
+        title: 'Limited evidence',
+        explanation: 'No box-score clue was available.',
+        metricKeys: [],
+      }],
+      missingMetrics: [],
+      createdAt: '2025-09-12T00:00:00.000Z',
+    }
     deps.weekly = {
       async analyze(season, options) {
         analyzedSeason = season
@@ -289,6 +322,15 @@ describe('analytics API contracts', () => {
       },
       async grade() {
         return { requestedGames: 1, refreshedGames: 1, graded: 2 }
+      },
+      async analyzeLoss(suggestionId) {
+        analyzedSuggestionId = suggestionId
+        return lossAnalysis
+      },
+      async deleteLossAnalysis(id) {
+        if (!lossAnalysisExists || id !== lossAnalysis.id) return false
+        lossAnalysisExists = false
+        return true
       },
     }
 
@@ -311,6 +353,17 @@ describe('analytics API contracts', () => {
 
     const gradeResponse = await request('/api/analytics/weekly/grade', deps, 'POST')
     assert.deepEqual(await gradeResponse.json(), { requestedGames: 1, refreshedGames: 1, graded: 2 })
+
+    const lossResponse = await request('/api/analytics/weekly/suggestions/8/analyze-loss', deps, 'POST')
+    assert.equal(lossResponse.status, 201)
+    assert.equal(analyzedSuggestionId, 8)
+    assert.equal((await lossResponse.json() as { analysis: { id: number } }).analysis.id, 12)
+
+    const deleteLossResponse = await request('/api/analytics/weekly/loss-analyses/12', deps, 'DELETE')
+    assert.equal(deleteLossResponse.status, 204)
+    const missingLossResponse = await request('/api/analytics/weekly/loss-analyses/12', deps, 'DELETE')
+    assert.equal(missingLossResponse.status, 404)
+    assert.equal((await missingLossResponse.json() as { code: string }).code, 'loss_analysis_not_found')
 
     const deleteResponse = await request(`/api/analytics/weekly/runs/${run.id}`, deps, 'DELETE')
     assert.equal(deleteResponse.status, 204)

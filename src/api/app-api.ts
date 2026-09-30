@@ -19,6 +19,7 @@ import type {
   LlmHealthResponse,
   WeeklyAnalysisRunResponse,
   WeeklyAnalysisRunsResponse,
+  WeeklyLossAnalysisResponse,
   WeeklyGradeResponse,
   WeeklyAnalysisRun,
 } from './contracts'
@@ -182,6 +183,23 @@ export async function readWeeklyAnalysisStream(
 
 export function gradeWeeklySuggestions() {
   return postJson<WeeklyGradeResponse>('/api/analytics/weekly/grade')
+}
+
+export function analyzeWeeklySuggestionLoss(suggestionId: number) {
+  return postJson<WeeklyLossAnalysisResponse>(
+    `/api/analytics/weekly/suggestions/${encodeURIComponent(suggestionId)}/analyze-loss`,
+  )
+}
+
+export async function deleteWeeklyLossAnalysis(id: number) {
+  const response = await fetch(
+    `/api/analytics/weekly/loss-analyses/${encodeURIComponent(id)}`,
+    { method: 'DELETE' },
+  )
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as ApiErrorResponse | null
+    throw new Error(payload?.error || `Request failed with status ${response.status}.`)
+  }
 }
 
 export function listAnalysisSessions(options?: { signal?: AbortSignal }) {

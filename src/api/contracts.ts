@@ -9,6 +9,7 @@ import type {
   AnalysisSessionSummary,
 } from '../../server/analysis-store'
 import type { WeeklyAnalysisRun } from '../../server/weekly-analysis'
+import type { WeeklyLossAnalysis } from '../../server/weekly-loss-analysis'
 
 export type ApiErrorResponse = {
   error: string
@@ -136,4 +137,8 @@ export type WeeklyGradeResponse = {
   graded: number
 }
 
-export type { WeeklyAnalysisRun }
+export type WeeklyLossAnalysisResponse = {
+  analysis: WeeklyLossAnalysis
+}
+
+export type { WeeklyAnalysisRun, WeeklyLossAnalysis }

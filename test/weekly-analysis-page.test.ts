@@ -50,6 +50,7 @@ function weeklyRun(id: string, week: string, createdAt: string, summary: string)
       finalHomeScore: null,
       gradedAt: null,
       createdAt,
+      lossAnalysis: null,
     }],
   }
 }
@@ -331,6 +332,114 @@ describe('WeeklyAnalysisPage', () => {
     await settle()
     assert.match(container.textContent ?? '', /Refreshed 1 game, but no completed results were available yet\./)
     assert.match(container.querySelector('.weekly-run-detail')?.textContent ?? '', /1 pending/)
+  })
+
+  it('analyzes one losing game from its card and deletes only its stored analysis', async () => {
+    const run = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Loss ready for review.')
+    run.suggestions[0] = {
+      ...run.suggestions[0],
+      result: 'loss',
+      resultDelta: -2.5,
+      finalAwayScore: 20,
+      finalHomeScore: 26,
+      gradedAt: '2025-09-22T00:00:00.000Z',
+    }
+    let analyzedSuggestionId: number | null = null
+    let deletedAnalysisId: number | null = null
+    const analysis = {
+      id: 12,
+      suggestionId: run.suggestions[0].id,
+      analysisVersion: 1,
+      model: 'test-model',
+      evidence: {
+        schemaVersion: 1 as const,
+        suggestionId: run.suggestions[0].id,
+        gameId: run.suggestions[0].gameId,
+        market: 'spread' as const,
+        selection: 'away' as const,
+        lockedLine: 3.5,
+        matchup: {
+          awayTeamId: 2,
+          awayTeamName: 'Visitors',
+          homeTeamId: 1,
+          homeTeamName: 'Hosts',
+        },
+        metrics: {
+          'actual.away.turnovers': { label: 'Visitors turnovers', value: 3 },
+          'actual.home.turnovers': { label: 'Hosts turnovers', value: 1 },
+        },
+        missingMetrics: ['Visitors red-zone efficiency'],
+      },
+      summary: 'Turnovers were the strongest available clue.',
+      clues: [{
+        category: 'turnovers' as const,
+        title: 'Turnover disadvantage',
+        explanation: 'The selected team committed more turnovers.',
+        metricKeys: ['actual.away.turnovers', 'actual.home.turnovers'],
+      }],
+      missingMetrics: ['Visitors red-zone efficiency'],
+      createdAt: '2025-09-23T00:00:00.000Z',
+    }
+    const fetchHandler = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input), 'http://localhost').pathname
+      if (path === `/api/analytics/weekly/suggestions/${run.suggestions[0].id}/analyze-loss`
+        && init?.method === 'POST') {
+        analyzedSuggestionId = run.suggestions[0].id
+        run.suggestions[0] = { ...run.suggestions[0], lossAnalysis: analysis }
+        return json({ analysis }, 201)
+      }
+      if (path === '/api/analytics/weekly/loss-analyses/12' && init?.method === 'DELETE') {
+        deletedAnalysisId = 12
+        run.suggestions[0] = { ...run.suggestions[0], lossAnalysis: null }
+        return new Response(null, { status: 204 })
+      }
+      return baseFetch(() => [run])(input)
+    }
+    const container = await renderPage(fetchHandler)
+    const analyzeButton = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Analyze loss')
+    assert(analyzeButton)
+    assert.equal(analyzeButton.disabled, false)
+    await React.act(async () => analyzeButton.click())
+    await settle()
+    assert.equal(analyzedSuggestionId, run.suggestions[0].id)
+    assert.match(container.textContent ?? '', /Turnovers were the strongest available clue\./)
+    assert.match(container.textContent ?? '', /Visitors turnovers: 3/)
+    assert.match(container.textContent ?? '', /1 unavailable metric/)
+
+    Object.defineProperty(window, 'confirm', { configurable: true, value: () => true })
+    const deleteButton = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Delete loss analysis')
+    assert(deleteButton)
+    await React.act(async () => deleteButton.click())
+    await settle()
+    assert.equal(deletedAnalysisId, 12)
+    assert([...container.querySelectorAll('button')].some((button) => button.textContent === 'Analyze loss'))
+  })
+
+  it('disables per-game loss analysis while the local LLM is offline', async () => {
+    const run = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Offline loss.')
+    run.suggestions[0] = {
+      ...run.suggestions[0],
+      result: 'loss',
+      resultDelta: -2.5,
+      finalAwayScore: 20,
+      finalHomeScore: 26,
+      gradedAt: '2025-09-22T00:00:00.000Z',
+    }
+    const fetchHandler = async (input: RequestInfo | URL) => {
+      const path = new URL(String(input), 'http://localhost').pathname
+      if (path === '/api/analytics/llm-health') {
+        return json({ status: 'unavailable', code: 'unavailable', message: 'Offline.' })
+      }
+      return baseFetch(() => [run])(input)
+    }
+    const container = await renderPage(fetchHandler)
+    const analyzeButton = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Analyze loss')
+    assert(analyzeButton)
+    assert.equal(analyzeButton.disabled, true)
+    assert.match(container.textContent ?? '', /Start the local LLM to analyze this loss\./)
   })
 
   it('cancels an in-flight weekly analysis when the page unmounts', async () => {

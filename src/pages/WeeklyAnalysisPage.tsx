@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
+  analyzeWeeklySuggestionLoss,
   deleteWeeklyAnalysisRun,
+  deleteWeeklyLossAnalysis,
   getAnalyticsMetadata,
   getLlmHealth,
   gradeWeeklySuggestions,
@@ -75,6 +77,8 @@ export function WeeklyAnalysisPage() {
   const [isGrading, setIsGrading] = useState(false)
   const [gradingStatus, setGradingStatus] = useState<string | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
+  const [analyzingLossId, setAnalyzingLossId] = useState<number | null>(null)
+  const [deletingLossAnalysisId, setDeletingLossAnalysisId] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
   const analysisController = useRef<AbortController | null>(null)
   const selectedRunId = searchParams.get('run')
@@ -240,6 +244,37 @@ export function WeeklyAnalysisPage() {
     }
   }
 
+  const analyzeLoss = async (suggestionId: number) => {
+    setAnalyzingLossId(suggestionId)
+    setError(null)
+    setGradingStatus(null)
+    try {
+      await analyzeWeeklySuggestionLoss(suggestionId)
+      await reloadRuns()
+      setGradingStatus('The loss analysis was saved for this game.')
+    } catch (analysisError) {
+      setError(analysisError instanceof Error ? analysisError.message : 'Could not analyze this loss.')
+    } finally {
+      setAnalyzingLossId(null)
+    }
+  }
+
+  const removeLossAnalysis = async (analysisId: number, matchup: string) => {
+    if (!window.confirm(`Delete the stored loss analysis for ${matchup}?`)) return
+    setDeletingLossAnalysisId(analysisId)
+    setError(null)
+    setGradingStatus(null)
+    try {
+      await deleteWeeklyLossAnalysis(analysisId)
+      await reloadRuns()
+      setGradingStatus('The stored loss analysis was deleted.')
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Could not delete this loss analysis.')
+    } finally {
+      setDeletingLossAnalysisId(null)
+    }
+  }
+
   const removeRun = async () => {
     if (!selectedRun || !window.confirm(`Delete the analysis from ${new Date(selectedRun.createdAt).toLocaleString()}?`)) return
     setIsDeleting(true)
@@ -395,6 +430,62 @@ export function WeeklyAnalysisPage() {
                     {pick.finalAwayScore != null && pick.finalHomeScore != null
                       ? <small>Final {pick.awayTeamName} {pick.finalAwayScore}, {pick.homeTeamName} {pick.finalHomeScore} · margin {signed(pick.resultDelta)}</small>
                       : <small>Kickoff {new Date(pick.kickoffAt).toLocaleString()}</small>}
+                    {pick.result === 'loss' && !pick.lossAnalysis && (
+                      <div className="weekly-loss-actions weekly-screen-only">
+                        <button
+                          type="button"
+                          disabled={llmHealth?.status !== 'available' || analyzingLossId === pick.id}
+                          onClick={() => void analyzeLoss(pick.id)}
+                        >
+                          {analyzingLossId === pick.id ? 'Analyzing…' : 'Analyze loss'}
+                        </button>
+                        {llmHealth?.status !== 'available' && <small>Start the local LLM to analyze this loss.</small>}
+                      </div>
+                    )}
+                    {pick.lossAnalysis && (
+                      <section className="weekly-loss-analysis" aria-label="Stored loss analysis">
+                        <header>
+                          <div>
+                            <strong>Why this suggestion may have lost</strong>
+                            <small>{pick.lossAnalysis.model} · {new Date(pick.lossAnalysis.createdAt).toLocaleString()}</small>
+                          </div>
+                          <button
+                            type="button"
+                            className="danger-button weekly-screen-only"
+                            disabled={deletingLossAnalysisId === pick.lossAnalysis.id}
+                            onClick={() => void removeLossAnalysis(
+                              pick.lossAnalysis!.id,
+                              `${pick.awayTeamName} at ${pick.homeTeamName}`,
+                            )}
+                          >
+                            {deletingLossAnalysisId === pick.lossAnalysis.id ? 'Deleting…' : 'Delete loss analysis'}
+                          </button>
+                        </header>
+                        <p>{pick.lossAnalysis.summary}</p>
+                        <ol>
+                          {pick.lossAnalysis.clues.map((clue, index) => (
+                            <li key={`${clue.category}-${index}`}>
+                              <strong>{clue.title}</strong>
+                              <p>{clue.explanation}</p>
+                              {clue.metricKeys.length > 0 && (
+                                <ul>
+                                  {clue.metricKeys.map((key) => {
+                                    const metric = pick.lossAnalysis!.evidence.metrics[key]
+                                    return <li key={key}>{metric.label}: <b>{metric.value}</b></li>
+                                  })}
+                                </ul>
+                              )}
+                            </li>
+                          ))}
+                        </ol>
+                        {pick.lossAnalysis.missingMetrics.length > 0 && (
+                          <details>
+                            <summary>{pick.lossAnalysis.missingMetrics.length} unavailable metric{pick.lossAnalysis.missingMetrics.length === 1 ? '' : 's'}</summary>
+                            <p>{pick.lossAnalysis.missingMetrics.join(', ')}</p>
+                          </details>
+                        )}
+                      </section>
+                    )}
                   </section>
                 ))}
               </div> : <p className="empty-state">The model found no supported bets for this run.</p>}

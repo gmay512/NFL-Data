@@ -6,6 +6,13 @@ import type {
   WeeklyModelAnalysis,
   WeeklySuggestion,
 } from './weekly-analysis'
+import {
+  WEEKLY_LOSS_ANALYSIS_VERSION,
+  WeeklyLossAnalysisError,
+  type GameTeamStatRow,
+  type WeeklyLossAnalysis,
+  type WeeklyLossEvidence,
+} from './weekly-loss-analysis'
 
 type RunRow = {
   id: string
@@ -44,11 +51,37 @@ type SuggestionRow = {
   created_at: string
 }
 
+type LossAnalysisRow = {
+  id: number
+  suggestion_id: number
+  analysis_version: number
+  model_name: string
+  evidence_snapshot: WeeklyLossEvidence
+  summary: string
+  clues: WeeklyLossAnalysis['clues']
+  missing_metrics: string[]
+  created_at: string
+}
+
 function throwError(error: { message: string } | null) {
   if (error) throw new Error(error.message)
 }
 
-function suggestion(row: SuggestionRow): WeeklySuggestion {
+function lossAnalysis(row: LossAnalysisRow): WeeklyLossAnalysis {
+  return {
+    id: Number(row.id),
+    suggestionId: Number(row.suggestion_id),
+    analysisVersion: Number(row.analysis_version),
+    model: row.model_name,
+    evidence: row.evidence_snapshot,
+    summary: row.summary,
+    clues: row.clues,
+    missingMetrics: row.missing_metrics ?? [],
+    createdAt: row.created_at,
+  }
+}
+
+function suggestion(row: SuggestionRow, analysis: WeeklyLossAnalysis | null = null): WeeklySuggestion {
   return {
     id: Number(row.id),
     runId: row.run_id,
@@ -73,6 +106,7 @@ function suggestion(row: SuggestionRow): WeeklySuggestion {
     finalHomeScore: row.final_home_score,
     gradedAt: row.graded_at,
     createdAt: row.created_at,
+    lossAnalysis: analysis,
   }
 }
 
@@ -126,10 +160,23 @@ export function createWeeklyAnalysisStore(client: SupabaseClient): WeeklyAnalysi
       .in('run_id', rows.map((row) => row.id))
       .order('id')
     throwError(suggestionError)
+    const suggestionRows = (suggestionData ?? []) as SuggestionRow[]
+    const analysisBySuggestion = new Map<number, WeeklyLossAnalysis>()
+    if (suggestionRows.length) {
+      const { data: analysisData, error: analysisError } = await client
+        .from('betting_suggestion_loss_analyses')
+        .select('id,suggestion_id,analysis_version,model_name,evidence_snapshot,summary,clues,missing_metrics,created_at')
+        .in('suggestion_id', suggestionRows.map((row) => row.id))
+        .order('id')
+      throwError(analysisError)
+      for (const row of (analysisData ?? []) as LossAnalysisRow[]) {
+        analysisBySuggestion.set(Number(row.suggestion_id), lossAnalysis(row))
+      }
+    }
     const byRun = new Map<string, WeeklySuggestion[]>()
-    for (const row of (suggestionData ?? []) as SuggestionRow[]) {
+    for (const row of suggestionRows) {
       const items = byRun.get(row.run_id) ?? []
-      items.push(suggestion(row))
+      items.push(suggestion(row, analysisBySuggestion.get(Number(row.id)) ?? null))
       byRun.set(row.run_id, items)
     }
     return rows.map((row) => run(row, byRun.get(row.id) ?? []))
@@ -204,7 +251,7 @@ export function createWeeklyAnalysisStore(client: SupabaseClient): WeeklyAnalysi
         .neq('stage', 'Pre Season')
         .order('id')
       throwError(pendingError)
-      const pending = ((pendingData ?? []) as SuggestionRow[]).map(suggestion)
+      const pending = ((pendingData ?? []) as SuggestionRow[]).map((row) => suggestion(row))
       if (!pending.length) return 0
 
       const { data: games, error: gamesError } = await client
@@ -241,6 +288,85 @@ export function createWeeklyAnalysisStore(client: SupabaseClient): WeeklyAnalysi
         graded += data?.length ?? 0
       }
       return graded
+    },
+
+    async getLossAnalysisInput(suggestionId: number) {
+      const { data: suggestionData, error: suggestionError } = await client
+        .from('betting_suggestions')
+        .select('id,run_id,game_id,season,stage,week,kickoff_at,away_team_id,away_team_name,home_team_id,home_team_name,market,selection,locked_line,confidence,rationale,supporting_game_ids,result,result_delta,final_away_score,final_home_score,graded_at,created_at')
+        .eq('id', suggestionId)
+        .neq('stage', 'Pre Season')
+        .maybeSingle()
+      throwError(suggestionError)
+      if (!suggestionData) return null
+      const row = suggestionData as SuggestionRow
+
+      const { data: analysisData, error: analysisError } = await client
+        .from('betting_suggestion_loss_analyses')
+        .select('id,suggestion_id,analysis_version,model_name,evidence_snapshot,summary,clues,missing_metrics,created_at')
+        .eq('suggestion_id', suggestionId)
+        .maybeSingle()
+      throwError(analysisError)
+
+      const { data: runData, error: runError } = await client
+        .from('betting_analysis_runs')
+        .select('context_snapshot')
+        .eq('id', row.run_id)
+        .maybeSingle()
+      throwError(runError)
+      if (!runData) return null
+      const context = runData.context_snapshot as WeeklyAnalysisSnapshot
+      const matchup = context.matchups.find((item) => item.gameId === Number(row.game_id))
+      if (!matchup) throw new Error(`Saved weekly context is missing game ${row.game_id}.`)
+
+      const { data: teamStatsData, error: teamStatsError } = await client
+        .from('game_team_stats')
+        .select('team_id,fd_total,third_down_eff,fourth_down_eff,plays_total,yards_total,yards_per_play,total_drives,pass_yards,rush_yards,red_zone,penalties,turnovers_total,possession,sacks')
+        .eq('game_id', row.game_id)
+        .in('team_id', [row.away_team_id, row.home_team_id])
+        .order('team_id')
+      throwError(teamStatsError)
+
+      return {
+        suggestion: suggestion(
+          row,
+          analysisData ? lossAnalysis(analysisData as LossAnalysisRow) : null,
+        ),
+        matchup,
+        teamStats: (teamStatsData ?? []) as GameTeamStatRow[],
+      }
+    },
+
+    async saveLossAnalysis(input) {
+      const { data, error } = await client
+        .from('betting_suggestion_loss_analyses')
+        .insert({
+          suggestion_id: input.suggestionId,
+          analysis_version: WEEKLY_LOSS_ANALYSIS_VERSION,
+          model_name: input.model,
+          evidence_snapshot: input.evidence,
+          summary: input.summary,
+          clues: input.clues,
+          missing_metrics: input.evidence.missingMetrics,
+        })
+        .select('id,suggestion_id,analysis_version,model_name,evidence_snapshot,summary,clues,missing_metrics,created_at')
+        .single()
+      if (error?.code === '23505') {
+        throw new WeeklyLossAnalysisError('analysis_exists', 'This loss already has a stored analysis.')
+      }
+      throwError(error)
+      if (!data) throw new Error('Saved loss analysis could not be reloaded.')
+      return lossAnalysis(data as LossAnalysisRow)
+    },
+
+    async deleteLossAnalysis(id: number) {
+      const { data, error } = await client
+        .from('betting_suggestion_loss_analyses')
+        .delete()
+        .eq('id', id)
+        .select('id')
+      throwError(error)
+      return (data?.length ?? 0) > 0
     },
   }
 }

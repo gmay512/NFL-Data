@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { readJsonBody, sendJson } from './api/request'
 import { getIngestConfig, getRequiredEnv, type AppEnv } from './config'
-import { refreshGamesByIds } from './ingest-core'
+import { refreshGamesByIds, refreshGameTeamStatsByGameId } from './ingest-core'
 import {
   AnalyticsValidationError,
   type AnalyticsPreset,
@@ -28,6 +28,7 @@ import {
   WeeklyAnalysisService,
 } from './weekly-analysis'
 import { createWeeklyAnalysisStore } from './weekly-analysis-store'
+import { statusForWeeklyLossAnalysisError } from './weekly-loss-analysis'
 
 export type AnalyticsFilterMetadata = {
   seasons: number[]
@@ -42,7 +43,10 @@ export type AnalyticsApiDependencies = {
   llama: LlamaClient
   store: AnalysisStore
   loadMetadata: (season?: number) => Promise<AnalyticsFilterMetadata>
-  weekly?: Pick<WeeklyAnalysisService, 'analyze' | 'delete' | 'grade' | 'list'>
+  weekly?: Pick<
+    WeeklyAnalysisService,
+    'analyze' | 'analyzeLoss' | 'delete' | 'deleteLossAnalysis' | 'grade' | 'list'
+  >
 }
 
 export class AnalyticsApiError extends Error {
@@ -67,6 +71,8 @@ const presets = new Set<AnalyticsPreset>([
 const sessionPathPattern = /^\/api\/analytics\/sessions\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i
 const messagePathPattern = /^\/api\/analytics\/sessions\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/messages$/i
 const weeklyRunPathPattern = /^\/api\/analytics\/weekly\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i
+const weeklySuggestionLossPathPattern = /^\/api\/analytics\/weekly\/suggestions\/(\d+)\/analyze-loss$/
+const weeklyLossAnalysisPathPattern = /^\/api\/analytics\/weekly\/loss-analyses\/(\d+)$/
 const presetPrompts: Record<AnalyticsPreset, string> = {
   season_overview: 'Generate a grounded season overview.',
   team_analysis: 'Generate a grounded team analysis.',
@@ -142,6 +148,8 @@ export function statusForApiError(error: unknown) {
   }
   const weekly = statusForWeeklyError(error)
   if (weekly) return weekly
+  const lossAnalysis = statusForWeeklyLossAnalysisError(error)
+  if (lossAnalysis) return lossAnalysis
   return null
 }
 
@@ -204,6 +212,9 @@ function createDependencies(env: AppEnv) {
       llama,
       createWeeklyAnalysisStore(client),
       (gameIds) => refreshGamesByIds(getIngestConfig(env), gameIds),
+      undefined,
+      undefined,
+      (gameId) => refreshGameTeamStatsByGameId(getIngestConfig(env), gameId),
     ),
   } satisfies AnalyticsApiDependencies
 }
@@ -397,6 +408,25 @@ export async function handleAnalyticsApiRequest(
   if (request.method === 'POST' && requestUrl.pathname === '/api/analytics/weekly/grade') {
     if (!dependencies.weekly) throw new AnalyticsApiError(503, 'weekly_unavailable', 'Weekly analysis is unavailable.')
     sendJson(response, 200, await dependencies.weekly.grade())
+    return true
+  }
+
+  const weeklySuggestionLossMatch = requestUrl.pathname.match(weeklySuggestionLossPathPattern)
+  if (weeklySuggestionLossMatch && request.method === 'POST') {
+    if (!dependencies.weekly) throw new AnalyticsApiError(503, 'weekly_unavailable', 'Weekly analysis is unavailable.')
+    const suggestionId = Number(weeklySuggestionLossMatch[1])
+    sendJson(response, 201, { analysis: await dependencies.weekly.analyzeLoss(suggestionId) })
+    return true
+  }
+
+  const weeklyLossAnalysisMatch = requestUrl.pathname.match(weeklyLossAnalysisPathPattern)
+  if (weeklyLossAnalysisMatch && request.method === 'DELETE') {
+    if (!dependencies.weekly) throw new AnalyticsApiError(503, 'weekly_unavailable', 'Weekly analysis is unavailable.')
+    const analysisId = Number(weeklyLossAnalysisMatch[1])
+    if (!await dependencies.weekly.deleteLossAnalysis(analysisId)) {
+      throw new AnalyticsApiError(404, 'loss_analysis_not_found', 'Loss analysis was not found.')
+    }
+    response.writeHead(204).end()
     return true
   }
 

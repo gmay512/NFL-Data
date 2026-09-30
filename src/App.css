@@ -626,6 +626,21 @@
 .weekly-pick { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
 .weekly-pick > div { display: grid; gap: 3px; }
 .weekly-pick > p, .weekly-pick > small { grid-column: 1 / -1; margin: 0; line-height: 1.45; }
+.weekly-loss-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+.weekly-loss-actions button, .weekly-loss-analysis button { width: max-content; padding: 7px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); cursor: pointer; font-weight: 800; }
+.weekly-loss-actions button:disabled, .weekly-loss-analysis button:disabled { opacity: .55; cursor: not-allowed; }
+.weekly-loss-actions small { color: var(--muted-text); }
+.weekly-loss-analysis { grid-column: 1 / -1; display: grid; gap: 10px; margin-top: 6px; padding: 12px; border: 1px solid var(--accent-hover-border); border-radius: 8px; background: var(--accent-soft); }
+.weekly-loss-analysis header { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.weekly-loss-analysis header > div { display: grid; gap: 3px; }
+.weekly-loss-analysis header small { color: var(--muted-text); font-size: .7rem; }
+.weekly-loss-analysis .danger-button { color: #b42318; }
+.weekly-loss-analysis > p, .weekly-loss-analysis li p, .weekly-loss-analysis details p { margin: 0; line-height: 1.45; }
+.weekly-loss-analysis > ol { display: grid; gap: 10px; margin: 0; padding-left: 20px; }
+.weekly-loss-analysis > ol > li { padding-left: 3px; }
+.weekly-loss-analysis ul { display: flex; flex-wrap: wrap; gap: 5px 12px; margin: 6px 0 0; padding: 0; color: var(--muted-text); font-size: .72rem; list-style: none; }
+.weekly-loss-analysis details { color: var(--muted-text); font-size: .72rem; }
+.weekly-loss-analysis details summary { cursor: pointer; font-weight: 800; }
 .analysis-overview { display: grid; grid-template-columns: minmax(240px, .5fr) minmax(0, 1.5fr); gap: 20px; align-items: stretch; }
 .analysis-sidebar { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 20px; min-width: 0; }
 .analysis-overview.without-actions .analysis-sidebar { grid-template-rows: 1fr; }

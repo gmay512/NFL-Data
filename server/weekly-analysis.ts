@@ -7,6 +7,15 @@ import {
   type LlamaChatMessage,
   type LlamaClient,
 } from './llama-client'
+import {
+  buildWeeklyLossEvidence,
+  buildWeeklyLossMessages,
+  parseWeeklyLossAnalysis,
+  WeeklyLossAnalysisError,
+  type GameTeamStatRow,
+  type WeeklyLossAnalysis,
+  type WeeklyLossEvidence,
+} from './weekly-loss-analysis'
 
 type WeeklyRecentGame = Pick<
   AnalyticsSnapshot['games']['items'][number],
@@ -142,6 +151,7 @@ export type WeeklySuggestion = {
   finalHomeScore: number | null
   gradedAt: string | null
   createdAt: string
+  lossAnalysis: WeeklyLossAnalysis | null
 }
 
 export interface WeeklyAnalysisStore {
@@ -150,6 +160,19 @@ export interface WeeklyAnalysisStore {
   delete(id: string): Promise<boolean>
   listPendingGameIds(through: string): Promise<number[]>
   gradePending(): Promise<number>
+  getLossAnalysisInput(suggestionId: number): Promise<{
+    suggestion: WeeklySuggestion
+    matchup: WeeklyAnalysisSnapshot['matchups'][number]
+    teamStats: GameTeamStatRow[]
+  } | null>
+  saveLossAnalysis(input: {
+    suggestionId: number
+    model: string
+    evidence: WeeklyLossEvidence
+    summary: string
+    clues: WeeklyLossAnalysis['clues']
+  }): Promise<WeeklyLossAnalysis>
+  deleteLossAnalysis(id: number): Promise<boolean>
 }
 
 export type WeeklyAnalysisProgress = {
@@ -621,6 +644,7 @@ export class WeeklyAnalysisService {
   private readonly refreshGames: (gameIds: number[]) => Promise<number>
   private readonly now: () => string
   private readonly log: (message: string) => void
+  private readonly refreshGameTeamStats: (gameId: number) => Promise<unknown[]>
 
   constructor(
     client: SupabaseClient,
@@ -630,6 +654,7 @@ export class WeeklyAnalysisService {
     refreshGames: (gameIds: number[]) => Promise<number>,
     now: () => string = () => new Date().toISOString(),
     log: (message: string) => void = console.info,
+    refreshGameTeamStats: (gameId: number) => Promise<unknown[]> = async () => [],
   ) {
     this.client = client
     this.dataSource = dataSource
@@ -638,6 +663,7 @@ export class WeeklyAnalysisService {
     this.refreshGames = refreshGames
     this.now = now
     this.log = log
+    this.refreshGameTeamStats = refreshGameTeamStats
   }
 
   async analyze(season: number, options: WeeklyAnalysisOptions = {}) {
@@ -683,6 +709,55 @@ export class WeeklyAnalysisService {
       refreshedGames,
       graded: await this.store.gradePending(),
     }
+  }
+
+  async analyzeLoss(suggestionId: number) {
+    const initial = await this.store.getLossAnalysisInput(suggestionId)
+    if (!initial) {
+      throw new WeeklyLossAnalysisError('suggestion_not_found', 'Weekly suggestion was not found.')
+    }
+    if (initial.suggestion.result !== 'loss') {
+      throw new WeeklyLossAnalysisError(
+        'ineligible_suggestion',
+        'Only graded losing suggestions can be analyzed.',
+      )
+    }
+    if (initial.suggestion.lossAnalysis) {
+      throw new WeeklyLossAnalysisError('analysis_exists', 'This loss already has a stored analysis.')
+    }
+
+    await this.refreshGameTeamStats(initial.suggestion.gameId)
+    const refreshed = await this.store.getLossAnalysisInput(suggestionId)
+    if (!refreshed) {
+      throw new WeeklyLossAnalysisError('suggestion_not_found', 'Weekly suggestion was not found after refresh.')
+    }
+    if (refreshed.suggestion.lossAnalysis) {
+      throw new WeeklyLossAnalysisError('analysis_exists', 'This loss already has a stored analysis.')
+    }
+    const evidence = buildWeeklyLossEvidence(
+      refreshed.suggestion,
+      refreshed.matchup,
+      refreshed.teamStats,
+    )
+    const completion = await this.llama.completeMessages(buildWeeklyLossMessages(evidence))
+    if (completion.finishReason !== 'stop') {
+      throw new WeeklyLossAnalysisError(
+        'invalid_model_output',
+        `The loss analysis did not complete normally (finish reason: ${completion.finishReason ?? 'missing'}).`,
+      )
+    }
+    const analysis = parseWeeklyLossAnalysis(completion.content, evidence)
+    return this.store.saveLossAnalysis({
+      suggestionId,
+      model: completion.model,
+      evidence,
+      summary: analysis.summary,
+      clues: analysis.clues,
+    })
+  }
+
+  deleteLossAnalysis(id: number) {
+    return this.store.deleteLossAnalysis(id)
   }
 }
 
