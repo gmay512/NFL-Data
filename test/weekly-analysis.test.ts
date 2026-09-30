@@ -457,7 +457,10 @@ describe('weekly matchup batching', () => {
         [{ id: 42 }, { id: 43 }],
         {
           async load() {
-            throw new Error('canceling statement due to statement timeout')
+            throw new Error(
+              'Could not load current consensus odds for game 42 '
+              + '(get_game_consensus_odds): canceling statement due to statement timeout',
+            )
           },
         },
         2026,
@@ -466,6 +469,7 @@ describe('weekly matchup batching', () => {
       (error) => error instanceof WeeklyAnalysisError
         && error.code === 'context_unavailable'
         && /game 42/.test(error.message)
+        && /get_game_consensus_odds/.test(error.message)
         && /statement timeout/.test(error.message),
     )
   })

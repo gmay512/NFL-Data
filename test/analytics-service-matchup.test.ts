@@ -39,6 +39,7 @@ function fakeClient(
   status = 'NS',
   completedGames: BettingGameRow[] = [completedGame],
   bettingError: unknown = null,
+  consensusError: unknown = null,
 ) {
   const logs: QueryLog[] = []
   const rpcCalls: Array<{ name: string; gameIds: number[] }> = []
@@ -126,6 +127,7 @@ function fakeClient(
       rpcCalls.push({ name, gameIds: args.requested_game_ids })
       if (name === 'get_game_consensus_odds') {
         assert.deepEqual(args.requested_game_ids, [42])
+        if (consensusError) return Promise.resolve({ data: null, error: consensusError })
         return Promise.resolve({ data: rows.game_consensus_odds, error: null })
       }
       assert.equal(name, 'get_game_betting_results')
@@ -265,13 +267,22 @@ describe('matchup preview data loading', () => {
     ])
   })
 
-  it('propagates bounded betting result RPC errors', async () => {
+  it('identifies bounded odds RPC failures', async () => {
     const queryError = { code: '57014', message: 'statement timeout' }
-    const { client } = fakeClient('NS', [completedGame], queryError)
+    const betting = fakeClient('NS', [completedGame], queryError)
 
     await assert.rejects(
-      createSupabaseAnalyticsDataSource(client).load({ season: 2025 }, 'season_overview'),
-      /statement timeout/,
+      createSupabaseAnalyticsDataSource(betting.client).load({ season: 2025 }, 'season_overview'),
+      /Could not load closing betting results for games 10 \(get_game_betting_results\): statement timeout \(code=57014\)/,
+    )
+
+    const current = fakeClient('NS', [completedGame], null, queryError)
+    await assert.rejects(
+      createSupabaseAnalyticsDataSource(current.client).load(
+        { season: 2025, gameId: 42 },
+        'matchup_preview',
+      ),
+      /Could not load current consensus odds for game 42 \(get_game_consensus_odds\): statement timeout \(code=57014\)/,
     )
   })
 

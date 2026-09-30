@@ -1,6 +1,6 @@
 begin;
 
-select plan(35);
+select plan(36);
 
 select ok(
   has_table_privilege('service_role', 'public.game_closing_consensus_odds', 'select'),
@@ -46,7 +46,8 @@ values
   (990002, 2099, 'Regular Season', 'Week 2', 990002, 990001, '2099-09-08', extract(epoch from '2099-09-08 18:00:00+00'::timestamptz)::bigint, 'AOT', 24, 21),
   (990003, 2099, 'Regular Season', 'Week 3', 990002, 990001, '2099-09-15', extract(epoch from '2099-09-15 18:00:00+00'::timestamptz)::bigint, 'FT', 17, 14),
   (990004, 2099, 'Regular Season', 'Week 4', 990002, 990001, '2099-09-22', extract(epoch from '2099-09-22 18:00:00+00'::timestamptz)::bigint, 'FT', 24, 17),
-  (990005, 2099, 'Regular Season', 'Week 5', 990002, 990001, '2099-09-29', extract(epoch from '2099-09-29 18:00:00+00'::timestamptz)::bigint, 'FT', 21, 20);
+  (990005, 2099, 'Regular Season', 'Week 5', 990002, 990001, '2099-09-29', extract(epoch from '2099-09-29 18:00:00+00'::timestamptz)::bigint, 'FT', 21, 20),
+  (990006, 2099, 'Regular Season', 'Week 6', 990002, 990001, '2099-10-06', null, 'FT', 20, 17);
 
 insert into public.bookmakers (id, name)
 values
@@ -101,6 +102,33 @@ values
   (990004, 990001, 990001, 'Away -3.5', 1.87, '2099-09-22 17:50:00+00', '2099-09-22 17:51:00+00'),
   (990004, 990002, 990001, 'Home -4.5', 1.91, '2099-09-22 17:55:00+00', '2099-09-22 17:56:00+00'),
   (990004, 990002, 990001, 'Away -4.5', 1.91, '2099-09-22 17:55:00+00', '2099-09-22 17:56:00+00');
+
+-- Preserve the closing result while forcing the bounded function to search
+-- through substantial older snapshot history for the requested game.
+insert into public.odds (
+  game_id,
+  bookmaker_id,
+  bet_id,
+  bet_value,
+  odd,
+  provider_updated_at,
+  captured_at
+)
+select
+  990001,
+  990001,
+  market.bet_id,
+  market.bet_value,
+  1.91,
+  '2099-08-01 00:00:00+00'::timestamptz + snapshot * interval '1 minute',
+  '2099-08-01 00:00:01+00'::timestamptz + snapshot * interval '1 minute'
+from generate_series(1, 500) as snapshots(snapshot)
+cross join (values
+  (990001, 'Home -2'),
+  (990001, 'Away +2'),
+  (990002, 'Over 42'),
+  (990002, 'Under 42')
+) as market(bet_id, bet_value);
 
 insert into public.odds (
   game_id,
@@ -271,6 +299,11 @@ select is(
   (select count(*)::integer from public.get_game_betting_results(array[]::integer[])),
   0,
   'bounded betting results return no rows for an empty request'
+);
+select is(
+  (select spread_result from public.get_game_betting_results(array[990006])),
+  'ungraded',
+  'bounded betting results retain completed games without a kickoff timestamp'
 );
 
 select * from finish();

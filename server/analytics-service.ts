@@ -75,8 +75,30 @@ async function fetchAllPages<T>(loadPage: (from: number, to: number) => Promise<
   }
 }
 
-function throwQueryError(error: { message: string } | null) {
-  if (error) throw new Error(error.message)
+function queryFailure(context: string, error: unknown) {
+  if (!error || typeof error !== 'object') {
+    return new Error(`${context}: ${String(error)}`, { cause: error })
+  }
+  const record = error as Record<string, unknown>
+  const message = 'message' in record ? String(record.message) : String(error)
+  const metadata = [
+    record.code == null ? null : `code=${String(record.code)}`,
+    record.details == null ? null : `details=${String(record.details)}`,
+    record.hint == null ? null : `hint=${String(record.hint)}`,
+  ].filter((value): value is string => value != null)
+  return new Error(
+    `${context}: ${message}${metadata.length ? ` (${metadata.join(', ')})` : ''}`,
+    { cause: error },
+  )
+}
+
+function throwQueryError(error: { message: string } | null, context: string) {
+  if (error) throw queryFailure(context, error)
+}
+
+function summarizeIds(ids: number[]) {
+  const shown = ids.slice(0, 5).join(',')
+  return ids.length > 5 ? `${ids.length} IDs (${shown},...)` : shown
 }
 
 function selectedTeamIds(filters: AnalyticsFilters, games: BettingGameRow[]) {
@@ -112,7 +134,7 @@ async function loadGames(client: SupabaseClient, filters: AnalyticsFilters) {
   }
 
   const { data, error, count } = await query
-  throwQueryError(error)
+  throwQueryError(error, 'Could not select completed analytics games')
   if ((count ?? 0) > MAX_ANALYTICS_GAMES) {
     throw new Error(`Analytics selection exceeds ${MAX_ANALYTICS_GAMES} games; narrow the filters.`)
   }
@@ -132,7 +154,7 @@ async function loadMatchupTarget(
     .eq('id', filters.gameId!)
     .eq('season', filters.season)
     .maybeSingle()
-  throwQueryError(error)
+  throwQueryError(error, `Could not load target game ${filters.gameId}`)
   if (!data) {
     throw new AnalyticsTargetError(
       'target_game_not_found',
@@ -158,9 +180,14 @@ async function loadMatchupTarget(
   const teamIds = [Number(game.away_team_id), Number(game.home_team_id)]
   const [{ data: teamData, error: teamError }, oddsRows] = await Promise.all([
     client.from('teams').select('id,name').in('id', teamIds).order('id'),
-    getCurrentConsensusOdds(client, [game.id]),
+    getCurrentConsensusOdds(client, [game.id]).catch((error) => {
+      throw queryFailure(
+        `Could not load current consensus odds for game ${game.id} (get_game_consensus_odds)`,
+        error,
+      )
+    }),
   ])
-  throwQueryError(teamError)
+  throwQueryError(teamError, `Could not load teams for target game ${game.id}`)
   const oddsData = oddsRows[0] ?? null
   const teamNames = new Map((teamData ?? []).map((team) => [Number(team.id), String(team.name)]))
   if (!teamNames.has(teamIds[0]) || !teamNames.has(teamIds[1])) {
@@ -216,7 +243,7 @@ async function loadMatchupHistory(
   if (excludeStage) query = query.neq('stage', excludeStage)
 
   const { data, error, count } = await query
-  throwQueryError(error)
+  throwQueryError(error, `Could not select matchup history before ${kickoffTimestamp}`)
   if ((count ?? 0) > MAX_ANALYTICS_GAMES) {
     throw new Error(`Analytics selection exceeds ${MAX_ANALYTICS_GAMES} games; narrow the filters.`)
   }
@@ -232,7 +259,12 @@ async function loadBettingResults(client: SupabaseClient, gameIds: number[]) {
     const { data, error } = await client.rpc('get_game_betting_results', {
       requested_game_ids: gameIds.slice(index, index + BETTING_RESULTS_CHUNK_SIZE),
     })
-    throwQueryError(error)
+    throwQueryError(
+      error,
+      `Could not load closing betting results for games ${gameIds
+        .slice(index, index + BETTING_RESULTS_CHUNK_SIZE)
+        .join(',')} (get_game_betting_results)`,
+    )
     if (!Array.isArray(data)) throw new Error('Betting results returned an invalid response.')
     rows.push(...data as BettingGameRow[])
   }
@@ -254,7 +286,7 @@ async function loadTeamStats(client: SupabaseClient, gameIds: number[], teamIds:
         .order('game_id')
         .order('team_id')
         .range(from, to)
-      throwQueryError(error)
+      throwQueryError(error, `Could not load team stats for games ${gameIdChunk.join(',')}`)
       return (data ?? []) as AnalyticsTeamStatRow[]
     }))
   }
@@ -269,7 +301,7 @@ async function loadStandings(client: SupabaseClient, season: number, teamIds: nu
     .eq('season', season)
     .in('team_id', teamIds)
     .order('position')
-  throwQueryError(error)
+  throwQueryError(error, `Could not load standings for season ${season}`)
   return (data ?? []) as AnalyticsStandingRow[]
 }
 
@@ -284,7 +316,7 @@ async function loadInjuries(client: SupabaseClient, teamIds: number[]) {
       .order('injury_date', { ascending: false })
       .order('player_id')
       .range(from, to)
-    throwQueryError(error)
+    throwQueryError(error, `Could not load active injuries for teams ${teamIds.join(',')}`)
     return (data ?? []) as AnalyticsInjuryRow[]
   })
 }
@@ -311,7 +343,7 @@ async function loadPlayerStats(
         .order('team_id')
         .order('player_id')
         .range(from, to)
-      throwQueryError(error)
+      throwQueryError(error, `Could not load player stats for games ${summarizeIds(gameIds)}`)
       return (data ?? []).map((row) => ({ ...row, scope: 'game' as const })) as AnalyticsPlayerStatRow[]
     })
   }
@@ -326,7 +358,7 @@ async function loadPlayerStats(
       .order('team_id')
       .order('player_id')
       .range(from, to)
-    throwQueryError(error)
+    throwQueryError(error, `Could not load season player stats for season ${filters.season}`)
     return (data ?? []).map((row) => ({ ...row, scope: 'season' as const })) as AnalyticsPlayerStatRow[]
   })
 }
@@ -340,7 +372,7 @@ async function loadPlayers(client: SupabaseClient, playerIds: number[]) {
       .in('id', playerIds)
       .order('id')
       .range(from, to)
-    throwQueryError(error)
+    throwQueryError(error, `Could not load players ${summarizeIds(playerIds)}`)
     return (data ?? []) as AnalyticsPlayerRow[]
   })
 }

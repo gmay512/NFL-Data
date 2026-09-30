@@ -68,6 +68,33 @@ values
   (991001, 991002, 991002, 'Over 45.5', 1.91, '2099-08-30 12:05:00+00', '2099-08-30 12:06:00+00'),
   (991001, 991002, 991002, 'Under 45.5', 1.91, '2099-08-30 12:05:00+00', '2099-08-30 12:06:00+00');
 
+-- A requested game can accumulate thousands of old rows. They must be
+-- discarded before spread and total pairing.
+insert into public.odds (
+  game_id,
+  bookmaker_id,
+  bet_id,
+  bet_value,
+  odd,
+  provider_updated_at,
+  captured_at
+)
+select
+  991001,
+  991001,
+  market.bet_id,
+  market.bet_value,
+  1.91,
+  '2099-08-01 00:00:00+00'::timestamptz + snapshot * interval '1 minute',
+  '2099-08-01 00:00:01+00'::timestamptz + snapshot * interval '1 minute'
+from generate_series(1, 500) as snapshots(snapshot)
+cross join (values
+  (991001, 'Home -2.5'),
+  (991001, 'Away +2.5'),
+  (991002, 'Over 43.5'),
+  (991002, 'Under 43.5')
+) as market(bet_id, bet_value);
+
 insert into public.odds (
   game_id,
   bookmaker_id,
