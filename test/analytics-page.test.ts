@@ -6,6 +6,7 @@ import type { Root } from 'react-dom/client'
 import { buildAnalyticsSnapshot, type AnalyticsSourceData } from '../server/analytics-core'
 import type { AnalysisSession } from '../server/analysis-store'
 import { invalidateAnalyticsReads, useAnalyticsRead } from '../src/data/analytics-repository'
+import { captureAnalyticsExpiries, deferredAnalyticsReads } from './analytics-refresh-helpers'
 
 const source: AnalyticsSourceData = {
   games: [{
@@ -175,6 +176,132 @@ function baseFetch(options?: { online?: boolean; empty?: boolean; saved?: boolea
 }
 
 describe('AnalyticsPage', () => {
+  it('keeps content, sorting, scroll, and drafts stable across timed refreshes', async (context) => {
+    const expire = captureAnalyticsExpiries(context)
+    const reads = deferredAnalyticsReads(baseFetch({ saved: true, many: true }))
+    const container = await renderPage(reads.fetch)
+    const open = container.querySelector<HTMLButtonElement>('.saved-analysis-open')
+    assert(open)
+    await React.act(() => open.click())
+    await settle()
+
+    const page = container.querySelector('main')
+    const kpis = container.querySelector('.analytics-kpis')
+    const hero = container.querySelector('.analytics-hero')
+    const actions = container.querySelector('.analysis-actions')
+    const table = container.querySelector('.analytics-results-table')
+    const sortHeader = table?.querySelector('thead th:nth-child(6)')
+    const sortButton = sortHeader?.querySelector<HTMLButtonElement>('button')
+    const scroll = table?.closest<HTMLDivElement>('.analytics-table-scroll')
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea')
+    const help = actions?.querySelector('.analytics-model-help')
+    assert(page && kpis && hero && actions && table && sortHeader && sortButton && scroll && textarea && help)
+    await React.act(async () => {
+      sortButton.click()
+      const setter = Object.getOwnPropertyDescriptor(dom?.window.HTMLTextAreaElement.prototype, 'value')?.set
+      assert(setter)
+      setter.call(textarea, 'Keep this question while refreshing.')
+      textarea.dispatchEvent(new window.Event('input', { bubbles: true }))
+    })
+    scroll.scrollTop = 87
+    textarea.focus()
+    const pageChildren = [...page.children]
+    const actionChildren = [...actions.children]
+    const helpChildren = [...help.children]
+    const indicators = [...container.querySelectorAll('.analytics-refresh-indicator')]
+    const sortedIds = [...table.querySelectorAll('tbody th')].map((cell) => cell.textContent)
+    const sortDirection = sortHeader.getAttribute('aria-sort')
+    const assertStable = () => {
+      assert.deepEqual([...page.children], pageChildren)
+      assert.deepEqual([...actions.children], actionChildren)
+      assert.deepEqual([...help.children], helpChildren)
+      assert.deepEqual([...container.querySelectorAll('.analytics-refresh-indicator')], indicators)
+      assert.equal(container.querySelector('.analytics-hero'), hero)
+      assert.equal(container.querySelector('.analytics-kpis'), kpis)
+      assert.equal(container.querySelector('.analytics-results-table'), table)
+      assert.equal(container.querySelector('textarea'), textarea)
+      assert.equal(sortHeader.getAttribute('aria-sort'), sortDirection)
+      assert.deepEqual([...table.querySelectorAll('tbody th')].map((cell) => cell.textContent), sortedIds)
+      assert.equal(scroll.scrollTop, 87)
+      assert.equal(textarea.value, 'Keep this question while refreshing.')
+      assert.equal(document.activeElement, textarea)
+      assert.equal(container.querySelector('.analytics-read-statuses .status-message'), null)
+    }
+    const analyze = [...actions.querySelectorAll<HTMLButtonElement>('button')][0]
+    assert.equal(analyze.disabled, false)
+    assert.equal(indicators.length, 3)
+    assert(indicators.every((indicator) => indicator.getAttribute('aria-hidden') === 'true'))
+    reads.hold('/api/analytics/llm-health', '/api/analytics/overview', '/api/analytics/sessions', '/api/analytics/metadata')
+
+    await React.act(() => expire(5_000))
+    assertStable()
+    assert.equal(analyze.disabled, true)
+    assert.equal(container.querySelector('.llm-status')?.getAttribute('aria-busy'), 'true')
+    assert.match(help.querySelector('.is-active')?.textContent ?? '', /Checking local LLM/)
+    assert.equal(help.children[1].getAttribute('aria-hidden'), 'true')
+    assert.equal(reads.counts.get('/api/analytics/llm-health'), 2)
+
+    await React.act(() => {
+      expire(60_000)
+      expire(300_000)
+    })
+    assertStable()
+    assert.equal(container.querySelectorAll('.analytics-refresh-indicator[role="status"]').length, 3)
+    for (const path of ['/api/analytics/overview', '/api/analytics/sessions', '/api/analytics/metadata']) {
+      assert.equal(reads.counts.get(path), 2)
+    }
+    await React.act(async () => {
+      await Promise.all(['/api/analytics/llm-health', '/api/analytics/overview', '/api/analytics/sessions', '/api/analytics/metadata']
+        .map((path) => reads.complete(path)))
+    })
+    assertStable()
+    assert.equal(analyze.disabled, false)
+    assert.equal(help.querySelector('.is-active'), null)
+    assert(indicators.every((indicator) => indicator.getAttribute('aria-hidden') === 'true'))
+
+    reads.hold('/api/analytics/llm-health')
+    await React.act(() => expire(5_000))
+    await React.act(() => reads.complete('/api/analytics/llm-health',
+      json({ status: 'unavailable', code: 'unavailable', message: 'Offline.' })))
+    assertStable()
+    assert.equal(analyze.disabled, true)
+    assert.match(help.querySelector('.is-active')?.textContent ?? '', /Start llama-server/)
+    assert.match(container.querySelector('.llm-status')?.textContent ?? '', /Local LLM offline/)
+  })
+
+  it('preserves timed-refresh failures and retry while applying changed results', async (context) => {
+    const expire = captureAnalyticsExpiries(context)
+    let nextSnapshot = snapshot
+    const reads = deferredAnalyticsReads(async (input, init) => {
+      if (new URL(String(input), 'http://localhost').pathname === '/api/analytics/overview') {
+        return json({ snapshot: nextSnapshot })
+      }
+      return baseFetch()(input, init)
+    })
+    const container = await renderPage(reads.fetch)
+    const kpis = container.querySelector('.analytics-kpis')
+    reads.hold('/api/analytics/overview')
+    await React.act(() => expire(60_000))
+    assert.equal(container.querySelector('.analytics-kpis'), kpis)
+    assert.equal(container.querySelector('.status-message'), null)
+    await React.act(() => reads.complete('/api/analytics/overview', json({ error: 'Refresh unavailable.' }, 503)))
+    assert.equal(container.querySelector('.analytics-kpis'), kpis)
+    assert.match(container.textContent ?? '', /Completed games1/)
+    assert.match(container.querySelector('[role="alert"]')?.textContent ?? '', /Refresh unavailable/)
+    nextSnapshot = buildAnalyticsSnapshot('season_overview', { season: 2025 }, {
+      ...source, games: [source.games[0], { ...source.games[0], game_id: 102 }],
+    })
+    const retry = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Retry analytics')
+    assert(retry)
+    await React.act(() => retry.click())
+    assert.equal(reads.counts.get('/api/analytics/overview'), 3)
+    assert.equal(container.querySelector('.analytics-kpis'), kpis)
+    assert.match(container.textContent ?? '', /Completed games2/)
+    assert.equal(container.querySelector('[role="alert"]'), null)
+    assert.equal(container.querySelectorAll('.analytics-results-table tbody tr').length, 2)
+  })
+
   it('keeps a shared request alive when just one subscriber unmounts', async () => {
     const container = await renderPage(baseFetch())
     let requests = 0

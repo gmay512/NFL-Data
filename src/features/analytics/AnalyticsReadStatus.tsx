@@ -1,12 +1,24 @@
-export function AnalyticsReadStatus({ title, error, refreshing, retry }: {
+type ReadStatus = {
   title: string
   error: Error | null
   refreshing?: boolean
   retry: () => void
-}) {
-  if (!error && !refreshing) return null
-  return <div className={`status-message ${error ? 'is-error' : ''}`} role={error ? 'alert' : 'status'}>
-    <strong>{error ? `${title} error` : `Refreshing ${title.toLowerCase()}`}</strong>
-    {error && <><p>{error.message}</p><button type="button" onClick={retry}>Retry {title.toLowerCase()}</button></>}
+}
+
+export function AnalyticsReadStatuses({ reads }: { reads: ReadStatus[] }) {
+  return <div className="analytics-read-statuses">
+    <div className="analytics-refresh-indicators">
+      {reads.filter((read) => read.refreshing !== undefined).map(({ title, refreshing }) =>
+        <span key={title} className={`analytics-refresh-indicator ${refreshing ? 'is-active' : ''}`}
+          role={refreshing ? 'status' : undefined} aria-hidden={!refreshing}>
+          Refreshing {title.toLowerCase()}
+        </span>,
+      )}
+    </div>
+    {reads.map(({ title, error, retry }) => error && <div key={title} className="status-message is-error" role="alert">
+      <strong>{title} error</strong>
+      <p>{error.message}</p>
+      <button type="button" onClick={retry}>Retry {title.toLowerCase()}</button>
+    </div>)}
   </div>
 }

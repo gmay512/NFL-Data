@@ -573,12 +573,21 @@
 .analytics-subnav a { padding: 9px 13px; border-radius: 8px; color: var(--muted-text); font-size: .84rem; font-weight: 800; text-decoration: none; }
 .analytics-subnav a.active { color: var(--accent-dark); background: var(--accent-soft); }
 .analytics-hero { display: flex; align-items: start; justify-content: space-between; gap: 24px; padding: 28px; }
+.analytics-hero > div { flex: 1; min-width: 0; }
 .analytics-hero h1 { margin: 0 0 8px; font-size: clamp(1.8rem, 4vw, 3rem); letter-spacing: -.05em; }
 .analytics-hero p:last-child { max-width: 720px; margin: 0; color: var(--muted-text); }
-.llm-status { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; padding: 8px 10px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-text); font-size: .75rem; font-weight: 800; }
-.llm-status i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted-text); }
+.llm-status { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; width: 230px; max-width: 100%; min-height: 36px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-text); font-size: .75rem; font-weight: 800; }
+.llm-status i { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--muted-text); }
+.llm-status-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .llm-status.is-online { border-color: var(--accent-hover-border); color: var(--accent-dark); background: var(--accent-soft); }
 .llm-status.is-online i { background: var(--accent); }
+.analytics-read-statuses { display: grid; gap: 8px; }
+.analytics-refresh-indicators { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--muted-text); font-size: .75rem; line-height: 1.4; }
+.analytics-refresh-indicator { visibility: hidden; white-space: nowrap; }
+.analytics-refresh-indicator.is-active { visibility: visible; }
+.analytics-model-help { display: grid; min-width: 0; }
+.analytics-model-help > span { grid-area: 1 / 1; visibility: hidden; }
+.analytics-model-help > span.is-active { visibility: visible; }
 .analytics-filters { display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap: 10px; padding: 16px; }
 .analytics-filters label { display: grid; gap: 6px; color: var(--muted-text); font-size: .68rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
 .analytics-filters select, .analytics-filters input, .analysis-chat-form textarea {

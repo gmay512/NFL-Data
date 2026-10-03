@@ -5,6 +5,7 @@ import * as React from 'react'
 import type { Root } from 'react-dom/client'
 import type { WeeklyAnalysisRun } from '../server/weekly-analysis'
 import { invalidateAnalyticsReads } from '../src/data/analytics-repository'
+import { captureAnalyticsExpiries, deferredAnalyticsReads } from './analytics-refresh-helpers'
 
 const newRunId = '99000000-0000-4000-8000-000000000003'
 const oldRunId = '99000000-0000-4000-8000-000000000002'
@@ -164,6 +165,91 @@ function baseFetch(getRuns: () => WeeklyAnalysisRun[]) {
 }
 
 describe('WeeklyAnalysisPage', () => {
+  it('keeps selected output and model-help layout stable across timed refreshes', async (context) => {
+    const expire = captureAnalyticsExpiries(context)
+    const newer = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Newer output.')
+    const selected = weeklyRun(oldRunId, 'Week 2', '2025-09-11T00:00:00.000Z', 'Selected older output.')
+    selected.suggestions[0].result = 'loss'
+    const reads = deferredAnalyticsReads(baseFetch(() => [newer, selected]))
+    const container = await renderPage(reads.fetch, `/analytics/weekly?week=Week%202&run=${oldRunId}`)
+    const page = container.querySelector('main')
+    const workspace = container.querySelector('.weekly-workspace')
+    const detail = container.querySelector<HTMLElement>('.weekly-run-detail')
+    const pick = detail?.querySelector('.weekly-pick')
+    const lossActions = detail?.querySelector('.weekly-loss-actions')
+    const help = lossActions?.querySelector('.analytics-model-help')
+    const lossButton = lossActions?.querySelector<HTMLButtonElement>('button')
+    const analyze = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Analyze upcoming week')
+    const selectedOption = container.querySelector('.weekly-run-option[aria-pressed="true"]')
+    assert(page && workspace && detail && pick && lossActions && help && lossButton && analyze && selectedOption)
+    const pageChildren = [...page.children]
+    const actionChildren = [...lossActions.children]
+    const helpChildren = [...help.children]
+    const indicators = [...container.querySelectorAll('.analytics-refresh-indicator')]
+    const initialCounts = new Map(reads.counts)
+    detail.scrollTop = 41
+    const assertStable = () => {
+      assert.deepEqual([...page.children], pageChildren)
+      assert.deepEqual([...lossActions.children], actionChildren)
+      assert.deepEqual([...help.children], helpChildren)
+      assert.deepEqual([...container.querySelectorAll('.analytics-refresh-indicator')], indicators)
+      assert.equal(container.querySelector('.weekly-workspace'), workspace)
+      assert.equal(container.querySelector('.weekly-run-detail'), detail)
+      assert.equal(container.querySelector('.weekly-pick'), pick)
+      assert.equal(container.querySelector('.weekly-run-option[aria-pressed="true"]'), selectedOption)
+      assert.match(detail.querySelector('.weekly-summary')?.textContent ?? '', /Selected older output/)
+      assert.equal(detail.scrollTop, 41)
+      assert.equal(container.querySelector('.analytics-read-statuses .status-message'), null)
+    }
+    assert.equal(analyze.disabled, false)
+    assert.equal(lossButton.disabled, false)
+    const paths = ['/api/analytics/llm-health', '/api/analytics/weekly/summaries',
+      `/api/analytics/weekly/runs/${oldRunId}`, '/api/analytics/metadata']
+    reads.hold(...paths)
+    await React.act(() => expire(5_000))
+    assertStable()
+    assert.equal(analyze.disabled, true)
+    assert.equal(lossButton.disabled, true)
+    assert.match(help.querySelector('.is-active')?.textContent ?? '', /Checking local LLM/)
+    assert.equal(help.children[1].getAttribute('aria-hidden'), 'true')
+    await React.act(() => {
+      expire(60_000)
+      expire(300_000)
+    })
+    assertStable()
+    assert.equal(container.querySelectorAll('.analytics-refresh-indicator[role="status"]').length, 3)
+    for (const path of paths) assert.equal(reads.counts.get(path), initialCounts.get(path)! + 1)
+    await React.act(async () => { await Promise.all(paths.map((path) => reads.complete(path))) })
+    assertStable()
+    assert.equal(analyze.disabled, false)
+    assert.equal(lossButton.disabled, false)
+    assert.equal(help.querySelector('.is-active'), null)
+    assert(indicators.every((indicator) => indicator.getAttribute('aria-hidden') === 'true'))
+  })
+
+  it('retains selected Weekly output when a timed detail refresh fails and can retry it', async (context) => {
+    const expire = captureAnalyticsExpiries(context)
+    const selected = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Saved output.')
+    const reads = deferredAnalyticsReads(baseFetch(() => [selected]))
+    const container = await renderPage(reads.fetch, `/analytics/weekly?week=Week%202&run=${newRunId}`)
+    const path = `/api/analytics/weekly/runs/${newRunId}`
+    reads.hold(path)
+    await React.act(() => expire(60_000))
+    await React.act(() => reads.complete(path, json({ error: 'Detail refresh unavailable.' }, 503)))
+    assert.match(container.querySelector('.weekly-summary')?.textContent ?? '', /Saved output/)
+    assert.match(container.querySelector('[role="alert"]')?.textContent ?? '', /Detail refresh unavailable/)
+    assert.equal(container.querySelector('.weekly-run-option')?.getAttribute('aria-pressed'), 'true')
+    selected.summary = 'Updated saved output.'
+    const retry = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Retry selected analysis')
+    assert(retry)
+    await React.act(() => retry.click())
+    assert.equal(reads.counts.get(path), 3)
+    assert.match(container.querySelector('.weekly-summary')?.textContent ?? '', /Updated saved output/)
+    assert.equal(container.querySelector('[role="alert"]'), null)
+  })
+
   it('preserves a newly saved analysis and its record when summary refresh fails', async () => {
     const created = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Persisted success.')
     let saved = false

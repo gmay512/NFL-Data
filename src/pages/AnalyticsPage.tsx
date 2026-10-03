@@ -22,7 +22,8 @@ import type {
   AnalyticsSnapshot,
 } from '../api/contracts'
 import { analyticsKey, invalidateAnalyticsReads, useAnalyticsRead } from '../data/analytics-repository'
-import { AnalyticsReadStatus } from '../features/analytics/AnalyticsReadStatus'
+import { AnalyticsReadStatuses } from '../features/analytics/AnalyticsReadStatus'
+import { AnalyticsModelHelp, AnalyticsModelStatus } from '../features/analytics/AnalyticsModelStatus'
 import { AnalyticsNav } from '../features/analytics/AnalyticsNav'
 import { StatusMessage } from '../features/dashboard/DashboardComponents'
 
@@ -539,9 +540,7 @@ export function AnalyticsPage() {
           <h1>Lines, results, and grounded analysis</h1>
           <p>Review closing consensus spread and total outcomes. Figures are descriptive historical analysis, not betting advice.</p>
         </div>
-        <span className={`llm-status ${llmHealth?.status === 'available' ? 'is-online' : ''}`}>
-          <i />{llmHealth?.status === 'available' ? llmHealth.model : healthRead.isLoading ? 'Checking local LLM...' : 'Local LLM offline'}
-        </span>
+        <AnalyticsModelStatus health={llmHealth} checking={healthRead.isLoading} />
       </header>
 
       <section className="analytics-filters panel" aria-label="Analytics filters">
@@ -568,10 +567,12 @@ export function AnalyticsPage() {
       </section>
 
       {error && <StatusMessage title="Analytics error" message={error} error />}
-      <AnalyticsReadStatus title="Analytics" error={overviewRead.error} refreshing={overviewRead.isRefreshing} retry={overviewRead.retry} />
-      <AnalyticsReadStatus title="Filters" error={metadataRead.error} refreshing={metadataRead.isRefreshing} retry={metadataRead.retry} />
-      <AnalyticsReadStatus title="Saved analyses" error={sessionsRead.error} refreshing={sessionsRead.isRefreshing} retry={sessionsRead.retry} />
-      <AnalyticsReadStatus title="Local model" error={healthRead.error} retry={healthRead.retry} />
+      <AnalyticsReadStatuses reads={[
+        { title: 'Analytics', error: overviewRead.error, refreshing: overviewRead.isRefreshing, retry: overviewRead.retry },
+        { title: 'Filters', error: metadataRead.error, refreshing: metadataRead.isRefreshing, retry: metadataRead.retry },
+        { title: 'Saved analyses', error: sessionsRead.error, refreshing: sessionsRead.isRefreshing, retry: sessionsRead.retry },
+        { title: 'Local model', error: healthRead.error, retry: healthRead.retry },
+      ]} />
       {isLoading && <StatusMessage title="Calculating analytics" message="Loading closing-line results and team trends." />}
       {!isLoading && snapshot && <section className="analytics-kpis">
         <article className="stat-card"><span className="stat-label">Completed games</span><p className="stat-value">{snapshot.summary.games}</p></article>
@@ -589,7 +590,8 @@ export function AnalyticsPage() {
               {availablePresets.map((item) => <button key={item} type="button" disabled={isAnalyzing || llmHealth?.status !== 'available'} onClick={() => void createReport(item)}>
                 {isAnalyzing ? 'Analyzing…' : presetLabel(item)}
               </button>)}
-              {llmHealth?.status !== 'available' && <small>Start llama-server to enable model analysis. Historical metrics remain available.</small>}
+              <AnalyticsModelHelp health={llmHealth} checking={healthRead.isLoading}
+                unavailableMessage="Start llama-server to enable model analysis. Historical metrics remain available." />
             </aside>
           )}
 

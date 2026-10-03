@@ -16,7 +16,8 @@ import {
 import type { WeeklyRunView } from '../api/contracts'
 import type { WeeklyRunSummary, WeeklyRecord } from '../../server/weekly-analysis'
 import { analyticsKey, invalidateAnalyticsReads, seedAnalyticsRead, useAnalyticsRead } from '../data/analytics-repository'
-import { AnalyticsReadStatus } from '../features/analytics/AnalyticsReadStatus'
+import { AnalyticsReadStatuses } from '../features/analytics/AnalyticsReadStatus'
+import { AnalyticsModelHelp, AnalyticsModelStatus } from '../features/analytics/AnalyticsModelStatus'
 import { AnalyticsNav } from '../features/analytics/AnalyticsNav'
 import { StatusMessage } from '../features/dashboard/DashboardComponents'
 
@@ -372,9 +373,7 @@ export function WeeklyAnalysisPage() {
           <h1>Upcoming-week picks</h1>
           <p>Compare saved model outputs, track results, and print a single selected analysis.</p>
         </div>
-        <span className={`llm-status ${llmHealth?.status === 'available' ? 'is-online' : ''}`}>
-          <i />{llmHealth?.status === 'available' ? llmHealth.model : healthRead.isLoading ? 'Checking local LLM...' : 'Local LLM offline'}
-        </span>
+        <AnalyticsModelStatus health={llmHealth} checking={healthRead.isLoading} />
       </header>
 
       <section className="panel weekly-toolbar weekly-screen-only">
@@ -418,10 +417,12 @@ export function WeeklyAnalysisPage() {
 
       {error && <div className="weekly-screen-only"><StatusMessage title="Weekly analysis error" message={error} error /></div>}
       <div className="weekly-screen-only">
-        <AnalyticsReadStatus title="Weekly analysis" error={summaryRead.error} refreshing={summaryRead.isRefreshing} retry={summaryRead.retry} />
-        <AnalyticsReadStatus title="Selected analysis" error={detailRead.error} refreshing={detailRead.isRefreshing} retry={detailRead.retry} />
-        <AnalyticsReadStatus title="Season metadata" error={metadataRead.error} refreshing={metadataRead.isRefreshing} retry={metadataRead.retry} />
-        <AnalyticsReadStatus title="Local model" error={healthRead.error} retry={healthRead.retry} />
+        <AnalyticsReadStatuses reads={[
+          { title: 'Weekly analysis', error: summaryRead.error, refreshing: summaryRead.isRefreshing, retry: summaryRead.retry },
+          { title: 'Selected analysis', error: detailRead.error, refreshing: detailRead.isRefreshing, retry: detailRead.retry },
+          { title: 'Season metadata', error: metadataRead.error, refreshing: metadataRead.isRefreshing, retry: metadataRead.retry },
+          { title: 'Local model', error: healthRead.error, retry: healthRead.retry },
+        ]} />
       </div>
       {gradingStatus && <div className="weekly-screen-only"><StatusMessage title="Weekly grading complete" message={gradingStatus} /></div>}
       {isLoading && <div className="weekly-screen-only"><StatusMessage title="Loading weekly analyses" message="Loading saved model outputs and tracked picks." /></div>}
@@ -504,7 +505,8 @@ export function WeeklyAnalysisPage() {
                         >
                           {analyzingLossId === pick.id ? 'Analyzing…' : 'Analyze loss'}
                         </button>
-                        {llmHealth?.status !== 'available' && <small>Start the local LLM to analyze this loss.</small>}
+                        <AnalyticsModelHelp health={llmHealth} checking={healthRead.isLoading}
+                          unavailableMessage="Start the local LLM to analyze this loss." />
                       </div>
                     )}
                     {pick.lossAnalysis && (

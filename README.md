@@ -315,8 +315,10 @@ in-memory cache: 60 seconds for data, five minutes for metadata, and five
 seconds for model health. Same-filter revisits show cached content while
 refreshing; different filters never borrow another filter's results. Mutations
 invalidate related reads. Expired same-filter content is explicitly marked as
-refreshing rather than silently presented as current; expired model health
-cannot keep generation enabled. Known saved output remains visible if its
+refreshing rather than silently presented as current. Both tabs reserve compact
+refresh indicators and model-status/help space so routine background checks do
+not shift the displayed content; expired model health still cannot keep
+generation enabled. Known saved output remains visible if its
 background refresh fails, with an explicit error and retry control. Ordinary reads have
 a 15-second deadline and health checks at most five seconds; generation and
 ingestion retain their separate budgets. Obsolete reads and disconnected model
