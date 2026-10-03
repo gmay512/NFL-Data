@@ -190,6 +190,9 @@ export async function handleApiRequest(
     }
     const mapped = statusForApiError(error)
     if (mapped) {
+      if (requestUrl.pathname.startsWith('/api/analytics')) {
+        console.error(`[Analytics] request=${response.getHeader('X-Request-Id')} path=${requestUrl.pathname} code=${mapped.code} status=${mapped.statusCode}`)
+      }
       sendJson(response, mapped.statusCode, { error: mapped.message, code: mapped.code })
       return true
     }

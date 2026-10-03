@@ -4,6 +4,7 @@ import { JSDOM } from 'jsdom'
 import * as React from 'react'
 import type { Root } from 'react-dom/client'
 import type { WeeklyAnalysisRun } from '../server/weekly-analysis'
+import { invalidateAnalyticsReads } from '../src/data/analytics-repository'
 
 const newRunId = '99000000-0000-4000-8000-000000000003'
 const oldRunId = '99000000-0000-4000-8000-000000000002'
@@ -61,6 +62,7 @@ let root: Root | null = null
 afterEach(async () => {
   if (root) await React.act(() => root?.unmount())
   root = null
+  invalidateAnalyticsReads()
   dom?.window.close()
   dom = null
 })
@@ -111,8 +113,37 @@ async function renderPage(fetchHandler: typeof fetch, initialEntry = '/analytics
 
 function baseFetch(getRuns: () => WeeklyAnalysisRun[]) {
   return async (input: RequestInfo | URL) => {
-    const path = new URL(String(input), 'http://localhost').pathname
+    const url = new URL(String(input), 'http://localhost')
+    const path = url.pathname
     if (path === '/api/analytics/weekly/runs') return json({ runs: getRuns() })
+    if (path === '/api/analytics/weekly/summaries') {
+      const season = Number(url.searchParams.get('season')) || 2025
+      const runs = getRuns().filter((run) => run.season === season && !/^pre[\s-]*season$/i.test(run.stage ?? ''))
+      const record = (items: WeeklyAnalysisRun[]) => {
+        const picks = items.flatMap((run) => run.suggestions)
+        return {
+          wins: picks.filter((pick) => pick.result === 'win').length,
+          losses: picks.filter((pick) => pick.result === 'loss').length,
+          pushes: picks.filter((pick) => pick.result === 'push').length,
+          pending: picks.filter((pick) => pick.result === 'ungraded').length,
+        }
+      }
+      return json({
+        runs: runs.filter((run) => !url.searchParams.get('week') || run.week === url.searchParams.get('week')).map((run) => ({
+          id: run.id, season: run.season, stage: run.stage, week: run.week, model: run.model,
+          createdAt: run.createdAt, picks: run.suggestions.length, record: record([run]),
+          isFinal: !runs.some((other) => other.stage === run.stage && other.week === run.week
+            && (other.createdAt > run.createdAt || (other.createdAt === run.createdAt && other.id > run.id))),
+        })),
+        weeks: [...new Set(runs.map((run) => run.week))], record: record(runs), next: null,
+        selectedSeason: runs.length ? Math.max(...runs.map((run) => run.season)) : null,
+        total: runs.length,
+      })
+    }
+    if (path.startsWith('/api/analytics/weekly/runs/')) {
+      const run = getRuns().find((item) => item.id === path.split('/').at(-1))
+      return run ? json({ run }) : json({ error: 'Not found.' }, 404)
+    }
     if (path === '/api/analytics/metadata') {
       return json({
         seasons: [2025],
@@ -133,6 +164,82 @@ function baseFetch(getRuns: () => WeeklyAnalysisRun[]) {
 }
 
 describe('WeeklyAnalysisPage', () => {
+  it('preserves a newly saved analysis and its record when summary refresh fails', async () => {
+    const created = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Persisted success.')
+    let saved = false
+    const container = await renderPage(async (input, init) => {
+      const path = new URL(String(input), 'http://localhost').pathname
+      if (path === '/api/analytics/weekly/analyze-stream') {
+        saved = true
+        return new Response(`event: complete\ndata: ${JSON.stringify({ run: created })}\n\n`, {
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }
+      if (saved && path === '/api/analytics/weekly/summaries') return json({ error: 'Summary refresh failed.' }, 503)
+      return baseFetch(() => saved ? [created] : [])(input, init)
+    })
+    const button = [...container.querySelectorAll<HTMLButtonElement>('button')].find((item) => item.textContent === 'Analyze upcoming week')
+    assert(button)
+    await React.act(async () => button.click())
+    await settle()
+    assert.match(container.querySelector('.weekly-run-detail')?.textContent ?? '', /Persisted success/)
+    assert.match(container.textContent ?? '', /Summary refresh failed/)
+    assert.match(container.querySelector('[aria-label="Tracked suggestion record"]')?.textContent ?? '', /1 pending/)
+    assert.equal(container.querySelectorAll('.weekly-run-option').length, 1)
+  })
+
+  it('does not replace a deep link with another run after a temporary detail failure', async () => {
+    const newest = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Newest output.')
+    let linkedReads = 0
+    const container = await renderPage(async (input) => {
+      if (new URL(String(input), 'http://localhost').pathname === `/api/analytics/weekly/runs/${oldRunId}`) {
+        linkedReads++
+        return json({ error: 'Linked detail unavailable.' }, 503)
+      }
+      return baseFetch(() => [newest])(input)
+    }, `/analytics/weekly?run=${oldRunId}`)
+    assert.equal(linkedReads, 1)
+    assert.match(container.textContent ?? '', /Linked detail unavailable/)
+    assert.doesNotMatch(container.querySelector('.weekly-run-detail')?.textContent ?? '', /Newest output/)
+  })
+
+  it('keeps saved runs available without waiting for slow metadata or model health', async () => {
+    const saved = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Independent saved output.')
+    const container = await renderPage(async (input) => {
+      const path = new URL(String(input), 'http://localhost').pathname
+      if (path === '/api/analytics/metadata' || path === '/api/analytics/llm-health') {
+        return new Promise<Response>(() => {})
+      }
+      return baseFetch(() => [saved])(input)
+    })
+    assert.match(container.textContent ?? '', /Independent saved output/)
+    assert.equal(container.querySelector('.weekly-run-option')?.getAttribute('aria-pressed'), 'true')
+  })
+
+  it('does not hide the saved-run browser when a selected detail fails', async () => {
+    const saved = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Saved output.')
+    const container = await renderPage(async (input) => {
+      if (new URL(String(input), 'http://localhost').pathname === `/api/analytics/weekly/runs/${newRunId}`) {
+        return json({ error: 'Detail temporarily unavailable.' }, 503)
+      }
+      return baseFetch(() => [saved])(input)
+    })
+    assert.equal(container.querySelectorAll('.weekly-run-option').length, 1)
+    assert.match(container.textContent ?? '', /Detail temporarily unavailable/)
+    assert.match(container.textContent ?? '', /Retry selected analysis/)
+  })
+
+  it('opens a run deep link outside the first summary page', async () => {
+    const newest = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Newest output.')
+    const linked = weeklyRun(oldRunId, 'Week 2', '2025-09-11T00:00:00.000Z', 'Linked older output.')
+    const container = await renderPage(async (input) => {
+      const path = new URL(String(input), 'http://localhost').pathname
+      return baseFetch(() => path === '/api/analytics/weekly/summaries' ? [newest] : [newest, linked])(input)
+    }, `/analytics/weekly?run=${oldRunId}`)
+    assert.match(container.querySelector('.weekly-run-detail')?.textContent ?? '', /Linked older output/)
+    assert.doesNotMatch(container.querySelector('.weekly-run-detail')?.textContent ?? '', /Newest output/)
+  })
+
   it('runs an upcoming-week analysis and selects the newly saved final output', async () => {
     const created = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Newly generated output.')
     let runs: WeeklyAnalysisRun[] = []

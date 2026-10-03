@@ -7,22 +7,26 @@ import {
   getAnalyticsMetadata,
   getLlmHealth,
   gradeWeeklySuggestions,
-  listWeeklyAnalysisRuns,
+  listWeeklySummaries,
+  getWeeklyRun,
   postWeeklyAnalysisStream,
   readWeeklyAnalysisStream,
   refreshSeasonOdds,
 } from '../api/app-api'
-import type { LlmHealthResponse, WeeklyAnalysisRun } from '../api/contracts'
+import type { WeeklyRunView } from '../api/contracts'
+import type { WeeklyRunSummary, WeeklyRecord } from '../../server/weekly-analysis'
+import { analyticsKey, invalidateAnalyticsReads, seedAnalyticsRead, useAnalyticsRead } from '../data/analytics-repository'
+import { AnalyticsReadStatus } from '../features/analytics/AnalyticsReadStatus'
 import { AnalyticsNav } from '../features/analytics/AnalyticsNav'
 import { StatusMessage } from '../features/dashboard/DashboardComponents'
 
 type WeeklyRunGroup = {
   key: string
   label: string
-  runs: WeeklyAnalysisRun[]
+  runs: WeeklyRunSummary[]
 }
 
-function groupKey(run: WeeklyAnalysisRun) {
+function groupKey(run: Pick<WeeklyRunSummary, 'season' | 'stage' | 'week'>) {
   return `${run.season}\u0000${run.stage ?? ''}\u0000${run.week}`
 }
 
@@ -30,7 +34,7 @@ function isPreseason(stage: string | null) {
   return stage != null && /^pre[\s-]*season$/i.test(stage.trim())
 }
 
-function groupWeeklyRuns(runs: WeeklyAnalysisRun[]): WeeklyRunGroup[] {
+function groupWeeklyRuns(runs: WeeklyRunSummary[]): WeeklyRunGroup[] {
   const groups = new Map<string, WeeklyRunGroup>()
   for (const run of [...runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt))) {
     const key = groupKey(run)
@@ -45,7 +49,7 @@ function groupWeeklyRuns(runs: WeeklyAnalysisRun[]): WeeklyRunGroup[] {
   return [...groups.values()]
 }
 
-function runRecord(run: WeeklyAnalysisRun) {
+function runRecord(run: WeeklyRunView) {
   return {
     wins: run.suggestions.filter((pick) => pick.result === 'win').length,
     losses: run.suggestions.filter((pick) => pick.result === 'loss').length,
@@ -59,7 +63,7 @@ function signed(value: number | null) {
   return `${value > 0 ? '+' : ''}${value}`
 }
 
-function pickSelection(pick: WeeklyAnalysisRun['suggestions'][number]) {
+function pickSelection(pick: WeeklyRunView['suggestions'][number]) {
   if (pick.market === 'total') return `${pick.selection.toUpperCase()} ${pick.lockedLine}`
   const selectedTeam = pick.selection === 'home' ? pick.homeTeamName : pick.awayTeamName
   return `${selectedTeam} ${pick.lockedLine > 0 ? '+' : ''}${pick.lockedLine}`
@@ -67,11 +71,11 @@ function pickSelection(pick: WeeklyAnalysisRun['suggestions'][number]) {
 
 export function WeeklyAnalysisPage() {
   const [searchParams, setSearchParams] = useSearchParams()
-  const [runs, setRuns] = useState<WeeklyAnalysisRun[]>([])
-  const [currentSeason, setCurrentSeason] = useState<number | null>(null)
-  const [hasCurrentSeasonMetadata, setHasCurrentSeasonMetadata] = useState(false)
-  const [llmHealth, setLlmHealth] = useState<LlmHealthResponse | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
+  const [olderPage, setOlderPage] = useState<{
+    key: string; runs: WeeklyRunSummary[]; cursor: { createdAt: string; id: string } | null
+  } | null>(null)
+  const [loadingMoreKey, setLoadingMoreKey] = useState<string | null>(null)
+  const [seasonOverride, setSeasonOverride] = useState<number | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisStatus, setAnalysisStatus] = useState('')
   const [isGrading, setIsGrading] = useState(false)
@@ -81,21 +85,44 @@ export function WeeklyAnalysisPage() {
   const [deletingLossAnalysisId, setDeletingLossAnalysisId] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
   const analysisController = useRef<AbortController | null>(null)
+  const lossController = useRef<AbortController | null>(null)
+  const paginationController = useRef<AbortController | null>(null)
+  const isBusy = isAnalyzing || isGrading || isDeleting || analyzingLossId != null || deletingLossAnalysisId != null
   const selectedRunId = searchParams.get('run')
   const selectedWeekParam = searchParams.get('week')
+  const metadataRead = useAnalyticsRead(analyticsKey('metadata', {}), (signal) => getAnalyticsMetadata(undefined, { signal }), 300_000)
+  const currentSeason = seasonOverride ?? metadataRead.data?.selectedSeason ?? null
+  const summaryKey = analyticsKey('weekly-summary', { season: currentSeason, week: selectedWeekParam })
+  const summaryRead = useAnalyticsRead(summaryKey,
+    (signal) => listWeeklySummaries({ season: currentSeason ?? undefined, week: selectedWeekParam ?? undefined }, { signal }))
+  const healthRead = useAnalyticsRead('health', (signal) => getLlmHealth({ signal }), 5_000, { retainExpired: false })
+  const cursor = olderPage?.key === summaryKey ? olderPage.cursor : undefined
+  const isLoadingMore = loadingMoreKey === summaryKey
+  const runs = useMemo(() => [...new Map([
+    ...summaryRead.data?.runs ?? [], ...(olderPage?.key === summaryKey ? olderPage.runs : []),
+  ].map((run) => [run.id, run])).values()], [summaryRead.data, olderPage, summaryKey])
+  const hasCurrentSeasonMetadata = metadataRead.data?.selectedSeason != null
+  const llmHealth = healthRead.data
+  const isLoading = summaryRead.isLoading
+  const effectiveSeason = currentSeason ?? metadataRead.data?.selectedSeason ?? summaryRead.data?.selectedSeason ?? null
+  const detailId = selectedRunId ?? runs[0]?.id ?? null
+  const detailRead = useAnalyticsRead(detailId ? analyticsKey('weekly-detail', { id: detailId }) : null,
+    (signal) => getWeeklyRun(detailId!, { signal }))
   const currentSeasonRuns = useMemo(
-    () => currentSeason == null
+    () => effectiveSeason == null
       ? []
       : runs
-          .filter((run) => run.season === currentSeason && !isPreseason(run.stage))
+          .filter((run) => run.season === effectiveSeason && !isPreseason(run.stage))
           .sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
-    [currentSeason, runs],
+    [effectiveSeason, runs],
   )
   const weekOptions = useMemo(
-    () => [...new Set(currentSeasonRuns.map((run) => run.week))],
-    [currentSeasonRuns],
+    () => summaryRead.data?.weeks ?? [...new Set(currentSeasonRuns.map((run) => run.week))],
+    [currentSeasonRuns, summaryRead.data],
   )
+  const detail = detailRead.data?.run
   const requestedRun = currentSeasonRuns.find((run) => run.id === selectedRunId)
+    ?? (detail?.season === effectiveSeason && !isPreseason(detail.stage) ? detail : null)
   const selectedWeek = selectedWeekParam && weekOptions.includes(selectedWeekParam)
     ? selectedWeekParam
     : requestedRun?.week ?? weekOptions[0] ?? null
@@ -104,19 +131,11 @@ export function WeeklyAnalysisPage() {
     [currentSeasonRuns, selectedWeek],
   )
   const groups = useMemo(() => groupWeeklyRuns(filteredRuns), [filteredRuns])
-  const selectedRun = filteredRuns.find((run) => run.id === selectedRunId) ?? filteredRuns[0] ?? null
-  const finalRunId = filteredRuns[0]?.id
-  const isFinal = Boolean(selectedRun && finalRunId === selectedRun.id)
+  const selectedRun = detail?.season === effectiveSeason && detail.week === selectedWeek && !isPreseason(detail.stage) ? detail : null
+  const finalRunId = filteredRuns.find((run) => run.isFinal)?.id ?? filteredRuns[0]?.id
+  const isFinal = Boolean(selectedRun && (selectedRun.isFinal ?? finalRunId === selectedRun.id))
   const selectedRecord = selectedRun ? runRecord(selectedRun) : null
-  const overallRecord = useMemo(() => {
-    const suggestions = currentSeasonRuns.flatMap((run) => run.suggestions)
-    return {
-      wins: suggestions.filter((pick) => pick.result === 'win').length,
-      losses: suggestions.filter((pick) => pick.result === 'loss').length,
-      pushes: suggestions.filter((pick) => pick.result === 'push').length,
-      pending: suggestions.filter((pick) => pick.result === 'ungraded').length,
-    }
-  }, [currentSeasonRuns])
+  const overallRecord: WeeklyRecord = summaryRead.data?.record ?? { wins: 0, losses: 0, pushes: 0, pending: 0 }
 
   const setSelection = useCallback((week: string | null, id: string | null) => {
     setSearchParams((current) => {
@@ -130,65 +149,33 @@ export function WeeklyAnalysisPage() {
   }, [setSearchParams])
 
   const reloadRuns = async () => {
-    const payload = await listWeeklyAnalysisRuns()
-    setRuns(payload.runs)
-    return payload.runs
+    paginationController.current?.abort()
+    paginationController.current = null
+    setLoadingMoreKey(null)
+    setOlderPage(null)
   }
-
-  useEffect(() => {
-    const controller = new AbortController()
-    void Promise.allSettled([
-      listWeeklyAnalysisRuns({ signal: controller.signal }),
-      getAnalyticsMetadata(undefined, { signal: controller.signal }),
-    ]).then(([weeklyResult, metadataResult]) => {
-      if (controller.signal.aborted) return
-      const loadedRuns = weeklyResult.status === 'fulfilled' ? weeklyResult.value.runs : []
-      setRuns(loadedRuns)
-      if (weeklyResult.status === 'rejected') {
-        setError(weeklyResult.reason instanceof Error ? weeklyResult.reason.message : 'Could not load weekly analyses.')
-      }
-      if (metadataResult.status === 'fulfilled') {
-        const current = metadataResult.value.selectedSeason
-        const fallback = loadedRuns.length ? Math.max(...loadedRuns.map((run) => run.season)) : null
-        setHasCurrentSeasonMetadata(current != null)
-        setCurrentSeason(current ?? fallback)
-        if (current == null) setError('The current season could not be identified. Saved analyses remain available, but new analysis is disabled.')
-      } else {
-        setHasCurrentSeasonMetadata(false)
-        setCurrentSeason(loadedRuns.length ? Math.max(...loadedRuns.map((run) => run.season)) : null)
-        setError(metadataResult.reason instanceof Error ? metadataResult.reason.message : 'Could not load the current season.')
-      }
-      setIsLoading(false)
-    })
-    void getLlmHealth({ signal: controller.signal }).then((health) => {
-      setLlmHealth(health)
-    }).catch((loadError) => {
-      if (!controller.signal.aborted) {
-        setLlmHealth({
-          status: 'unavailable',
-          code: 'health_request_failed',
-          message: loadError instanceof Error ? loadError.message : 'Could not check the local model.',
-        })
-      }
-    })
-    return () => controller.abort()
-  }, [])
 
   useEffect(() => () => {
     analysisController.current?.abort()
+    lossController.current?.abort()
+    paginationController.current?.abort()
     analysisController.current = null
   }, [])
 
+  useEffect(() => () => paginationController.current?.abort(), [summaryKey])
+
   useEffect(() => {
     if (isLoading) return
-    if (!filteredRuns.length) {
+    if (selectedRunId && (detailRead.isLoading || detailRead.error)) return
+    if (!filteredRuns.length && !requestedRun) {
       if (selectedRunId || selectedWeekParam) setSelection(selectedWeek, null)
       return
     }
-    if (selectedWeekParam !== selectedWeek || selectedRunId !== selectedRun?.id) {
-      setSelection(selectedWeek, selectedRun?.id ?? null)
+    const id = requestedRun?.week === selectedWeek ? requestedRun.id : filteredRuns[0]?.id ?? null
+    if (selectedWeekParam !== selectedWeek || selectedRunId !== id) {
+      setSelection(selectedWeek, id)
     }
-  }, [filteredRuns, isLoading, selectedRun, selectedRunId, selectedWeek, selectedWeekParam, setSelection])
+  }, [detailRead.error, detailRead.isLoading, filteredRuns, isLoading, requestedRun, selectedRunId, selectedWeek, selectedWeekParam, setSelection])
 
   const createAnalysis = async () => {
     if (!currentSeason) return
@@ -202,16 +189,37 @@ export function WeeklyAnalysisPage() {
       await refreshSeasonOdds(currentSeason, { signal: controller.signal })
       const stream = await postWeeklyAnalysisStream(currentSeason, controller.signal)
       let streamError: string | null = null
-      let completedRun: WeeklyAnalysisRun | null = null
+      const completed: { run: WeeklyRunView | null } = { run: null }
       await readWeeklyAnalysisStream(stream, (event) => {
         if (event.type === 'progress') setAnalysisStatus(event.message)
-        if (event.type === 'complete') completedRun = event.run
+        if (event.type === 'complete') completed.run = event.run
         if (event.type === 'error') streamError = event.error
-      })
+      }, controller.signal)
       if (streamError) throw new Error(streamError)
-      if (!completedRun) throw new Error('Weekly analysis ended without a completed run.')
+      if (!completed.run) throw new Error('Weekly analysis ended without a completed run.')
       await reloadRuns()
-      setSelection((completedRun as WeeklyAnalysisRun).week, (completedRun as WeeklyAnalysisRun).id)
+      const saved = completed.run
+      const savedRecord = runRecord(saved)
+      const nextSummaryKey = analyticsKey('weekly-summary', { season: currentSeason, week: saved.week })
+      const previous = summaryRead.data
+      seedAnalyticsRead(nextSummaryKey, {
+        runs: [{
+          id: saved.id, season: saved.season, stage: saved.stage, week: saved.week, model: saved.model,
+          createdAt: saved.createdAt, picks: saved.suggestions.length, record: savedRecord, isFinal: true,
+        }, ...previous?.runs.filter((run) => run.week === saved.week && run.id !== saved.id)
+          .map((run) => groupKey(run) === groupKey(saved) ? { ...run, isFinal: false } : run) ?? []],
+        weeks: [...new Set([saved.week, ...previous?.weeks ?? []])],
+        total: (previous?.total ?? 0) + 1,
+        selectedSeason: saved.season,
+        next: selectedWeekParam === saved.week ? previous?.next ?? null : null,
+        record: {
+          wins: overallRecord.wins + savedRecord.wins, losses: overallRecord.losses + savedRecord.losses,
+          pushes: overallRecord.pushes + savedRecord.pushes, pending: overallRecord.pending + savedRecord.pending,
+        },
+      })
+      invalidateAnalyticsReads(nextSummaryKey, { preserveData: true })
+      seedAnalyticsRead(analyticsKey('weekly-detail', { id: completed.run.id }), { run: { ...completed.run, isFinal: true } })
+      setSelection(completed.run.week, completed.run.id)
     } catch (analysisError) {
       if (!controller.signal.aborted) {
         setError(analysisError instanceof Error ? analysisError.message : 'Could not analyze the upcoming week.')
@@ -245,15 +253,22 @@ export function WeeklyAnalysisPage() {
   }
 
   const analyzeLoss = async (suggestionId: number) => {
+    const controller = new AbortController()
+    lossController.current = controller
     setAnalyzingLossId(suggestionId)
     setError(null)
     setGradingStatus(null)
     try {
-      await analyzeWeeklySuggestionLoss(suggestionId)
+      const result = await analyzeWeeklySuggestionLoss(suggestionId, { signal: controller.signal })
+      if (controller.signal.aborted) return
+      if (selectedRun) seedAnalyticsRead(analyticsKey('weekly-detail', { id: selectedRun.id }), { run: {
+        ...selectedRun, suggestions: selectedRun.suggestions.map((pick) =>
+          pick.id === suggestionId ? { ...pick, lossAnalysis: result.analysis } : pick),
+      } })
       await reloadRuns()
       setGradingStatus('The loss analysis was saved for this game.')
     } catch (analysisError) {
-      setError(analysisError instanceof Error ? analysisError.message : 'Could not analyze this loss.')
+      if (!controller.signal.aborted) setError(analysisError instanceof Error ? analysisError.message : 'Could not analyze this loss.')
     } finally {
       setAnalyzingLossId(null)
     }
@@ -266,6 +281,10 @@ export function WeeklyAnalysisPage() {
     setGradingStatus(null)
     try {
       await deleteWeeklyLossAnalysis(analysisId)
+      if (selectedRun) seedAnalyticsRead(analyticsKey('weekly-detail', { id: selectedRun.id }), { run: {
+        ...selectedRun, suggestions: selectedRun.suggestions.map((pick) =>
+          pick.lossAnalysis?.id === analysisId ? { ...pick, lossAnalysis: null } : pick),
+      } })
       await reloadRuns()
       setGradingStatus('The stored loss analysis was deleted.')
     } catch (deleteError) {
@@ -290,9 +309,23 @@ export function WeeklyAnalysisPage() {
     }
 
     const remaining = runs.filter((run) => run.id !== selectedRun.id)
-    setRuns(remaining)
+    if (summaryRead.data) {
+      const record = runRecord(selectedRun)
+      const canSubtract = (['wins', 'losses', 'pushes', 'pending'] as const)
+        .every((name) => overallRecord[name] >= record[name])
+      seedAnalyticsRead(summaryKey, {
+        ...summaryRead.data, runs: summaryRead.data.runs.filter((run) => run.id !== selectedRun.id),
+        total: Math.max(0, summaryRead.data.total - 1),
+        record: canSubtract ? {
+          wins: overallRecord.wins - record.wins, losses: overallRecord.losses - record.losses,
+          pushes: overallRecord.pushes - record.pushes, pending: overallRecord.pending - record.pending,
+        } : summaryRead.data.record,
+      })
+      invalidateAnalyticsReads(summaryKey, { preserveData: true })
+    }
+    setOlderPage((current) => current ? { ...current, runs: current.runs.filter((run) => run.id !== selectedRun.id) } : null)
     const currentRemaining = remaining
-        .filter((run) => run.season === currentSeason)
+        .filter((run) => run.season === effectiveSeason)
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
     const fallback = currentRemaining.find((run) => groupKey(run) === deletedGroupKey) ?? currentRemaining[0] ?? null
     setSelection(fallback?.week ?? null, fallback?.id ?? null)
@@ -307,6 +340,29 @@ export function WeeklyAnalysisPage() {
     }
   }
 
+  const loadMore = async () => {
+    const next = cursor === undefined ? summaryRead.data?.next : cursor
+    if (!next || isLoadingMore) return
+    const controller = new AbortController()
+    paginationController.current = controller
+    setLoadingMoreKey(summaryKey)
+    try {
+      const page = await listWeeklySummaries({
+        season: currentSeason ?? undefined, week: selectedWeekParam ?? undefined, before: next,
+      }, { signal: controller.signal })
+      if (controller.signal.aborted) return
+      setOlderPage((current) => ({
+        key: summaryKey,
+        runs: [...(current?.key === summaryKey ? current.runs : []), ...page.runs],
+        cursor: page.next,
+      }))
+    } catch (loadError) {
+      if (!controller.signal.aborted) setError(loadError instanceof Error ? loadError.message : 'Could not load older weekly analyses.')
+    } finally {
+      if (paginationController.current === controller) setLoadingMoreKey(null)
+    }
+  }
+
   return (
     <main className="analytics-page weekly-analysis-page">
       <AnalyticsNav />
@@ -317,24 +373,25 @@ export function WeeklyAnalysisPage() {
           <p>Compare saved model outputs, track results, and print a single selected analysis.</p>
         </div>
         <span className={`llm-status ${llmHealth?.status === 'available' ? 'is-online' : ''}`}>
-          <i />{llmHealth?.status === 'available' ? llmHealth.model : 'Local LLM offline'}
+          <i />{llmHealth?.status === 'available' ? llmHealth.model : healthRead.isLoading ? 'Checking local LLM...' : 'Local LLM offline'}
         </span>
       </header>
 
       <section className="panel weekly-toolbar weekly-screen-only">
         <label>
           Analysis season
-          <select value={currentSeason ?? ''} disabled={!currentSeason} onChange={(event) => setCurrentSeason(Number(event.target.value))}>
-            {currentSeason && <option value={currentSeason}>{currentSeason}</option>}
+          <select value={effectiveSeason ?? ''} disabled={!effectiveSeason || isBusy} onChange={(event) => setSeasonOverride(Number(event.target.value))}>
+            {effectiveSeason && <option value={effectiveSeason}>{effectiveSeason}</option>}
           </select>
         </label>
         <label>
           Week
           <select
             value={selectedWeek ?? ''}
-            disabled={!weekOptions.length}
+            disabled={!weekOptions.length || isBusy}
             onChange={(event) => {
               const nextWeek = event.target.value
+              setOlderPage(null)
               const nextRun = currentSeasonRuns.find((run) => run.week === nextWeek) ?? null
               setSelection(nextWeek || null, nextRun?.id ?? null)
             }}
@@ -344,10 +401,10 @@ export function WeeklyAnalysisPage() {
           </select>
         </label>
         <div className="weekly-actions">
-          <button type="button" disabled={!currentSeason || !hasCurrentSeasonMetadata || isAnalyzing || llmHealth?.status !== 'available'} onClick={() => void createAnalysis()}>
+          <button type="button" disabled={!currentSeason || !hasCurrentSeasonMetadata || isBusy || llmHealth?.status !== 'available'} onClick={() => void createAnalysis()}>
             {isAnalyzing ? analysisStatus || 'Analyzing…' : 'Analyze upcoming week'}
           </button>
-          <button type="button" disabled={isGrading || overallRecord.pending === 0} onClick={() => void gradePicks()}>
+          <button type="button" disabled={isBusy || overallRecord.pending === 0} onClick={() => void gradePicks()}>
             {isGrading ? 'Grading…' : 'Grade completed picks'}
           </button>
         </div>
@@ -360,6 +417,12 @@ export function WeeklyAnalysisPage() {
       </section>
 
       {error && <div className="weekly-screen-only"><StatusMessage title="Weekly analysis error" message={error} error /></div>}
+      <div className="weekly-screen-only">
+        <AnalyticsReadStatus title="Weekly analysis" error={summaryRead.error} refreshing={summaryRead.isRefreshing} retry={summaryRead.retry} />
+        <AnalyticsReadStatus title="Selected analysis" error={detailRead.error} refreshing={detailRead.isRefreshing} retry={detailRead.retry} />
+        <AnalyticsReadStatus title="Season metadata" error={metadataRead.error} refreshing={metadataRead.isRefreshing} retry={metadataRead.retry} />
+        <AnalyticsReadStatus title="Local model" error={healthRead.error} retry={healthRead.retry} />
+      </div>
       {gradingStatus && <div className="weekly-screen-only"><StatusMessage title="Weekly grading complete" message={gradingStatus} /></div>}
       {isLoading && <div className="weekly-screen-only"><StatusMessage title="Loading weekly analyses" message="Loading saved model outputs and tracked picks." /></div>}
 
@@ -367,18 +430,19 @@ export function WeeklyAnalysisPage() {
         <aside className="panel weekly-run-browser weekly-screen-only">
           <div className="section-heading">
             <h2>Saved analyses</h2>
-            <span>{runs.length} total</span>
+            <span>{summaryRead.data?.total ?? runs.length} total</span>
           </div>
           {groups.length ? groups.map((group) => (
             <section className="weekly-run-group" key={group.key}>
               <h3>{group.label}</h3>
               {group.runs.map((run) => {
-                const record = runRecord(run)
+                const record = run.record
                 return (
                   <button
                     type="button"
                     className={`weekly-run-option ${selectedRun?.id === run.id ? 'is-active' : ''}`}
                     aria-pressed={selectedRun?.id === run.id}
+                    disabled={isBusy}
                     key={run.id}
                     onClick={() => setSelection(run.week, run.id)}
                   >
@@ -386,12 +450,13 @@ export function WeeklyAnalysisPage() {
                       <strong>{new Date(run.createdAt).toLocaleString()}</strong>
                       {run.id === finalRunId && <b className="final-badge">Final</b>}
                     </span>
-                    <small>{run.suggestions.length} picks · {record.wins}-{record.losses}-{record.pushes} · {record.pending} pending</small>
+                    <small>{run.picks} picks · {record.wins}-{record.losses}-{record.pushes} · {record.pending} pending</small>
                   </button>
                 )
               })}
             </section>
           )) : <p className="empty-state">No upcoming-week analyses have been saved.</p>}
+          {(cursor === undefined ? summaryRead.data?.next : cursor) && <button type="button" disabled={isLoadingMore} onClick={() => void loadMore()}>Load older analyses</button>}
         </aside>
 
         <article className="panel weekly-run-detail weekly-print-area">
@@ -407,7 +472,7 @@ export function WeeklyAnalysisPage() {
               </header>
               <div className="weekly-detail-actions weekly-screen-only">
                 <button type="button" onClick={() => window.print()}>Print analysis</button>
-                <button type="button" className="danger-button" disabled={isDeleting} onClick={() => void removeRun()}>
+                <button type="button" className="danger-button" disabled={isBusy} onClick={() => void removeRun()}>
                   {isDeleting ? 'Deleting…' : 'Delete analysis'}
                 </button>
               </div>
@@ -434,7 +499,7 @@ export function WeeklyAnalysisPage() {
                       <div className="weekly-loss-actions weekly-screen-only">
                         <button
                           type="button"
-                          disabled={llmHealth?.status !== 'available' || analyzingLossId === pick.id}
+                          disabled={llmHealth?.status !== 'available' || isBusy}
                           onClick={() => void analyzeLoss(pick.id)}
                         >
                           {analyzingLossId === pick.id ? 'Analyzing…' : 'Analyze loss'}
@@ -452,7 +517,7 @@ export function WeeklyAnalysisPage() {
                           <button
                             type="button"
                             className="danger-button weekly-screen-only"
-                            disabled={deletingLossAnalysisId === pick.lossAnalysis.id}
+                            disabled={isBusy}
                             onClick={() => void removeLossAnalysis(
                               pick.lossAnalysis!.id,
                               `${pick.awayTeamName} at ${pick.homeTeamName}`,
@@ -493,7 +558,7 @@ export function WeeklyAnalysisPage() {
                 Lines shown are the consensus values locked when this analysis was generated. Model analysis is not betting advice.
               </p>
             </>
-          ) : <p className="empty-state">Select a saved analysis to view its output.</p>}
+          ) : <p className="empty-state">{detailRead.isLoading ? 'Loading selected analysis...' : 'Select a saved analysis to view its output.'}</p>}
         </article>
       </section>}
     </main>

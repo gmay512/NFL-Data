@@ -1,14 +1,14 @@
-import { useEffect, useMemo, useState } from 'react'
-import type { FormEvent } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { FormEvent, MouseEvent } from 'react'
+import { useLocation, useSearchParams } from 'react-router-dom'
 import {
   deleteAnalysisSession,
   getAnalysisSession,
   getAnalyticsMetadata,
   getLlmHealth,
-  listAnalysisSessions,
+  listAnalysisSessionPage,
   postAnalysisFollowUp,
-  queryAnalytics,
+  queryAnalyticsOverview,
   readAnalysisStream,
   renameAnalysisSession,
   runAnalysis,
@@ -20,8 +20,9 @@ import type {
   AnalyticsFilters,
   AnalyticsPreset,
   AnalyticsSnapshot,
-  LlmHealthResponse,
 } from '../api/contracts'
+import { analyticsKey, invalidateAnalyticsReads, useAnalyticsRead } from '../data/analytics-repository'
+import { AnalyticsReadStatus } from '../features/analytics/AnalyticsReadStatus'
 import { AnalyticsNav } from '../features/analytics/AnalyticsNav'
 import { StatusMessage } from '../features/dashboard/DashboardComponents'
 
@@ -106,19 +107,32 @@ function compareGames(left: GameResult, right: GameResult, field: GameSortField,
 
 export function AnalyticsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
-  const [metadata, setMetadata] = useState<AnalyticsFilterMetadata | null>(null)
-  const [snapshot, setSnapshot] = useState<AnalyticsSnapshot | null>(null)
-  const [sessions, setSessions] = useState<AnalysisSessionSummary[]>([])
+  const location = useLocation()
+  const [olderSessions, setOlderSessions] = useState<AnalysisSessionSummary[]>([])
+  const [sessionCursor, setSessionCursor] = useState<{ updatedAt: string; id: string } | null | undefined>()
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [activeSession, setActiveSession] = useState<AnalysisSession | null>(null)
-  const [llmHealth, setLlmHealth] = useState<LlmHealthResponse | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [isStreaming, setIsStreaming] = useState(false)
   const [pendingAnswer, setPendingAnswer] = useState('')
+  const [answerSaved, setAnswerSaved] = useState(false)
   const [question, setQuestion] = useState('')
   const [lastQuestion, setLastQuestion] = useState('')
+  const [canRetryQuestion, setCanRetryQuestion] = useState(false)
   const [streamController, setStreamController] = useState<AbortController | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [conversationError, setConversationError] = useState<string | null>(null)
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false)
+  const [isOpeningSession, setIsOpeningSession] = useState(false)
+  const [requestedSessionId, setRequestedSessionId] = useState<string | null>(null)
+  const sessionController = useRef<AbortController | null>(null)
+  const reportController = useRef<AbortController | null>(null)
+  const streamingController = useRef<AbortController | null>(null)
+  const messagesController = useRef<AbortController | null>(null)
+  const paginationController = useRef<AbortController | null>(null)
+  const sessionGeneration = useRef(0)
+  const [gameDraft, setGameDraft] = useState<{ locationKey: string; value: string } | null>(null)
+  const gameInput = gameDraft?.locationKey === location.key ? gameDraft.value : searchParams.get('game') ?? ''
   const [teamSort, setTeamSort] = useState<{ field: TeamSortField; direction: SortDirection }>({
     field: 'team',
     direction: 1,
@@ -144,12 +158,30 @@ export function AnalyticsPage() {
     ...(gameId ? { gameId } : {}),
   } : null, [comparisonTeamId, gameId, season, stage, teamId, week])
   const preset = filters ? selectedPreset(filters) : 'season_overview'
+  const metadataRead = useAnalyticsRead(analyticsKey('metadata', { season }),
+    (signal) => getAnalyticsMetadata(season, { signal }), 300_000)
+  const sessionsRead = useAnalyticsRead('sessions:initial', (signal) => listAnalysisSessionPage(undefined, { signal }))
+  const overviewRead = useAnalyticsRead(filters ? analyticsKey('overview', { ...filters, preset }) : null,
+    (signal) => queryAnalyticsOverview(preset, filters!, { signal }))
+  const healthRead = useAnalyticsRead('health', (signal) => getLlmHealth({ signal }), 5_000, { retainExpired: false })
+  const metadata = metadataRead.data
+  const sessions = [...new Map([...sessionsRead.data?.sessions ?? [], ...olderSessions]
+    .map((session) => [session.id, session])).values()]
+  const snapshot = overviewRead.data?.snapshot ?? null
+  const llmHealth = healthRead.data
+  const isLoading = filters ? overviewRead.isLoading : metadataRead.isLoading
 
   const setFilter = (name: string, value: string) => {
     const next = new URLSearchParams(searchParams)
+    if (name !== 'season' && gameDraft?.locationKey === location.key) {
+      if (gameDraft.value) next.set('game', gameDraft.value)
+      else next.delete('game')
+      setGameDraft(null)
+    }
     if (value) next.set(name, value)
     else next.delete(name)
     if (name === 'season') {
+      setGameDraft(null)
       next.delete('stage')
       next.delete('week')
       next.delete('game')
@@ -159,80 +191,85 @@ export function AnalyticsPage() {
   }
 
   const reloadSessions = async () => {
-    const payload = await listAnalysisSessions()
-    setSessions(payload.sessions)
+    paginationController.current?.abort()
+    paginationController.current = null
+    setIsLoadingMore(false)
+    setOlderSessions([])
+    setSessionCursor(undefined)
+    invalidateAnalyticsReads('sessions', { preserveData: true })
   }
 
   useEffect(() => {
-    const controller = new AbortController()
-    void Promise.all([
-      getAnalyticsMetadata(season, { signal: controller.signal }),
-      listAnalysisSessions({ signal: controller.signal }),
-    ]).then(([nextMetadata, saved]) => {
-      setMetadata(nextMetadata)
-      setSessions(saved.sessions)
-      if (!season && nextMetadata.selectedSeason) {
+      if (!season && metadata?.selectedSeason) {
         setSearchParams((current) => {
           const next = new URLSearchParams(current)
-          next.set('season', String(nextMetadata.selectedSeason))
+          next.set('season', String(metadata.selectedSeason))
           return next
         }, { replace: true })
       }
-    }).catch((loadError) => {
-      if (!controller.signal.aborted) setError(loadError instanceof Error ? loadError.message : 'Could not load analytics.')
-    })
-    return () => controller.abort()
-  }, [season, setSearchParams])
+  }, [metadata, season, setSearchParams])
 
   useEffect(() => {
-    const controller = new AbortController()
-    void getLlmHealth({ signal: controller.signal }).then(setLlmHealth).catch((loadError) => {
-      if (!controller.signal.aborted) {
-        setLlmHealth({
-          status: 'unavailable',
-          code: 'health_request_failed',
-          message: loadError instanceof Error ? loadError.message : 'Could not check the local model.',
-        })
-      }
-    })
-    return () => controller.abort()
+    if (gameInput === (searchParams.get('game') ?? '')) return
+    const timer = window.setTimeout(() => {
+      setSearchParams((current) => {
+        const next = new URLSearchParams(current)
+        if (gameInput) next.set('game', gameInput)
+        else next.delete('game')
+        return next
+      }, { replace: true })
+      setGameDraft(null)
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [gameInput, searchParams, setSearchParams])
+
+  useEffect(() => () => {
+    sessionGeneration.current++
+    sessionController.current?.abort()
+    reportController.current?.abort()
+    streamingController.current?.abort()
+    messagesController.current?.abort()
+    paginationController.current?.abort()
   }, [])
 
   useEffect(() => {
     if (!linkedSessionId) return
+    sessionController.current?.abort()
+    streamingController.current?.abort()
+    messagesController.current?.abort()
+    reportController.current?.abort()
+    sessionGeneration.current++
     const controller = new AbortController()
-    void getAnalysisSession(linkedSessionId, { signal: controller.signal }).then((payload) => {
+    sessionController.current = controller
+    void Promise.resolve().then(async () => {
+      if (controller.signal.aborted) return
+      setRequestedSessionId(linkedSessionId)
+      setIsOpeningSession(true)
+      setIsAnalyzing(false)
+      setIsStreaming(false)
+      setStreamController(null)
+      setActiveSession(null)
+      setPendingAnswer('')
+      setAnswerSaved(false)
+      setLastQuestion('')
+      setCanRetryQuestion(false)
+      setConversationError(null)
+      messagesController.current = null
+      setIsLoadingMessages(false)
+      const payload = await getAnalysisSession(linkedSessionId, { signal: controller.signal })
+      if (controller.signal.aborted) return
       setActiveSession(payload.session)
       setPendingAnswer('')
-      setError(null)
+      setConversationError(null)
     }).catch((sessionError) => {
       if (!controller.signal.aborted) {
-        setError(sessionError instanceof Error ? sessionError.message : 'Could not load the linked analysis session.')
+        setConversationError(sessionError instanceof Error ? sessionError.message : 'Could not load the linked analysis session.')
       }
+    }).finally(() => {
+      if (sessionController.current === controller) setIsOpeningSession(false)
     })
     return () => controller.abort()
   }, [linkedSessionId])
-
-  useEffect(() => {
-    if (!filters) return
-    let cancelled = false
-    void Promise.resolve().then(() => {
-      if (cancelled) return null
-      setIsLoading(true)
-      setError(null)
-      setSnapshot(null)
-      return queryAnalytics(preset, filters)
-    }).then((payload) => {
-      if (!cancelled && payload) setSnapshot(payload.snapshot)
-    }).catch((loadError) => {
-      if (!cancelled) setError(loadError instanceof Error ? loadError.message : 'Could not calculate analytics.')
-    }).finally(() => {
-      if (!cancelled) setIsLoading(false)
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [filters, preset])
 
   const sortedTeamTrends = useMemo(() => {
     return [...(snapshot?.teamTrends.items ?? [])]
@@ -273,47 +310,162 @@ export function AnalyticsPage() {
 
   const createReport = async (requestedPreset: AnalyticsPreset) => {
     if (!filters) return
+    sessionController.current?.abort()
+    streamingController.current?.abort()
+    messagesController.current?.abort()
+    messagesController.current = null
+    setIsLoadingMessages(false)
+    sessionGeneration.current++
+    const controller = new AbortController()
+    reportController.current = controller
     setIsAnalyzing(true)
     setError(null)
     try {
-      const payload = await runAnalysis(defaultTitle(requestedPreset, filters, metadata), requestedPreset, filters)
+      const payload = await runAnalysis(defaultTitle(requestedPreset, filters, metadata), requestedPreset, filters, { signal: controller.signal })
+      if (controller.signal.aborted) return
+      streamingController.current?.abort()
+      sessionController.current?.abort()
+      sessionGeneration.current++
       setActiveSession(payload.session)
+      setRequestedSessionId(payload.session.id)
+      setPendingAnswer('')
+      setAnswerSaved(false)
+      setConversationError(null)
+      setLastQuestion('')
+      setCanRetryQuestion(false)
+      setCanRetryQuestion(false)
+      setIsStreaming(false)
+      setStreamController(null)
+      setIsOpeningSession(false)
       await reloadSessions()
     } catch (analysisError) {
-      setError(analysisError instanceof Error ? analysisError.message : 'Could not run local analysis.')
+      if (!controller.signal.aborted) setError(analysisError instanceof Error ? analysisError.message : 'Could not run local analysis.')
     } finally {
-      setIsAnalyzing(false)
+      if (reportController.current === controller) {
+        reportController.current = null
+        setIsAnalyzing(false)
+      }
     }
   }
 
-  const openSession = async (id: string) => {
+  const openSession = useCallback(async (event: MouseEvent<HTMLButtonElement>) => {
+    const id = event.currentTarget.dataset.sessionId
+    if (!id) {
+      setConversationError('The saved analysis identifier is missing.')
+      return
+    }
+    sessionController.current?.abort()
+    streamingController.current?.abort()
+    messagesController.current?.abort()
+    messagesController.current = null
+    setIsLoadingMessages(false)
+    reportController.current?.abort()
+    const controller = new AbortController()
+    sessionController.current = controller
+    sessionGeneration.current++
+    setRequestedSessionId(id)
+    setIsOpeningSession(true)
+    setActiveSession(null)
+    setPendingAnswer('')
+    setAnswerSaved(false)
+    setIsAnalyzing(false)
+    setIsStreaming(false)
+    setStreamController(null)
+    setLastQuestion('')
+    setConversationError(null)
     try {
-      const payload = await getAnalysisSession(id)
+      const payload = await getAnalysisSession(id, { signal: controller.signal })
+      if (controller.signal.aborted) return
       setActiveSession(payload.session)
       setPendingAnswer('')
-      setError(null)
     } catch (sessionError) {
-      setError(sessionError instanceof Error ? sessionError.message : 'Could not load analysis session.')
+      if (!controller.signal.aborted) setConversationError(sessionError instanceof Error ? sessionError.message : 'Could not load analysis session.')
+    } finally {
+      if (sessionController.current === controller) setIsOpeningSession(false)
+    }
+  }, [])
+
+  const loadMoreSessions = async () => {
+    const cursor = sessionCursor === undefined ? sessionsRead.data?.next : sessionCursor
+    if (!cursor || isLoadingMore) return
+    const controller = new AbortController()
+    paginationController.current = controller
+    setIsLoadingMore(true)
+    try {
+      const page = await listAnalysisSessionPage(cursor, { signal: controller.signal })
+      if (controller.signal.aborted) return
+      setOlderSessions((current) => [...current, ...page.sessions.filter((item) => !current.some((saved) => saved.id === item.id))])
+      setSessionCursor(page.next)
+    } catch (loadError) {
+      if (!controller.signal.aborted) setError(loadError instanceof Error ? loadError.message : 'Could not load older analyses.')
+    } finally {
+      if (paginationController.current === controller) setIsLoadingMore(false)
     }
   }
 
-  const renameSession = async (session: AnalysisSessionSummary) => {
+  const loadOlderMessages = async () => {
+    if (!activeSession?.nextMessageId || isLoadingMessages || isOpeningSession || isAnalyzing || isStreaming) return
+    setIsLoadingMessages(true)
+    setCanRetryQuestion(false)
+    setConversationError(null)
+    const selected = activeSession
+    const generation = sessionGeneration.current
+    const controller = new AbortController()
+    messagesController.current = controller
+    try {
+      const payload = await getAnalysisSession(selected.id, { signal: controller.signal, beforeMessage: selected.nextMessageId ?? undefined })
+      if (controller.signal.aborted || generation !== sessionGeneration.current) return
+      setActiveSession((current) => current?.id === selected.id ? {
+        ...current, nextMessageId: payload.session.nextMessageId,
+        messages: [...new Map([...payload.session.messages, ...current.messages].map((message) => [message.id, message])).values()],
+      } : current)
+    } catch (loadError) {
+      if (!controller.signal.aborted && generation === sessionGeneration.current) {
+        setConversationError(loadError instanceof Error ? loadError.message : 'Could not load older messages.')
+      }
+    } finally {
+      if (messagesController.current === controller) setIsLoadingMessages(false)
+    }
+  }
+
+  const renameSession = async (event: MouseEvent<HTMLButtonElement>) => {
+    const session = sessions.find((item) => item.id === event.currentTarget.dataset.sessionId)
+    if (!session) {
+      setError('The saved analysis could not be found.')
+      return
+    }
     const title = window.prompt('Analysis name', session.title)?.trim()
     if (!title || title === session.title) return
     try {
       await renameAnalysisSession(session.id, title)
-      if (activeSession?.id === session.id) setActiveSession({ ...activeSession, title })
+      setActiveSession((current) => current?.id === session.id ? { ...current, title } : current)
       await reloadSessions()
     } catch (renameError) {
       setError(renameError instanceof Error ? renameError.message : 'Could not rename analysis.')
     }
   }
 
-  const removeSession = async (session: AnalysisSessionSummary) => {
+  const removeSession = async (event: MouseEvent<HTMLButtonElement>) => {
+    const session = sessions.find((item) => item.id === event.currentTarget.dataset.sessionId)
+    if (!session) {
+      setError('The saved analysis could not be found.')
+      return
+    }
     if (!window.confirm(`Delete "${session.title}"?`)) return
     try {
       await deleteAnalysisSession(session.id)
-      if (activeSession?.id === session.id) setActiveSession(null)
+      if (activeSession?.id === session.id || requestedSessionId === session.id) {
+        sessionGeneration.current++
+        sessionController.current?.abort()
+        messagesController.current?.abort()
+        streamingController.current?.abort()
+        setRequestedSessionId(null)
+        setPendingAnswer('')
+        setIsOpeningSession(false)
+        setIsStreaming(false)
+        setConversationError(null)
+      }
+      setActiveSession((current) => current?.id === session.id ? null : current)
       await reloadSessions()
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : 'Could not delete analysis.')
@@ -322,35 +474,52 @@ export function AnalyticsPage() {
 
   const submitQuestion = async (event?: FormEvent, retryQuestion?: string) => {
     event?.preventDefault()
-    if (!activeSession) return
+    if (!activeSession || isStreaming || isAnalyzing || isOpeningSession) return
     const nextQuestion = (retryQuestion ?? question).trim()
     if (!nextQuestion) return
     const controller = new AbortController()
+    streamingController.current = controller
+    const generation = sessionGeneration.current
     setStreamController(controller)
     setIsStreaming(true)
     setPendingAnswer('')
+    setAnswerSaved(false)
     setLastQuestion(nextQuestion)
     setQuestion('')
-    setError(null)
+    setConversationError(null)
+    setCanRetryQuestion(false)
+    let exchangeSaved = false
     try {
       const stream = await postAnalysisFollowUp(activeSession.id, nextQuestion, controller.signal)
       let streamError: string | null = null
       await readAnalysisStream(stream, (streamEvent) => {
+        if (controller.signal.aborted || generation !== sessionGeneration.current) return
         if (streamEvent.type === 'content') setPendingAnswer((current) => current + streamEvent.content)
         if (streamEvent.type === 'error') streamError = streamEvent.error
-      })
+        if (streamEvent.type === 'complete') {
+          exchangeSaved = true
+          setAnswerSaved(true)
+          setLastQuestion('')
+        }
+      }, controller.signal)
       if (streamError) throw new Error(streamError)
-      const payload = await getAnalysisSession(activeSession.id)
+      const payload = await getAnalysisSession(activeSession.id, { signal: controller.signal })
+      if (controller.signal.aborted || generation !== sessionGeneration.current) return
       setActiveSession(payload.session)
       setPendingAnswer('')
       await reloadSessions()
     } catch (streamError) {
       if (!controller.signal.aborted) {
-        setError(streamError instanceof Error ? streamError.message : 'The local analysis stream failed.')
+        const message = streamError instanceof Error ? streamError.message : 'The local analysis stream failed.'
+        setConversationError(exchangeSaved ? `The reply was saved, but the conversation could not be refreshed: ${message}` : message)
+        setCanRetryQuestion(!exchangeSaved)
       }
     } finally {
-      setIsStreaming(false)
-      setStreamController(null)
+      if (streamingController.current === controller) {
+        streamingController.current = null
+        setIsStreaming(false)
+        setStreamController(null)
+      }
     }
   }
 
@@ -371,7 +540,7 @@ export function AnalyticsPage() {
           <p>Review closing consensus spread and total outcomes. Figures are descriptive historical analysis, not betting advice.</p>
         </div>
         <span className={`llm-status ${llmHealth?.status === 'available' ? 'is-online' : ''}`}>
-          <i />{llmHealth?.status === 'available' ? llmHealth.model : 'Local LLM offline'}
+          <i />{llmHealth?.status === 'available' ? llmHealth.model : healthRead.isLoading ? 'Checking local LLM...' : 'Local LLM offline'}
         </span>
       </header>
 
@@ -395,11 +564,15 @@ export function AnalyticsPage() {
           <option value="">No comparison</option>
           {(metadata?.teams ?? []).filter((team) => team.id !== teamId).map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
         </select></label>
-        <label>Game ID<input type="number" min="1" value={gameId ?? ''} placeholder="All games" onChange={(event) => setFilter('game', event.target.value)} /></label>
+        <label>Game ID<input type="number" min="1" value={gameInput} placeholder="All games" onChange={(event) => setGameDraft({ locationKey: location.key, value: event.target.value })} /></label>
       </section>
 
       {error && <StatusMessage title="Analytics error" message={error} error />}
-      {isLoading && <StatusMessage title="Calculating analytics" message="Loading deterministic results and supporting context." />}
+      <AnalyticsReadStatus title="Analytics" error={overviewRead.error} refreshing={overviewRead.isRefreshing} retry={overviewRead.retry} />
+      <AnalyticsReadStatus title="Filters" error={metadataRead.error} refreshing={metadataRead.isRefreshing} retry={metadataRead.retry} />
+      <AnalyticsReadStatus title="Saved analyses" error={sessionsRead.error} refreshing={sessionsRead.isRefreshing} retry={sessionsRead.retry} />
+      <AnalyticsReadStatus title="Local model" error={healthRead.error} retry={healthRead.retry} />
+      {isLoading && <StatusMessage title="Calculating analytics" message="Loading closing-line results and team trends." />}
       {!isLoading && snapshot && <section className="analytics-kpis">
         <article className="stat-card"><span className="stat-label">Completed games</span><p className="stat-value">{snapshot.summary.games}</p></article>
         <article className="stat-card"><span className="stat-label">Over rate</span><p className="stat-value">{percent(snapshot.summary.totals.overRate)}</p><small>{snapshot.summary.totals.overs}-{snapshot.summary.totals.unders}-{snapshot.summary.totals.pushes}</small></article>
@@ -423,23 +596,28 @@ export function AnalyticsPage() {
           <aside className="panel saved-analyses">
             <div className="section-heading"><h2>Saved analyses</h2></div>
             {sessions.length ? sessions.map((session) => <div className={`saved-analysis ${activeSession?.id === session.id ? 'is-active' : ''}`} key={session.id}>
-              <button className="saved-analysis-open" type="button" onClick={() => void openSession(session.id)}>
+              <button className="saved-analysis-open" data-session-id={session.id} type="button" onClick={openSession}>
                 <strong>{session.title}</strong><small>{presetLabel(session.preset)} · {session.filters.season}</small>
               </button>
-              <button type="button" aria-label={`Rename ${session.title}`} onClick={() => void renameSession(session)}>✎</button>
-              <button type="button" aria-label={`Delete ${session.title}`} onClick={() => void removeSession(session)}>×</button>
-            </div>) : <p className="empty-state">No saved analyses yet.</p>}
+              <button type="button" data-session-id={session.id} disabled={isAnalyzing || isStreaming} aria-label={`Rename ${session.title}`} onClick={renameSession}>✎</button>
+              <button type="button" data-session-id={session.id} disabled={isAnalyzing || isStreaming} aria-label={`Delete ${session.title}`} onClick={removeSession}>×</button>
+            </div>) : <p className="empty-state">{sessionsRead.isLoading ? 'Loading saved analyses...' : 'No saved analyses yet.'}</p>}
+            {(sessionCursor === undefined ? sessionsRead.data?.next : sessionCursor) && <button type="button" disabled={isLoadingMore} onClick={() => void loadMoreSessions()}>Load older analyses</button>}
           </aside>
         </div>
 
         <article className="panel analysis-chat">
+          {conversationError && <StatusMessage title="Conversation error" message={conversationError} error />}
+          {conversationError && requestedSessionId && !canRetryQuestion && <button type="button" data-session-id={requestedSessionId} onClick={openSession}>Retry conversation</button>}
+          {isOpeningSession && <StatusMessage title="Loading conversation" message="Loading the selected saved analysis." />}
           {activeSession ? <>
             <header><div><p className="eyebrow">{presetLabel(activeSession.preset)}</p><h2>{activeSession.title}</h2></div><span>{activeSession.model}</span></header>
             <div className="analysis-messages">
+              {activeSession.nextMessageId && <button type="button" disabled={isLoadingMessages || isAnalyzing || isStreaming} onClick={() => void loadOlderMessages()}>Load older messages</button>}
               {activeSession.messages.map((message) => <div className={`analysis-message is-${message.role}`} key={message.id}>
                 <strong>{message.role === 'assistant' ? 'Local model' : 'You'}</strong><p>{message.content}</p>
               </div>)}
-              {pendingAnswer && <div className="analysis-message is-assistant is-streaming"><strong>Local model</strong><p>{pendingAnswer}</p></div>}
+              {pendingAnswer && <div className={`analysis-message is-assistant ${isStreaming ? 'is-streaming' : ''}`}><strong>{answerSaved ? 'Local model (saved)' : isStreaming ? 'Local model' : 'Local model (save not confirmed)'}</strong><p>{pendingAnswer}</p></div>}
             </div>
             <details className="grounding-details"><summary>Grounding details</summary><pre>{JSON.stringify({
               filters: activeSession.filters,
@@ -452,10 +630,10 @@ export function AnalyticsPage() {
               },
             }, null, 2)}</pre></details>
             <form className="analysis-chat-form" onSubmit={(event) => void submitQuestion(event)}>
-              <textarea value={question} maxLength={4000} disabled={isStreaming} placeholder="Ask a follow-up grounded in this saved dataset…" onChange={(event) => setQuestion(event.target.value)} />
+              <textarea value={question} maxLength={4000} disabled={isStreaming || isAnalyzing || isOpeningSession} placeholder="Ask a follow-up grounded in this saved dataset…" onChange={(event) => setQuestion(event.target.value)} />
               <div>
-                {isStreaming ? <button type="button" onClick={() => streamController?.abort()}>Stop</button> : <button type="submit" disabled={!question.trim() || llmHealth?.status !== 'available'}>Send</button>}
-                {!isStreaming && error && lastQuestion && <button type="button" onClick={() => void submitQuestion(undefined, lastQuestion)}>Retry</button>}
+                {isStreaming ? <button type="button" onClick={() => streamController?.abort()}>Stop</button> : <button type="submit" disabled={isAnalyzing || isOpeningSession || !question.trim() || llmHealth?.status !== 'available'}>Send</button>}
+                {!isStreaming && canRetryQuestion && conversationError && lastQuestion && <button type="button" onClick={() => void submitQuestion(undefined, lastQuestion)}>Retry</button>}
               </div>
             </form>
           </> : <div className="analysis-chat-empty"><h2>Grounded conversation</h2><p>Open or generate a saved analysis to ask follow-up questions against its immutable data snapshot.</p></div>}

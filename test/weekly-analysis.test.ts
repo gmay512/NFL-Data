@@ -495,6 +495,7 @@ describe('weekly analysis history', () => {
       }
       order() { return this }
       limit() { return this }
+      range() { return this }
       then<TResult1 = { data: []; error: null }, TResult2 = never>(
         onfulfilled?: ((value: { data: []; error: null }) => TResult1 | PromiseLike<TResult1>) | null,
         onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
@@ -526,6 +527,7 @@ describe('weekly analysis history', () => {
       neq() { return this }
       lte() { return this }
       order() { return this }
+      range() { return this }
       then<TResult1 = { data: Array<{ game_id: number }>; error: null }, TResult2 = never>(
         onfulfilled?: ((value: { data: Array<{ game_id: number }>; error: null }) => TResult1 | PromiseLike<TResult1>) | null,
         onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,

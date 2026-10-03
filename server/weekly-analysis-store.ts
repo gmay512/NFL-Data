@@ -5,6 +5,8 @@ import type {
   WeeklyAnalysisStore,
   WeeklyModelAnalysis,
   WeeklySuggestion,
+  WeeklyRunView,
+  WeeklyRunSummaries,
 } from './weekly-analysis'
 import {
   WEEKLY_LOSS_ANALYSIS_VERSION,
@@ -13,6 +15,7 @@ import {
   type WeeklyLossAnalysis,
   type WeeklyLossEvidence,
 } from './weekly-loss-analysis'
+import { AnalyticsDatabaseError, readAllRows } from './analytics-reads'
 
 type RunRow = {
   id: string
@@ -64,21 +67,24 @@ type LossAnalysisRow = {
 }
 
 function throwError(error: { message: string } | null) {
-  if (error) throw new Error(error.message)
+  if (error) throw new AnalyticsDatabaseError('Weekly database request failed', error)
 }
 
-function lossAnalysis(row: LossAnalysisRow): WeeklyLossAnalysis {
+function lossMetadata(row: Omit<LossAnalysisRow, 'evidence_snapshot'>) {
   return {
     id: Number(row.id),
     suggestionId: Number(row.suggestion_id),
     analysisVersion: Number(row.analysis_version),
     model: row.model_name,
-    evidence: row.evidence_snapshot,
     summary: row.summary,
     clues: row.clues,
     missingMetrics: row.missing_metrics ?? [],
     createdAt: row.created_at,
   }
+}
+
+function lossAnalysis(row: LossAnalysisRow): WeeklyLossAnalysis {
+  return { ...lossMetadata(row), evidence: row.evidence_snapshot }
 }
 
 function suggestion(row: SuggestionRow, analysis: WeeklyLossAnalysis | null = null): WeeklySuggestion {
@@ -124,6 +130,11 @@ function run(row: RunRow, suggestions: WeeklySuggestion[]): WeeklyAnalysisRun {
   }
 }
 
+const suggestionColumns = 'id,run_id,game_id,season,stage,week,kickoff_at,away_team_id,away_team_name,home_team_id,home_team_name,market,selection,locked_line,confidence,rationale,supporting_game_ids,result,result_delta,final_away_score,final_home_score,graded_at,created_at'
+const lossColumns = 'id,suggestion_id,analysis_version,model_name,evidence_snapshot,summary,clues,missing_metrics,created_at'
+const lossViewColumns = 'id,suggestion_id,analysis_version,model_name,metrics:evidence_snapshot->metrics,summary,clues,missing_metrics,created_at'
+const runColumns = 'id,season,stage,week,model_name,summary,created_at'
+
 export function gradeWeeklySuggestion(
   pick: WeeklySuggestion,
   awayScore: number,
@@ -143,6 +154,46 @@ export function gradeWeeklySuggestion(
 }
 
 export function createWeeklyAnalysisStore(client: SupabaseClient): WeeklyAnalysisStore {
+  const get = async (id: string, signal?: AbortSignal) => {
+    let query = client.from('betting_analysis_runs')
+      .select(`${runColumns},context_snapshot`).eq('id', id)
+    if (signal) query = query.abortSignal(signal)
+    const { data, error } = await query.maybeSingle()
+    throwError(error)
+    if (!data) return null
+    const suggestions = await readSuggestions([id], signal)
+    return run(data as RunRow, suggestions)
+  }
+
+  const readSuggestionRows = (ids: string[], signal?: AbortSignal) =>
+    readAllRows<SuggestionRow>((from, to) => {
+      let query = client.from('betting_suggestions').select(suggestionColumns)
+        .in('run_id', ids).order('id').range(from, to)
+      if (signal) query = query.abortSignal(signal)
+      return query
+    }, 'Could not load weekly picks')
+
+  const readLossRows = async <T>(rows: SuggestionRow[], columns: string, signal?: AbortSignal) => {
+    const analyses: T[] = []
+    for (let index = 0; index < rows.length; index += 200) {
+      analyses.push(...await readAllRows<T>(async (from, to) => {
+        let query = client.from('betting_suggestion_loss_analyses').select(columns)
+          .in('suggestion_id', rows.slice(index, index + 200).map((row) => row.id)).order('id').range(from, to)
+        if (signal) query = query.abortSignal(signal)
+        const { data, error } = await query
+        return { data: data as T[] | null, error }
+      }, 'Could not load saved loss analyses'))
+    }
+    return analyses
+  }
+
+  const readSuggestions = async (ids: string[], signal?: AbortSignal) => {
+    const rows = await readSuggestionRows(ids, signal)
+    const analyses = await readLossRows<LossAnalysisRow>(rows, lossColumns, signal)
+    const bySuggestion = new Map(analyses.map((row) => [Number(row.suggestion_id), lossAnalysis(row)]))
+    return rows.map((row) => suggestion(row, bySuggestion.get(Number(row.id)) ?? null))
+  }
+
   const list = async () => {
     const { data: runData, error: runError } = await client
       .from('betting_analysis_runs')
@@ -154,30 +205,11 @@ export function createWeeklyAnalysisStore(client: SupabaseClient): WeeklyAnalysi
     const rows = (runData ?? []) as RunRow[]
     if (!rows.length) return []
 
-    const { data: suggestionData, error: suggestionError } = await client
-      .from('betting_suggestions')
-      .select('id,run_id,game_id,season,stage,week,kickoff_at,away_team_id,away_team_name,home_team_id,home_team_name,market,selection,locked_line,confidence,rationale,supporting_game_ids,result,result_delta,final_away_score,final_home_score,graded_at,created_at')
-      .in('run_id', rows.map((row) => row.id))
-      .order('id')
-    throwError(suggestionError)
-    const suggestionRows = (suggestionData ?? []) as SuggestionRow[]
-    const analysisBySuggestion = new Map<number, WeeklyLossAnalysis>()
-    if (suggestionRows.length) {
-      const { data: analysisData, error: analysisError } = await client
-        .from('betting_suggestion_loss_analyses')
-        .select('id,suggestion_id,analysis_version,model_name,evidence_snapshot,summary,clues,missing_metrics,created_at')
-        .in('suggestion_id', suggestionRows.map((row) => row.id))
-        .order('id')
-      throwError(analysisError)
-      for (const row of (analysisData ?? []) as LossAnalysisRow[]) {
-        analysisBySuggestion.set(Number(row.suggestion_id), lossAnalysis(row))
-      }
-    }
     const byRun = new Map<string, WeeklySuggestion[]>()
-    for (const row of suggestionRows) {
-      const items = byRun.get(row.run_id) ?? []
-      items.push(suggestion(row, analysisBySuggestion.get(Number(row.id)) ?? null))
-      byRun.set(row.run_id, items)
+    for (const pick of await readSuggestions(rows.map((row) => row.id))) {
+      const items = byRun.get(pick.runId) ?? []
+      items.push(pick)
+      byRun.set(pick.runId, items)
     }
     return rows.map((row) => run(row, byRun.get(row.id) ?? []))
   }
@@ -212,13 +244,68 @@ export function createWeeklyAnalysisStore(client: SupabaseClient): WeeklyAnalysi
         requested_suggestions: suggestions,
       })
       throwError(error)
-      const runs = await list()
-      const saved = runs.find((item) => item.id === data)
+      const saved = await get(String(data))
       if (!saved) throw new Error('Saved weekly analysis could not be reloaded.')
       return saved
     },
 
     list,
+    get,
+
+    async summaries(options) {
+      const limit = options.limit ?? 25
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError('Weekly summary page size must be from 1 through 100.')
+      let query = client.rpc('get_weekly_analysis_summaries', {
+        requested_season: options.season ?? null,
+        requested_week: options.week ?? null,
+        before_created_at: options.before?.createdAt ?? null,
+        before_id: options.before?.id ?? null,
+        page_size: limit,
+      })
+      if (options.signal) query = query.abortSignal(options.signal)
+      const { data, error } = await query
+      throwError(error)
+      if (!data || typeof data !== 'object' || !Array.isArray(data.runs)
+        || !Array.isArray(data.weeks) || !data.record) {
+        throw new Error('Weekly summaries returned an invalid response.')
+      }
+      const payload = data as Omit<WeeklyRunSummaries, 'next'>
+      const rows = payload.runs.slice(0, limit)
+      const last = rows.at(-1)
+      return { ...payload, runs: rows, next: payload.runs.length > limit && last
+        ? { createdAt: last.createdAt, id: last.id } : null }
+    },
+
+    async view(id, signal) {
+      let query = client.from('betting_analysis_runs').select(runColumns).eq('id', id)
+      if (signal) query = query.abortSignal(signal)
+      const { data, error } = await query.maybeSingle()
+      throwError(error)
+      if (!data) return null
+      const row = data as Omit<RunRow, 'context_snapshot'>
+      let latestQuery = client.from('betting_analysis_runs').select('id')
+        .eq('season', row.season).eq('week', row.week)
+        .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1)
+      latestQuery = row.stage == null ? latestQuery.is('stage', null) : latestQuery.eq('stage', row.stage)
+      if (signal) latestQuery = latestQuery.abortSignal(signal)
+      const [rows, latest] = await Promise.all([readSuggestionRows([id], signal), latestQuery])
+      throwError(latest.error)
+      const analyses = await readLossRows<Omit<LossAnalysisRow, 'evidence_snapshot'> & {
+        metrics: WeeklyLossEvidence['metrics']
+      }>(rows, lossViewColumns, signal)
+      const bySuggestion = new Map(analyses.map((analysis) => [Number(analysis.suggestion_id), {
+        ...lossMetadata(analysis), evidence: { metrics: analysis.metrics },
+      }]))
+      const view: WeeklyRunView = {
+        id: row.id, season: Number(row.season), stage: row.stage, week: row.week,
+        model: row.model_name, summary: row.summary, createdAt: row.created_at,
+        isFinal: latest.data?.[0]?.id === id,
+        suggestions: rows.map((pick) => ({
+          ...suggestion(pick), lossAnalysis: bySuggestion.get(Number(pick.id)) ?? null,
+        })),
+      }
+      return view
+    },
 
     async delete(id: string) {
       const { data, error } = await client
@@ -232,35 +319,39 @@ export function createWeeklyAnalysisStore(client: SupabaseClient): WeeklyAnalysi
     },
 
     async listPendingGameIds(through: string) {
-      const { data, error } = await client
+      const data = await readAllRows<{ game_id: number }>((from, to) => client
         .from('betting_suggestions')
         .select('game_id')
         .eq('result', 'ungraded')
         .neq('stage', 'Pre Season')
         .lte('kickoff_at', through)
         .order('game_id')
-      throwError(error)
+        .order('id').range(from, to), 'Could not load pending games')
       return [...new Set((data ?? []).map((row) => Number(row.game_id)))]
     },
 
     async gradePending() {
-      const { data: pendingData, error: pendingError } = await client
+      const pendingData = await readAllRows<SuggestionRow>((from, to) => client
         .from('betting_suggestions')
         .select('id,run_id,game_id,season,stage,week,kickoff_at,away_team_id,away_team_name,home_team_id,home_team_name,market,selection,locked_line,confidence,rationale,supporting_game_ids,result,result_delta,final_away_score,final_home_score,graded_at,created_at')
         .eq('result', 'ungraded')
         .neq('stage', 'Pre Season')
         .order('id')
-      throwError(pendingError)
-      const pending = ((pendingData ?? []) as SuggestionRow[]).map((row) => suggestion(row))
+        .range(from, to), 'Could not load pending suggestions')
+      const pending = pendingData.map((row) => suggestion(row))
       if (!pending.length) return 0
 
-      const { data: games, error: gamesError } = await client
-        .from('games')
-        .select('id,status_short,away_total,home_total')
-        .in('id', [...new Set(pending.map((pick) => pick.gameId))])
-      throwError(gamesError)
+      const ids = [...new Set(pending.map((pick) => pick.gameId))]
+      const games: Array<{ id: number; status_short: string | null; away_total: number | null; home_total: number | null }> = []
+      for (let index = 0; index < ids.length; index += 200) {
+        const { data, error } = await client.from('games').select('id,status_short,away_total,home_total')
+          .in('id', ids.slice(index, index + 200))
+        throwError(error)
+        games.push(...data ?? [])
+      }
       const completed = new Map((games ?? [])
         .filter((game) => ['FT', 'AOT'].includes(String(game.status_short).toUpperCase())
+          && game.away_total != null && game.home_total != null
           && Number.isFinite(Number(game.away_total))
           && Number.isFinite(Number(game.home_total)))
         .map((game) => [Number(game.id), {

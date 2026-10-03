@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import type { AnalyticsSnapshot, AnalyticsTargetMatchup } from './analytics-core'
 import type { AnalyticsDataSource } from './analytics-service'
 import { generateAnalyticsSnapshot } from './analytics-service'
+import { AnalyticsReadScope } from './analytics-reads'
 import {
   LlamaClientError,
   type LlamaChatMessage,
@@ -127,6 +128,35 @@ export type WeeklyAnalysisRun = {
   suggestions: WeeklySuggestion[]
 }
 
+export type WeeklyRecord = { wins: number; losses: number; pushes: number; pending: number }
+export type WeeklyRunSummary = Omit<WeeklyAnalysisRun, 'context' | 'summary' | 'suggestions'> & {
+  picks: number
+  record: WeeklyRecord
+  isFinal: boolean
+}
+export type WeeklySuggestionView = Omit<WeeklySuggestion, 'lossAnalysis'> & {
+  lossAnalysis: (Omit<WeeklyLossAnalysis, 'evidence'> & { evidence: Pick<WeeklyLossEvidence, 'metrics'> }) | null
+}
+export type WeeklyRunView = Omit<WeeklyAnalysisRun, 'context' | 'suggestions'> & {
+  suggestions: WeeklySuggestionView[]
+  isFinal?: boolean
+}
+export type WeeklySummaryOptions = {
+  season?: number
+  week?: string
+  before?: { createdAt: string; id: string }
+  limit?: number
+  signal?: AbortSignal
+}
+export type WeeklyRunSummaries = {
+  runs: WeeklyRunSummary[]
+  weeks: string[]
+  record: WeeklyRecord
+  total: number
+  selectedSeason: number | null
+  next: NonNullable<WeeklySummaryOptions['before']> | null
+}
+
 export type WeeklySuggestion = {
   id: number
   runId: string
@@ -173,6 +203,9 @@ export interface WeeklyAnalysisStore {
     clues: WeeklyLossAnalysis['clues']
   }): Promise<WeeklyLossAnalysis>
   deleteLossAnalysis(id: number): Promise<boolean>
+  summaries?(options: WeeklySummaryOptions): Promise<WeeklyRunSummaries>
+  get?(id: string, signal?: AbortSignal): Promise<WeeklyAnalysisRun | null>
+  view?(id: string, signal?: AbortSignal): Promise<WeeklyRunView | null>
 }
 
 export type WeeklyAnalysisProgress = {
@@ -269,7 +302,9 @@ export async function buildWeeklyMatchups(
   dataSource: AnalyticsDataSource,
   season: number,
   generatedAt: string,
+  signal?: AbortSignal,
 ): Promise<WeeklyAnalysisSnapshot['matchups']> {
+  const scope = new AnalyticsReadScope(signal)
   return mapInBatches(games, WEEKLY_MATCHUP_CONCURRENCY, async (game) => {
     let analysis: AnalyticsSnapshot
     try {
@@ -277,7 +312,7 @@ export async function buildWeeklyMatchups(
         dataSource,
         'matchup_preview',
         { season, excludeStage: 'Pre Season', gameId: Number(game.id) },
-        { generatedAt: () => generatedAt, limits: weeklyLimits },
+        { generatedAt: () => generatedAt, limits: weeklyLimits, scope, signal },
       )
     } catch (error) {
       throw new WeeklyAnalysisError(
@@ -349,9 +384,10 @@ export async function buildUpcomingWeekSnapshot(
   dataSource: AnalyticsDataSource,
   season: number,
   generatedAt = new Date().toISOString(),
+  signal?: AbortSignal,
 ): Promise<WeeklyAnalysisSnapshot> {
   const now = Math.floor(new Date(generatedAt).getTime() / 1_000)
-  const { data: nextData, error: nextError } = await client
+  let nextQuery = client
     .from('games')
     .select('id,stage,week,game_timestamp')
     .eq('season', season)
@@ -362,13 +398,15 @@ export async function buildUpcomingWeekSnapshot(
     .order('game_timestamp')
     .order('id')
     .limit(1)
+  if (signal) nextQuery = nextQuery.abortSignal(signal)
+  const { data: nextData, error: nextError } = await nextQuery
   queryError(nextError)
   const next = nextData?.[0]
   if (!next?.week) {
     throw new WeeklyAnalysisError('no_upcoming_week', `Season ${season} has no upcoming scheduled week.`)
   }
 
-  const gamesQuery = client
+  let gamesQuery = client
     .from('games')
     .select('id,game_timestamp')
     .eq('season', season)
@@ -378,13 +416,14 @@ export async function buildUpcomingWeekSnapshot(
     .gt('game_timestamp', now)
     .order('game_timestamp')
     .order('id')
+  if (signal) gamesQuery = gamesQuery.abortSignal(signal)
   const { data: games, error: gamesError } = await gamesQuery
   queryError(gamesError)
   if (!games?.length) {
     throw new WeeklyAnalysisError('no_upcoming_week', `Season ${season} has no eligible upcoming games.`)
   }
 
-  const matchups = await buildWeeklyMatchups(games, dataSource, season, generatedAt)
+  const matchups = await buildWeeklyMatchups(games, dataSource, season, generatedAt, signal)
 
   return {
     schemaVersion: 2,
@@ -669,7 +708,7 @@ export class WeeklyAnalysisService {
   async analyze(season: number, options: WeeklyAnalysisOptions = {}) {
     options.onProgress?.({ stage: 'building_context', message: 'Building matchup context…' })
     const snapshotStartedAt = Date.now()
-    const snapshot = await buildUpcomingWeekSnapshot(this.client, this.dataSource, season, this.now())
+    const snapshot = await buildUpcomingWeekSnapshot(this.client, this.dataSource, season, this.now(), options.signal)
     const messages = buildWeeklyMessages(snapshot)
     const promptCharacters = messages.reduce((total, message) => total + message.content.length, 0)
     this.log(
@@ -687,6 +726,7 @@ export class WeeklyAnalysisService {
       )
     }
     const analysis = parseWeeklyModelAnalysis(completion.content, snapshot)
+    options.signal?.throwIfAborted()
     options.onProgress?.({ stage: 'saving', message: 'Saving tracked suggestions…' })
     const saved = await this.store.save(snapshot, completion.model, analysis)
     this.log(`[Weekly Analysis] Saved run ${saved.id} with ${saved.suggestions.length} picks.`)
@@ -695,6 +735,16 @@ export class WeeklyAnalysisService {
 
   list() {
     return this.store.list()
+  }
+
+  summaries(options: WeeklySummaryOptions) {
+    if (!this.store.summaries) throw new Error('Weekly summaries are not configured.')
+    return this.store.summaries(options)
+  }
+
+  view(id: string, signal?: AbortSignal) {
+    if (!this.store.view) throw new Error('Weekly details are not configured.')
+    return this.store.view(id, signal)
   }
 
   delete(id: string) {
@@ -711,7 +761,8 @@ export class WeeklyAnalysisService {
     }
   }
 
-  async analyzeLoss(suggestionId: number) {
+  async analyzeLoss(suggestionId: number, signal?: AbortSignal) {
+    signal?.throwIfAborted()
     const initial = await this.store.getLossAnalysisInput(suggestionId)
     if (!initial) {
       throw new WeeklyLossAnalysisError('suggestion_not_found', 'Weekly suggestion was not found.')
@@ -727,6 +778,7 @@ export class WeeklyAnalysisService {
     }
 
     await this.refreshGameTeamStats(initial.suggestion.gameId)
+    signal?.throwIfAborted()
     const refreshed = await this.store.getLossAnalysisInput(suggestionId)
     if (!refreshed) {
       throw new WeeklyLossAnalysisError('suggestion_not_found', 'Weekly suggestion was not found after refresh.')
@@ -739,7 +791,7 @@ export class WeeklyAnalysisService {
       refreshed.matchup,
       refreshed.teamStats,
     )
-    const completion = await this.llama.completeMessages(buildWeeklyLossMessages(evidence))
+    const completion = await this.llama.completeMessages(buildWeeklyLossMessages(evidence), signal)
     if (completion.finishReason !== 'stop') {
       throw new WeeklyLossAnalysisError(
         'invalid_model_output',
@@ -747,6 +799,7 @@ export class WeeklyAnalysisService {
       )
     }
     const analysis = parseWeeklyLossAnalysis(completion.content, evidence)
+    signal?.throwIfAborted()
     return this.store.saveLossAnalysis({
       suggestionId,
       model: completion.model,

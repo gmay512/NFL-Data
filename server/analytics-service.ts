@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { getCurrentConsensusOdds } from '../src/data/current-consensus'
+import { AnalyticsDatabaseError, AnalyticsReadScope } from './analytics-reads'
 import {
   buildAnalyticsSnapshot,
   DEFAULT_ANALYTICS_LIMITS,
@@ -7,6 +8,8 @@ import {
   type AnalyticsFilters,
   type AnalyticsInjuryRow,
   type AnalyticsLimits,
+  type AnalyticsOverview,
+  AnalyticsValidationError,
   type AnalyticsPlayerRow,
   type AnalyticsPlayerStatRow,
   type AnalyticsPreset,
@@ -33,9 +36,11 @@ export type AnalyticsServiceConfig = {
 }
 
 export interface AnalyticsDataSource {
-  load(filters: AnalyticsFilters, preset: AnalyticsPreset): Promise<AnalyticsSourceData>
+  load(filters: AnalyticsFilters, preset: AnalyticsPreset, options?: AnalyticsLoadOptions): Promise<AnalyticsSourceData>
+  overview?(filters: AnalyticsFilters, options?: AnalyticsLoadOptions): Promise<BettingGameRow[]>
 }
 
+export type AnalyticsLoadOptions = { signal?: AbortSignal; scope?: AnalyticsReadScope }
 export class AnalyticsTargetError extends Error {
   readonly code: 'target_game_ineligible' | 'target_game_not_found'
 
@@ -64,6 +69,8 @@ type TargetGameRow = {
 type AnalyticsServiceOptions = {
   generatedAt?: () => string
   limits?: AnalyticsLimits
+  signal?: AbortSignal
+  scope?: AnalyticsReadScope
 }
 
 async function fetchAllPages<T>(loadPage: (from: number, to: number) => Promise<T[]>) {
@@ -82,14 +89,13 @@ function queryFailure(context: string, error: unknown) {
   const record = error as Record<string, unknown>
   const message = 'message' in record ? String(record.message) : String(error)
   const metadata = [
-    record.code == null ? null : `code=${String(record.code)}`,
     record.details == null ? null : `details=${String(record.details)}`,
     record.hint == null ? null : `hint=${String(record.hint)}`,
   ].filter((value): value is string => value != null)
-  return new Error(
-    `${context}: ${message}${metadata.length ? ` (${metadata.join(', ')})` : ''}`,
-    { cause: error },
-  )
+  return new AnalyticsDatabaseError(context, {
+    message: `${message}${metadata.length ? ` (${metadata.join(', ')})` : ''}`,
+    ...(typeof record.code === 'string' ? { code: record.code } : {}),
+  })
 }
 
 function throwQueryError(error: { message: string } | null, context: string) {
@@ -110,7 +116,7 @@ function selectedTeamIds(filters: AnalyticsFilters, games: BettingGameRow[]) {
     .sort((left, right) => left - right)
 }
 
-async function loadGames(client: SupabaseClient, filters: AnalyticsFilters) {
+async function loadGames(client: SupabaseClient, filters: AnalyticsFilters, scope: AnalyticsReadScope) {
   let query = client
     .from('games')
     .select('id,game_timestamp', { count: 'exact' })
@@ -121,6 +127,7 @@ async function loadGames(client: SupabaseClient, filters: AnalyticsFilters) {
     .order('game_timestamp', { ascending: false })
     .order('id', { ascending: false })
     .limit(MAX_ANALYTICS_GAMES)
+    .abortSignal(scope.signal)
 
   if (filters.stage) query = query.eq('stage', filters.stage)
   if (filters.excludeStage) query = query.neq('stage', filters.excludeStage)
@@ -141,18 +148,20 @@ async function loadGames(client: SupabaseClient, filters: AnalyticsFilters) {
   if (count != null && (data ?? []).length !== count) {
     throw new Error(`Analytics query returned ${(data ?? []).length} of ${count} games; narrow the filters.`)
   }
-  return loadBettingResults(client, (data ?? []).map((game) => Number(game.id)))
+  return loadBettingResults(client, (data ?? []).map((game) => Number(game.id)), scope)
 }
 
 async function loadMatchupTarget(
   client: SupabaseClient,
   filters: AnalyticsFilters,
+  scope: AnalyticsReadScope,
 ): Promise<AnalyticsTargetMatchup> {
   const { data, error } = await client
     .from('games')
     .select(targetGameColumns)
     .eq('id', filters.gameId!)
     .eq('season', filters.season)
+    .abortSignal(scope.signal)
     .maybeSingle()
   throwQueryError(error, `Could not load target game ${filters.gameId}`)
   if (!data) {
@@ -179,8 +188,8 @@ async function loadMatchupTarget(
 
   const teamIds = [Number(game.away_team_id), Number(game.home_team_id)]
   const [{ data: teamData, error: teamError }, oddsRows] = await Promise.all([
-    client.from('teams').select('id,name').in('id', teamIds).order('id'),
-    getCurrentConsensusOdds(client, [game.id]).catch((error) => {
+    client.from('teams').select('id,name').in('id', teamIds).order('id').abortSignal(scope.signal),
+    getCurrentConsensusOdds(client, [game.id], undefined, scope.signal).catch((error) => {
       throw queryFailure(
         `Could not load current consensus odds for game ${game.id} (get_game_consensus_odds)`,
         error,
@@ -224,6 +233,7 @@ async function loadMatchupHistory(
   teamIds: number[],
   stage?: string,
   excludeStage?: string,
+  scope = new AnalyticsReadScope(),
 ) {
   const joinedTeamIds = teamIds.join(',')
   let query = client
@@ -238,6 +248,7 @@ async function loadMatchupHistory(
     .order('game_timestamp', { ascending: false })
     .order('id', { ascending: false })
     .limit(MAX_ANALYTICS_GAMES)
+    .abortSignal(scope.signal)
 
   if (stage) query = query.eq('stage', stage)
   if (excludeStage) query = query.neq('stage', excludeStage)
@@ -250,29 +261,43 @@ async function loadMatchupHistory(
   if (count != null && (data ?? []).length !== count) {
     throw new Error(`Analytics query returned ${(data ?? []).length} of ${count} games; narrow the filters.`)
   }
-  return loadBettingResults(client, (data ?? []).map((game) => Number(game.id)))
+  return loadBettingResults(client, (data ?? []).map((game) => Number(game.id)), scope)
 }
 
-async function loadBettingResults(client: SupabaseClient, gameIds: number[]) {
-  const rows: BettingGameRow[] = []
+async function loadBettingResults(client: SupabaseClient, gameIds: number[], scope: AnalyticsReadScope) {
+  const requests: Array<Promise<BettingGameRow>> = []
   for (let index = 0; index < gameIds.length; index += BETTING_RESULTS_CHUNK_SIZE) {
-    const { data, error } = await client.rpc('get_game_betting_results', {
-      requested_game_ids: gameIds.slice(index, index + BETTING_RESULTS_CHUNK_SIZE),
+    const chunk = gameIds.slice(index, index + BETTING_RESULTS_CHUNK_SIZE)
+    // Publish per-game promises synchronously so overlapping matchup reads share work.
+    const missing: number[] = []
+    const batch = Promise.resolve().then(async () => {
+      if (!missing.length) return new Map<number, BettingGameRow>()
+      const { data, error } = await scope.run(() => client.rpc('get_game_betting_results', {
+        requested_game_ids: missing,
+      }).abortSignal(scope.signal))
+      throwQueryError(error, `Could not load closing betting results for games ${missing.join(',')} (get_game_betting_results)`)
+      if (!Array.isArray(data)) throw new Error('Betting results returned an invalid response.')
+      const rows = data as BettingGameRow[]
+      const byId = new Map(rows.map((row) => [row.game_id, row]))
+      if (byId.size !== missing.length || rows.length !== missing.length
+        || missing.some((id) => !byId.has(id))) {
+        throw new Error('Betting results did not return exactly the requested completed games.')
+      }
+      return byId
     })
-    throwQueryError(
-      error,
-      `Could not load closing betting results for games ${gameIds
-        .slice(index, index + BETTING_RESULTS_CHUNK_SIZE)
-        .join(',')} (get_game_betting_results)`,
-    )
-    if (!Array.isArray(data)) throw new Error('Betting results returned an invalid response.')
-    rows.push(...data as BettingGameRow[])
+    for (const id of chunk) {
+      requests.push(scope.read(`betting:${id}`, () => {
+        missing.push(id)
+        return batch.then((rows) => rows.get(id)!)
+      }))
+    }
   }
+  const rows = await Promise.all(requests)
   return rows.sort((left, right) =>
     (right.game_timestamp ?? 0) - (left.game_timestamp ?? 0) || right.game_id - left.game_id)
 }
 
-async function loadTeamStats(client: SupabaseClient, gameIds: number[], teamIds: number[]) {
+async function loadTeamStats(client: SupabaseClient, gameIds: number[], teamIds: number[], signal: AbortSignal) {
   if (!gameIds.length || !teamIds.length) return []
   const rows: AnalyticsTeamStatRow[] = []
   for (let index = 0; index < gameIds.length; index += POSTGREST_IN_FILTER_CHUNK_SIZE) {
@@ -286,6 +311,7 @@ async function loadTeamStats(client: SupabaseClient, gameIds: number[], teamIds:
         .order('game_id')
         .order('team_id')
         .range(from, to)
+        .abortSignal(signal)
       throwQueryError(error, `Could not load team stats for games ${gameIdChunk.join(',')}`)
       return (data ?? []) as AnalyticsTeamStatRow[]
     }))
@@ -293,7 +319,7 @@ async function loadTeamStats(client: SupabaseClient, gameIds: number[], teamIds:
   return rows.sort((left, right) => left.game_id - right.game_id || left.team_id - right.team_id)
 }
 
-async function loadStandings(client: SupabaseClient, season: number, teamIds: number[]) {
+async function loadStandings(client: SupabaseClient, season: number, teamIds: number[], signal: AbortSignal) {
   if (!teamIds.length) return []
   const { data, error } = await client
     .from('standings')
@@ -301,11 +327,12 @@ async function loadStandings(client: SupabaseClient, season: number, teamIds: nu
     .eq('season', season)
     .in('team_id', teamIds)
     .order('position')
+    .abortSignal(signal)
   throwQueryError(error, `Could not load standings for season ${season}`)
   return (data ?? []) as AnalyticsStandingRow[]
 }
 
-async function loadInjuries(client: SupabaseClient, teamIds: number[]) {
+async function loadInjuries(client: SupabaseClient, teamIds: number[], signal: AbortSignal) {
   if (!teamIds.length) return []
   return fetchAllPages<AnalyticsInjuryRow>(async (from, to) => {
     const { data, error } = await client
@@ -316,6 +343,7 @@ async function loadInjuries(client: SupabaseClient, teamIds: number[]) {
       .order('injury_date', { ascending: false })
       .order('player_id')
       .range(from, to)
+      .abortSignal(signal)
     throwQueryError(error, `Could not load active injuries for teams ${teamIds.join(',')}`)
     return (data ?? []) as AnalyticsInjuryRow[]
   })
@@ -327,6 +355,7 @@ async function loadPlayerStats(
   filters: AnalyticsFilters,
   gameIds: number[],
   teamIds: number[],
+  signal: AbortSignal,
 ) {
   if (preset === 'season_overview' || !teamIds.length) return []
 
@@ -342,7 +371,10 @@ async function loadPlayerStats(
         .order('game_id')
         .order('team_id')
         .order('player_id')
+        .order('stat_group')
+        .order('stat_name')
         .range(from, to)
+        .abortSignal(signal)
       throwQueryError(error, `Could not load player stats for games ${summarizeIds(gameIds)}`)
       return (data ?? []).map((row) => ({ ...row, scope: 'game' as const })) as AnalyticsPlayerStatRow[]
     })
@@ -357,31 +389,39 @@ async function loadPlayerStats(
       .in('stat_group', seasonPlayerStatGroups)
       .order('team_id')
       .order('player_id')
+      .order('stat_group')
+      .order('stat_name')
       .range(from, to)
+      .abortSignal(signal)
     throwQueryError(error, `Could not load season player stats for season ${filters.season}`)
     return (data ?? []).map((row) => ({ ...row, scope: 'season' as const })) as AnalyticsPlayerStatRow[]
   })
 }
 
-async function loadPlayers(client: SupabaseClient, playerIds: number[]) {
+async function loadPlayers(client: SupabaseClient, playerIds: number[], signal: AbortSignal) {
   if (!playerIds.length) return []
-  return fetchAllPages<AnalyticsPlayerRow>(async (from, to) => {
-    const { data, error } = await client
-      .from('players')
-      .select('id,name,position')
-      .in('id', playerIds)
-      .order('id')
-      .range(from, to)
-    throwQueryError(error, `Could not load players ${summarizeIds(playerIds)}`)
-    return (data ?? []) as AnalyticsPlayerRow[]
-  })
+  const rows: AnalyticsPlayerRow[] = []
+  for (let index = 0; index < playerIds.length; index += POSTGREST_IN_FILTER_CHUNK_SIZE) {
+    const chunk = playerIds.slice(index, index + POSTGREST_IN_FILTER_CHUNK_SIZE)
+    rows.push(...await fetchAllPages<AnalyticsPlayerRow>(async (from, to) => {
+      const { data, error } = await client.from('players').select('id,name,position')
+        .in('id', chunk).order('id').range(from, to).abortSignal(signal)
+      throwQueryError(error, `Could not load players ${summarizeIds(chunk)}`)
+      return (data ?? []) as AnalyticsPlayerRow[]
+    }))
+  }
+  return rows
 }
 
 export function createSupabaseAnalyticsDataSource(client: SupabaseClient): AnalyticsDataSource {
   return {
-    async load(filters, preset) {
+    async overview(filters, options = {}) {
+      return loadGames(client, filters, options.scope ?? new AnalyticsReadScope(options.signal))
+    },
+    async load(filters, preset, options = {}) {
+      const scope = options.scope ?? new AnalyticsReadScope(options.signal)
       const targetMatchup = preset === 'matchup_preview'
-        ? await loadMatchupTarget(client, filters)
+        ? await loadMatchupTarget(client, filters, scope)
         : null
       const targetTeamIds = targetMatchup
         ? [targetMatchup.awayTeam.id, targetMatchup.homeTeam.id].sort((left, right) => left - right)
@@ -394,21 +434,22 @@ export function createSupabaseAnalyticsDataSource(client: SupabaseClient): Analy
             targetTeamIds!,
             filters.stage,
             filters.excludeStage,
+            scope,
           )
-        : await loadGames(client, filters)
+        : await loadGames(client, filters, scope)
       const gameIds = games.map((game) => game.game_id)
       const teamIds = targetTeamIds ?? selectedTeamIds(filters, games)
       const [teamStats, standings, injuries, playerStats] = await Promise.all([
-        loadTeamStats(client, gameIds, teamIds),
-        loadStandings(client, filters.season, teamIds),
-        loadInjuries(client, teamIds),
-        loadPlayerStats(client, preset, filters, gameIds, teamIds),
+        scope.read(`stats:${gameIds.join(',')}:${teamIds.join(',')}`, () => loadTeamStats(client, gameIds, teamIds, scope.signal)),
+        scope.read(`standings:${filters.season}:${teamIds.join(',')}`, () => loadStandings(client, filters.season, teamIds, scope.signal)),
+        scope.read(`injuries:${teamIds.join(',')}`, () => loadInjuries(client, teamIds, scope.signal)),
+        scope.read(`players-stats:${preset}:${filters.season}:${gameIds.join(',')}:${teamIds.join(',')}`, () => loadPlayerStats(client, preset, filters, gameIds, teamIds, scope.signal)),
       ])
       const playerIds = [...new Set([
         ...injuries.map((injury) => injury.player_id),
         ...playerStats.map((stat) => stat.player_id),
       ])].sort((left, right) => left - right)
-      const players = await loadPlayers(client, playerIds)
+      const players = await scope.read(`players:${playerIds.join(',')}`, () => loadPlayers(client, playerIds, scope.signal))
 
       return { games, teamStats, standings, injuries, playerStats, players, targetMatchup }
     },
@@ -431,7 +472,7 @@ export async function generateAnalyticsSnapshot(
   options: AnalyticsServiceOptions = {},
 ): Promise<AnalyticsSnapshot> {
   const filters = validateAnalyticsFilters(preset, filterInput)
-  const source = await dataSource.load(filters, preset)
+  const source = await dataSource.load(filters, preset, options)
   return buildAnalyticsSnapshot(
     preset,
     filters,
@@ -439,4 +480,22 @@ export async function generateAnalyticsSnapshot(
     options.generatedAt?.() ?? new Date().toISOString(),
     options.limits ?? DEFAULT_ANALYTICS_LIMITS,
   )
+}
+
+export async function generateAnalyticsOverview(
+  dataSource: AnalyticsDataSource, preset: AnalyticsPreset, input: unknown,
+  options: AnalyticsLoadOptions = {},
+): Promise<AnalyticsOverview> {
+  const filters = validateAnalyticsFilters(preset, input)
+  if (preset === 'matchup_preview') throw new AnalyticsValidationError('Matchup previews require full grounding.')
+  const games = dataSource.overview
+    ? await dataSource.overview(filters, options)
+    : (await dataSource.load(filters, preset, options)).games
+  const { generatedAt, summary, teamTrends, games: results, dataQuality } = buildAnalyticsSnapshot(
+    preset, filters, { games, teamStats: [], standings: [], injuries: [], playerStats: [], players: [] },
+  )
+  return {
+    generatedAt, preset, filters, summary, teamTrends, games: results,
+    dataQuality: { gamesMissingSpread: dataQuality.gamesMissingSpread, gamesMissingTotal: dataQuality.gamesMissingTotal },
+  }
 }

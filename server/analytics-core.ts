@@ -240,6 +240,10 @@ export type AnalyticsSnapshot = {
   }
 }
 
+export type AnalyticsOverview = Pick<AnalyticsSnapshot, 'generatedAt' | 'preset' | 'filters' | 'summary' | 'teamTrends' | 'games'> & {
+  dataQuality: Pick<AnalyticsSnapshot['dataQuality'], 'gamesMissingSpread' | 'gamesMissingTotal'>
+}
+
 export class AnalyticsValidationError extends Error {}
 
 export const DEFAULT_ANALYTICS_LIMITS: AnalyticsLimits = {

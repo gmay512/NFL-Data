@@ -5,6 +5,7 @@ import * as React from 'react'
 import type { Root } from 'react-dom/client'
 import { buildAnalyticsSnapshot, type AnalyticsSourceData } from '../server/analytics-core'
 import type { AnalysisSession } from '../server/analysis-store'
+import { invalidateAnalyticsReads, useAnalyticsRead } from '../src/data/analytics-repository'
 
 const source: AnalyticsSourceData = {
   games: [{
@@ -86,6 +87,7 @@ let root: Root | null = null
 afterEach(async () => {
   if (root) await React.act(() => root?.unmount())
   root = null
+  invalidateAnalyticsReads()
   dom?.window.close()
   dom = null
 })
@@ -97,7 +99,7 @@ function json(value: unknown, status = 200) {
   })
 }
 
-async function renderPage(fetchHandler: typeof fetch, initialEntry = '/analytics?season=2025') {
+async function renderPage(fetchHandler: typeof fetch, initialEntry = '/analytics?season=2025', strict = false) {
   dom = new JSDOM('<!doctype html><div id="root"></div>', { url: 'http://localhost/analytics' })
   Object.defineProperties(globalThis, {
     window: { configurable: true, value: dom.window },
@@ -121,7 +123,7 @@ async function renderPage(fetchHandler: typeof fetch, initialEntry = '/analytics
     root?.render(React.createElement(
       MemoryRouter,
       { initialEntries: [initialEntry] },
-      React.createElement(AnalyticsPage),
+      strict ? React.createElement(React.StrictMode, null, React.createElement(AnalyticsPage)) : React.createElement(AnalyticsPage),
     ))
   })
   await settle()
@@ -149,7 +151,7 @@ function baseFetch(options?: { online?: boolean; empty?: boolean; saved?: boolea
         ? { status: 'unavailable', code: 'unavailable', message: 'offline' }
         : { status: 'available', model: 'qwen3-coder-next', models: ['qwen3-coder-next'] })
     }
-    if (path === '/api/analytics/query') {
+    if (path === '/api/analytics/overview') {
       const result = options?.empty
         ? buildAnalyticsSnapshot('season_overview', { season: 2025 }, { ...source, games: [] })
         : options?.many
@@ -158,7 +160,7 @@ function baseFetch(options?: { online?: boolean; empty?: boolean; saved?: boolea
       return json({ snapshot: result })
     }
     if (path === '/api/analytics/sessions' && init?.method !== 'POST') {
-      return json({ sessions: options?.saved ? [session] : [] })
+      return json({ sessions: options?.saved ? [session] : [], next: null })
     }
     if (path === '/api/analytics/weekly/runs') return json({ runs: [] })
     if (path === '/api/refresh-season-odds') return json({
@@ -173,11 +175,177 @@ function baseFetch(options?: { online?: boolean; empty?: boolean; saved?: boolea
 }
 
 describe('AnalyticsPage', () => {
+  it('keeps a shared request alive when just one subscriber unmounts', async () => {
+    const container = await renderPage(baseFetch())
+    let requests = 0
+    let signal: AbortSignal | undefined
+    let finish: ((value: number) => void) | undefined
+    const load = (incoming: AbortSignal) => {
+      requests++
+      signal = incoming
+      return new Promise<number>((resolve) => { finish = resolve })
+    }
+    function Consumer({ label }: { label: string }) {
+      const read = useAnalyticsRead('subscriber-test', load)
+      return React.createElement('span', null, `${label}:${read.data ?? 'loading'}`)
+    }
+    await React.act(() => root?.render(React.createElement(React.Fragment, null,
+      React.createElement(Consumer, { label: 'first', key: 'first' }),
+      React.createElement(Consumer, { label: 'second', key: 'second' }),
+    )))
+    assert.equal(requests, 1)
+    await React.act(() => root?.render(React.createElement(React.Fragment, null,
+      React.createElement(Consumer, { label: 'second', key: 'second' }),
+    )))
+    assert.equal(signal?.aborted, false)
+    await React.act(() => finish?.(42))
+    assert.match(container.textContent ?? '', /second:42/)
+    assert.equal(requests, 1)
+  })
+
+  it('marks expired same-key content refreshing instead of dropping saved output', async () => {
+    const container = await renderPage(baseFetch())
+    let requests = 0
+    function Consumer() {
+      const read = useAnalyticsRead('expiry-test', async () => {
+        if (++requests === 1) return 42
+        return new Promise<number>(() => {})
+      }, 15)
+      return React.createElement('span', null, `${read.data ?? 'empty'}:${read.isRefreshing ? 'refreshing' : 'current'}`)
+    }
+    await React.act(() => root?.render(React.createElement(Consumer)))
+    await React.act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)) })
+    assert.match(container.textContent ?? '', /42:refreshing/)
+    assert.equal(requests, 2)
+  })
+
+  it('does not couple saved-list failures to filter metadata or metrics', async () => {
+    const container = await renderPage(async (input, init) => {
+      if (new URL(String(input), 'http://localhost').pathname === '/api/analytics/sessions') {
+        return json({ error: 'Saved list unavailable.' }, 503)
+      }
+      return baseFetch()(input, init)
+    })
+    assert.match(container.textContent ?? '', /Completed games1/)
+    assert.match(container.textContent ?? '', /Saved list unavailable/)
+    assert.match(container.querySelector('.analytics-filters')?.textContent ?? '', /2025/)
+  })
+
+  it('finishes the initial loading state when metadata fails without a selected season', async () => {
+    const container = await renderPage(async (input, init) => {
+      if (new URL(String(input), 'http://localhost').pathname === '/api/analytics/metadata') {
+        return json({ error: 'Metadata unavailable.' }, 503)
+      }
+      return baseFetch({ saved: true })(input, init)
+    }, '/analytics')
+    assert.match(container.textContent ?? '', /Metadata unavailable/)
+    assert.doesNotMatch(container.textContent ?? '', /Calculating analytics/)
+    assert.match(container.textContent ?? '', /2025 season overview/)
+  })
+
+  it('deduplicates expensive reads under StrictMode', async () => {
+    let queries = 0
+    const container = await renderPage(async (input, init) => {
+      if (new URL(String(input), 'http://localhost').pathname === '/api/analytics/overview') queries++
+      return baseFetch()(input, init)
+    }, '/analytics?season=2025', true)
+    assert.equal(queries, 1)
+    assert.match(container.textContent ?? '', /Completed games1/)
+  })
+
+  it('shows the same-key cached result during a slow repeat visit', async () => {
+    await renderPage(baseFetch())
+    await React.act(() => root?.unmount())
+    root = null
+    dom?.window.close()
+    let queries = 0
+    const started = performance.now()
+    const container = await renderPage(async (input, init) => {
+      if (new URL(String(input), 'http://localhost').pathname === '/api/analytics/overview') {
+        queries++
+        return new Promise<Response>(() => {})
+      }
+      return baseFetch()(input, init)
+    })
+    assert.equal(queries, 1)
+    assert.match(container.textContent ?? '', /Completed games1/)
+    assert.match(container.textContent ?? '', /Refreshing analytics/)
+    assert.doesNotMatch(container.textContent ?? '', /Calculating analytics/)
+    assert(performance.now() - started < 500)
+  })
+
+  it('keeps exact-filter cached content visible when an invalidated refresh fails', async () => {
+    let fail = false
+    const container = await renderPage(async (input, init) => {
+      if (fail && new URL(String(input), 'http://localhost').pathname === '/api/analytics/overview') {
+        return json({ error: 'Refresh unavailable.' }, 503)
+      }
+      return baseFetch()(input, init)
+    })
+    fail = true
+    await React.act(() => invalidateAnalyticsReads('overview', { preserveData: true }))
+    await settle()
+    assert.match(container.textContent ?? '', /Completed games1/)
+    assert.match(container.textContent ?? '', /Refresh unavailable/)
+    assert.doesNotMatch(container.textContent ?? '', /Calculating analytics/)
+  })
+
+  it('does not let a slow saved-session open replace a later selection', async () => {
+    const second = { ...session, id: 'session-2', title: 'Second analysis', messages: [] }
+    let finishFirst: ((response: Response) => void) | undefined
+    let firstSignal: AbortSignal | undefined
+    const container = await renderPage(async (input, init) => {
+      const path = new URL(String(input), 'http://localhost').pathname
+      if (path === '/api/analytics/sessions') return json({ sessions: [session, second], next: null })
+      if (path === '/api/analytics/sessions/session-1') {
+        firstSignal = init?.signal ?? undefined
+        return new Promise<Response>((resolve) => { finishFirst = resolve })
+      }
+      if (path === '/api/analytics/sessions/session-2') return json({ session: second })
+      return baseFetch()(input, init)
+    })
+    await React.act(() => container.querySelectorAll<HTMLButtonElement>('.saved-analysis-open')[0].click())
+    await settle()
+    await React.act(() => container.querySelectorAll<HTMLButtonElement>('.saved-analysis-open')[1].click())
+    await settle()
+    assert.equal(firstSignal?.aborted, true)
+    await React.act(() => finishFirst?.(json({ session })))
+    await settle()
+    assert.match(container.querySelector('.analysis-chat')?.textContent ?? '', /Second analysis/)
+    assert.doesNotMatch(container.querySelector('.analysis-chat')?.textContent ?? '', /2025 season overview/)
+  })
+
+  it('aborts obsolete filtered queries and ignores late results', async () => {
+    let oldSignal: AbortSignal | undefined
+    let finishOld: ((value: Response) => void) | undefined
+    const container = await renderPage(async (input, init) => {
+      if (new URL(String(input), 'http://localhost').pathname === '/api/analytics/overview'
+        && !(JSON.parse(String(init?.body)) as { filters: { teamId?: number } }).filters.teamId) {
+        oldSignal = init?.signal ?? undefined
+        return new Promise<Response>((resolve) => { finishOld = resolve })
+      }
+      return baseFetch()(input, init)
+    })
+    const teamSelect = container.querySelectorAll('select')[3]
+    await React.act(() => {
+      teamSelect.value = '1'
+      teamSelect.dispatchEvent(new window.Event('change', { bubbles: true }))
+    })
+    await settle()
+    assert.equal(oldSignal?.aborted, true)
+    await React.act(() => finishOld?.(json({ snapshot: buildAnalyticsSnapshot('season_overview', { season: 2025 }, {
+      ...source, games: [{ ...source.games[0], away_team_name: 'Obsolete team' }],
+    }) })))
+    await settle()
+    assert.doesNotMatch(container.textContent ?? '', /Obsolete team/)
+    assert.match(container.textContent ?? '', /Visitors at Hosts/)
+  })
+
   it('renders historical metrics, team trends, sortable game results, and URL-backed filters', async () => {
     let requestedTeam: number | undefined
     const fetchHandler = async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = new URL(String(input), 'http://localhost').pathname
-      if (path === '/api/analytics/query' && init?.body) {
+      if (path === '/api/analytics/overview' && init?.body) {
         requestedTeam = (JSON.parse(String(init.body)) as { filters: { teamId?: number } }).filters.teamId
       }
       return baseFetch()(input, init)
@@ -252,7 +420,7 @@ describe('AnalyticsPage', () => {
   it('surfaces analytics query failures without hiding saved-analysis controls', async () => {
     const fetchHandler = async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = new URL(String(input), 'http://localhost').pathname
-      if (path === '/api/analytics/query') return json({ error: 'Analytics database unavailable.' }, 503)
+      if (path === '/api/analytics/overview') return json({ error: 'Analytics database unavailable.' }, 503)
       return baseFetch()(input, init)
     }
     const container = await renderPage(fetchHandler)
@@ -264,7 +432,7 @@ describe('AnalyticsPage', () => {
   it('does not show a previous snapshot after a filtered query fails', async () => {
     const fetchHandler = async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = new URL(String(input), 'http://localhost').pathname
-      if (path === '/api/analytics/query' && init?.body) {
+      if (path === '/api/analytics/overview' && init?.body) {
         const body = JSON.parse(String(init.body)) as { filters: { teamId?: number } }
         if (body.filters.teamId) return json({ error: 'Filtered query failed.' }, 503)
       }
@@ -324,6 +492,39 @@ describe('AnalyticsPage', () => {
     await React.act(async () => form.requestSubmit())
     await settle()
     assert.match(container.textContent ?? '', /The home side covered by 3.5 points/)
+  })
+
+  it('does not offer to regenerate an already saved reply when its reload fails', async () => {
+    let saved = false
+    const container = await renderPage(async (input, init) => {
+      const path = new URL(String(input), 'http://localhost').pathname
+      if (path.endsWith('/messages')) {
+        saved = true
+        return new Response(
+          'event: content\ndata: {"content":"Saved reply."}\n\n'
+          + 'event: complete\ndata: {"model":"test","finishReason":"stop"}\n\n',
+          { headers: { 'Content-Type': 'text/event-stream' } },
+        )
+      }
+      if (saved && path === '/api/analytics/sessions/session-1') return json({ error: 'Reload failed.' }, 503)
+      return baseFetch({ saved: true })(input, init)
+    })
+    await React.act(() => container.querySelector<HTMLButtonElement>('.saved-analysis-open')?.click())
+    await settle()
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea')
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+    assert(textarea && setter)
+    await React.act(() => {
+      setter.call(textarea, 'Explain the result.')
+      textarea.dispatchEvent(new window.Event('input', { bubbles: true }))
+    })
+    await React.act(() => container.querySelector<HTMLFormElement>('form')?.requestSubmit())
+    await settle()
+    assert.match(container.textContent ?? '', /The reply was saved, but the conversation could not be refreshed/)
+    assert.match(container.textContent ?? '', /Local model \(saved\)/)
+    assert.match(container.textContent ?? '', /Saved reply/)
+    assert([...container.querySelectorAll('button')].some((button) => button.textContent === 'Retry conversation'))
+    assert([...container.querySelectorAll('button')].every((button) => button.textContent !== 'Retry'))
   })
 
   it('opens a saved analysis from a session deep link', async () => {

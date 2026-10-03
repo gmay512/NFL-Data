@@ -91,6 +91,7 @@ function fakeClient(
     order(...args: unknown[]) { return this.add('order', args) }
     limit(...args: unknown[]) { return this.add('limit', args) }
     range(...args: unknown[]) { return this.add('range', args) }
+    abortSignal(...args: unknown[]) { return this.add('abortSignal', args) }
 
     maybeSingle() {
       this.add('maybeSingle', [])
@@ -127,15 +128,15 @@ function fakeClient(
       rpcCalls.push({ name, gameIds: args.requested_game_ids })
       if (name === 'get_game_consensus_odds') {
         assert.deepEqual(args.requested_game_ids, [42])
-        if (consensusError) return Promise.resolve({ data: null, error: consensusError })
-        return Promise.resolve({ data: rows.game_consensus_odds, error: null })
+        const result = Promise.resolve(consensusError
+          ? { data: null, error: consensusError } : { data: rows.game_consensus_odds, error: null })
+        return Object.assign(result, { abortSignal: () => result })
       }
       assert.equal(name, 'get_game_betting_results')
-      if (bettingError) return Promise.resolve({ data: null, error: bettingError })
-      return Promise.resolve({
-        data: completedGames.filter((game) => args.requested_game_ids.includes(game.game_id)),
-        error: null,
+      const result = Promise.resolve(bettingError ? { data: null, error: bettingError } : {
+        data: completedGames.filter((game) => args.requested_game_ids.includes(game.game_id)), error: null,
       })
+      return Object.assign(result, { abortSignal: () => result })
     },
   } as unknown as SupabaseClient
   return { client, logs, rpcCalls }

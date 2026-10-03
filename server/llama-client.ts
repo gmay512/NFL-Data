@@ -362,7 +362,7 @@ export class LlamaClient {
   }
 
   async checkHealth(signal?: AbortSignal) {
-    const control = createRequestControl(this.config.timeoutMs, signal)
+    const control = createRequestControl(Math.min(this.config.timeoutMs, 5_000), signal)
     try {
       const response = await fetch(`${this.config.baseUrl}/v1/models`, { signal: control.signal })
       if (!response.ok) throw await responseError(response)

@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { AnalyticsFilters, AnalyticsPreset, AnalyticsSnapshot } from './analytics-core'
 import type { LlamaCompletion, LlamaStreamEvent } from './llama-client'
+import { AnalyticsDatabaseError, readAllRows } from './analytics-reads'
 
 export type AnalysisMessage = {
   id: number
@@ -25,11 +26,21 @@ export type AnalysisSessionSummary = {
 export type AnalysisSession = AnalysisSessionSummary & {
   context: AnalyticsSnapshot
   messages: AnalysisMessage[]
+  nextMessageId?: number | null
 }
+
+export type AnalysisListOptions = {
+  before?: { updatedAt: string; id: string }
+  limit?: number
+  signal?: AbortSignal
+}
+export type AnalysisSessionPage = { sessions: AnalysisSessionSummary[]; next: NonNullable<AnalysisListOptions['before']> | null }
+export type AnalysisMessageOptions = { signal?: AbortSignal; limit?: number; before?: number }
 
 export interface AnalysisStore {
   list(): Promise<AnalysisSessionSummary[]>
-  get(id: string): Promise<AnalysisSession | null>
+  get(id: string, options?: AnalysisMessageOptions): Promise<AnalysisSession | null>
+  page?(options: AnalysisListOptions): Promise<AnalysisSessionPage>
   saveInitial(input: {
     title: string
     preset: AnalyticsPreset
@@ -96,7 +107,7 @@ function message(row: MessageRow): AnalysisMessage {
 }
 
 function throwError(error: { message: string } | null) {
-  if (error) throw new Error(error.message)
+  if (error) throw new AnalyticsDatabaseError('Saved analysis database request failed', error)
 }
 
 export function createAnalysisStore(client: SupabaseClient): AnalysisStore {
@@ -111,27 +122,54 @@ export function createAnalysisStore(client: SupabaseClient): AnalysisStore {
       return ((data ?? []) as SessionSummaryRow[]).map(summary)
     },
 
-    async get(id) {
-      const { data: sessionData, error: sessionError } = await client
+    async page(options) {
+      const limit = options.limit ?? 25
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError('Saved analysis page size must be from 1 through 100.')
+      let query = client.from('analysis_sessions')
+        .select('id,title,preset_type,filter_snapshot,model_name,created_at,updated_at')
+        .order('updated_at', { ascending: false }).order('id', { ascending: false })
+        .limit(limit + 1)
+      if (options.before) {
+        query = query.or(`updated_at.lt.${options.before.updatedAt},and(updated_at.eq.${options.before.updatedAt},id.lt.${options.before.id})`)
+      }
+      if (options.signal) query = query.abortSignal(options.signal)
+      const { data, error } = await query
+      throwError(error)
+      const sessions = ((data ?? []).slice(0, limit) as SessionSummaryRow[]).map(summary)
+      const last = sessions.at(-1)
+      return { sessions, next: (data?.length ?? 0) > limit && last
+        ? { updatedAt: last.updatedAt, id: last.id } : null }
+    },
+
+    async get(id, options = {}) {
+      let sessionQuery = client
         .from('analysis_sessions')
         .select('id,title,preset_type,filter_snapshot,context_snapshot,model_name,created_at,updated_at')
         .eq('id', id)
-        .maybeSingle()
+      if (options.signal) sessionQuery = sessionQuery.abortSignal(options.signal)
+      const { data: sessionData, error: sessionError } = await sessionQuery.maybeSingle()
       throwError(sessionError)
       if (!sessionData) return null
 
-      const { data: messageData, error: messageError } = await client
-        .from('analysis_messages')
-        .select('id,role,content,input_tokens,output_tokens,latency_ms,created_at')
-        .eq('session_id', id)
-        .order('id')
-      throwError(messageError)
+      const messageData = await readAllRows<MessageRow>((from, to) => {
+        let query = client.from('analysis_messages')
+          .select('id,role,content,input_tokens,output_tokens,latency_ms,created_at')
+          .eq('session_id', id).order('id', { ascending: false })
+        if (options.before) query = query.lt('id', options.before)
+        query = options.limit != null ? query.limit(options.limit + 1) : query.range(from, to)
+        if (options.signal) query = query.abortSignal(options.signal)
+        return query
+      }, 'Could not load saved conversation')
+      const displayed = options.limit == null ? messageData : messageData.slice(0, options.limit)
 
       const row = sessionData as SessionRow
       return {
         ...summary(row),
         context: row.context_snapshot,
-        messages: ((messageData ?? []) as MessageRow[]).map(message),
+        messages: displayed.map(message).reverse(),
+        ...(options.limit == null ? {} : {
+          nextMessageId: messageData.length > options.limit ? displayed.at(-1)?.id ?? null : null,
+        }),
       }
     },
 

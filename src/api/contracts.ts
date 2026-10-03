@@ -3,12 +3,14 @@ import type {
   AnalyticsFilters,
   AnalyticsPreset,
   AnalyticsSnapshot,
+  AnalyticsOverview,
 } from '../../server/analytics-core'
 import type {
   AnalysisSession,
   AnalysisSessionSummary,
 } from '../../server/analysis-store'
-import type { WeeklyAnalysisRun } from '../../server/weekly-analysis'
+import type { WeeklyAnalysisRun, WeeklyRunSummaries, WeeklyRunView } from '../../server/weekly-analysis'
+import type { AnalysisSessionPage } from '../../server/analysis-store'
 import type { WeeklyLossAnalysis } from '../../server/weekly-loss-analysis'
 
 export type ApiErrorResponse = {
@@ -93,6 +95,7 @@ export type {
   AnalyticsFilters,
   AnalyticsPreset,
   AnalyticsSnapshot,
+  AnalyticsOverview,
 }
 
 export type AnalyticsFilterMetadata = {
@@ -106,6 +109,10 @@ export type AnalyticsFilterMetadata = {
 export type AnalyticsQueryResponse = {
   snapshot: AnalyticsSnapshot
 }
+
+export type AnalyticsOverviewResponse = { snapshot: AnalyticsOverview }
+export type WeeklyRunViewResponse = { run: WeeklyRunView }
+export type { WeeklyRunSummaries, WeeklyRunView, AnalysisSessionPage }
 
 export type AnalysisSessionResponse = {
   session: AnalysisSession

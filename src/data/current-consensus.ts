@@ -35,6 +35,7 @@ export async function getCurrentConsensusOdds(
   client: SupabaseClient,
   gameIds: number[],
   chunkSize = consensusGameIdChunkSize,
+  signal?: AbortSignal,
 ) {
   const requestedGameIds = [...new Set(gameIds.filter((gameId) => Number.isInteger(gameId) && gameId > 0))]
   if (!requestedGameIds.length) return []
@@ -49,7 +50,9 @@ export async function getCurrentConsensusOdds(
       (_, batch) => requestedGameIds.slice(index + batch * chunkSize, index + (batch + 1) * chunkSize),
     )
     const results = await Promise.all(batches.map(async (gameIds) => {
-      const { data, error } = await client.rpc('get_game_consensus_odds', { requested_game_ids: gameIds })
+      let query = client.rpc('get_game_consensus_odds', { requested_game_ids: gameIds })
+      if (signal) query = query.abortSignal(signal)
+      const { data, error } = await query
       if (error) throw error
       return normalizeConsensusRows(data)
     }))

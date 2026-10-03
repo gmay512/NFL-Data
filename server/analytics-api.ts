@@ -11,6 +11,7 @@ import {
 import {
   createAnalyticsDataSource,
   generateAnalyticsSnapshot,
+  generateAnalyticsOverview,
   AnalyticsTargetError,
   type AnalyticsDataSource,
 } from './analytics-service'
@@ -30,6 +31,7 @@ import {
 } from './weekly-analysis'
 import { createWeeklyAnalysisStore } from './weekly-analysis-store'
 import { statusForWeeklyLossAnalysisError } from './weekly-loss-analysis'
+import { AnalyticsDatabaseError } from './analytics-reads'
 
 export type AnalyticsFilterMetadata = {
   seasons: number[]
@@ -43,11 +45,13 @@ export type AnalyticsApiDependencies = {
   dataSource: AnalyticsDataSource
   llama: LlamaClient
   store: AnalysisStore
-  loadMetadata: (season?: number) => Promise<AnalyticsFilterMetadata>
+  loadMetadata: (season?: number, options?: { signal?: AbortSignal }) => Promise<AnalyticsFilterMetadata>
   weekly?: Pick<
     WeeklyAnalysisService,
     'analyze' | 'analyzeLoss' | 'delete' | 'deleteLossAnalysis' | 'grade' | 'list'
-  >
+  > & Partial<Pick<
+    WeeklyAnalysisService, 'summaries' | 'view'
+  >>
 }
 
 export class AnalyticsApiError extends Error {
@@ -131,6 +135,9 @@ function llamaStatus(error: LlamaClientError) {
 }
 
 export function statusForApiError(error: unknown) {
+  if (error instanceof AnalyticsDatabaseError) {
+    return { statusCode: error.code === 'database_timeout' ? 504 : 503, code: error.code, message: error.message }
+  }
   if (error instanceof AnalyticsApiError) {
     return { statusCode: error.statusCode, code: error.code, message: error.message }
   }
@@ -157,13 +164,19 @@ export function statusForApiError(error: unknown) {
 export async function loadAnalyticsMetadata(
   client: SupabaseClient,
   requestedSeason?: number,
+  options: { signal?: AbortSignal } = {},
 ): Promise<AnalyticsFilterMetadata> {
+  let seasonsQuery = client.from('league_seasons').select('season_year,is_current').order('season_year', { ascending: false })
+  let teamsQuery = client.from('teams').select('id,name').order('name')
+  if (options.signal) {
+    seasonsQuery = seasonsQuery.abortSignal(options.signal)
+    teamsQuery = teamsQuery.abortSignal(options.signal)
+  }
   const [{ data: seasonData, error: seasonError }, { data: teamData, error: teamError }] = await Promise.all([
-    client.from('league_seasons').select('season_year,is_current').order('season_year', { ascending: false }),
-    client.from('teams').select('id,name').order('name'),
+    seasonsQuery, teamsQuery,
   ])
-  if (seasonError) throw new Error(seasonError.message)
-  if (teamError) throw new Error(teamError.message)
+  if (seasonError) throw new AnalyticsDatabaseError('Could not load seasons', seasonError)
+  if (teamError) throw new AnalyticsDatabaseError('Could not load teams', teamError)
 
   const currentSeason = selectCurrentSeason((seasonData ?? []).map((row) => ({
     season: Number(row.season_year), current: Boolean(row.is_current),
@@ -180,7 +193,7 @@ export async function loadAnalyticsMetadata(
   let weeks: string[] = []
 
   if (selectedSeason != null) {
-    const { data, error } = await client
+    let gamesQuery = client
       .from('games')
       .select('stage,week')
       .eq('season', selectedSeason)
@@ -189,7 +202,9 @@ export async function loadAnalyticsMetadata(
       .not('home_total', 'is', null)
       .order('game_timestamp')
       .limit(1_000)
-    if (error) throw new Error(error.message)
+    if (options.signal) gamesQuery = gamesQuery.abortSignal(options.signal)
+    const { data, error } = await gamesQuery
+    if (error) throw new AnalyticsDatabaseError('Could not load filter options', error)
     stages = [...new Set((data ?? []).map((row) => row.stage).filter((value): value is string => Boolean(value)))].sort()
     weeks = [...new Set((data ?? []).map((row) => row.week).filter((value): value is string => Boolean(value)))].sort()
   }
@@ -213,7 +228,7 @@ function createDependencies(env: AppEnv) {
     dataSource,
     llama,
     store: createAnalysisStore(client),
-    loadMetadata: (season?: number) => loadAnalyticsMetadata(client, season),
+    loadMetadata: (season?: number, options?: { signal?: AbortSignal }) => loadAnalyticsMetadata(client, season, options),
     weekly: new WeeklyAnalysisService(
       client,
       dataSource,
@@ -260,6 +275,9 @@ async function streamFollowUp(
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   })
+  const heartbeat = setInterval(() => {
+    if (!response.destroyed && !response.writableEnded) response.write(': heartbeat\n\n')
+  }, 10_000)
 
   try {
     for await (const event of dependencies.llama.stream(session.context, {
@@ -287,6 +305,7 @@ async function streamFollowUp(
       code: mapped?.code ?? 'internal_error',
     })
   } finally {
+    clearInterval(heartbeat)
     request.removeListener('aborted', abort)
     response.removeListener('close', abort)
     if (!response.writableEnded && !response.destroyed) response.end()
@@ -327,7 +346,15 @@ async function streamWeeklyAnalysis(
       signal: controller.signal,
       onProgress: (progress) => writeSse(response, 'progress', progress),
     })
-    if (!controller.signal.aborted) writeSse(response, 'complete', { run })
+    if (!controller.signal.aborted) writeSse(response, 'complete', { run: {
+      id: run.id, season: run.season, stage: run.stage, week: run.week, model: run.model,
+      summary: run.summary, createdAt: run.createdAt, isFinal: true,
+      suggestions: run.suggestions.map((pick) => ({
+        ...pick, lossAnalysis: pick.lossAnalysis ? {
+          ...pick.lossAnalysis, evidence: { metrics: pick.lossAnalysis.evidence.metrics },
+        } : null,
+      })),
+    } })
   } catch (error) {
     if (controller.signal.aborted || response.destroyed) return
     const mapped = statusForApiError(error)
@@ -352,15 +379,48 @@ export async function handleAnalyticsApiRequest(
 ) {
   if (!requestUrl.pathname.startsWith('/api/analytics')) return false
   const dependencies = getDependencies(env, injected)
+  const controller = new AbortController()
+  const startedAt = Date.now()
+  const requestId = crypto.randomUUID()
+  response.setHeader('X-Request-Id', requestId)
+  response.once('close', () => {
+    if (!response.writableEnded) controller.abort()
+  })
+  response.once('finish', () => {
+    console.info(`[Analytics] request=${requestId} path=${requestUrl.pathname} status=${response.statusCode} durationMs=${Date.now() - startedAt}`)
+  })
+  const signal = controller.signal
+  const sendRead = (payload: unknown, count: number) => {
+    console.info(`[Analytics] request=${requestId} stage=${requestUrl.pathname} rows=${count} payloadBytes=${Buffer.byteLength(JSON.stringify(payload))} durationMs=${Date.now() - startedAt}`)
+    sendJson(response, 200, payload)
+  }
+
+  const parseCursor = (field: 'createdAt' | 'updatedAt') => {
+    const raw = requestUrl.searchParams.get('before')
+    if (!raw) return undefined
+    let parsed: unknown
+    try { parsed = JSON.parse(raw) } catch {
+      throw new AnalyticsApiError(400, 'invalid_cursor', 'Invalid pagination cursor.')
+    }
+    if (!parsed || typeof parsed !== 'object' || !('id' in parsed)
+      || typeof parsed.id !== 'string' || !sessionPathPattern.test(`/api/analytics/sessions/${parsed.id}`)
+      || !(field in parsed)) throw new AnalyticsApiError(400, 'invalid_cursor', 'Invalid pagination cursor.')
+    const timestamp = Reflect.get(parsed, field)
+    if (typeof timestamp !== 'string' || !/^\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:\d{2})$/.test(timestamp)
+      || !Number.isFinite(Date.parse(timestamp))) {
+      throw new AnalyticsApiError(400, 'invalid_cursor', 'Invalid pagination cursor.')
+    }
+    return { id: parsed.id, timestamp }
+  }
 
   if (request.method === 'GET' && requestUrl.pathname === '/api/analytics/metadata') {
-    sendJson(response, 200, await dependencies.loadMetadata(parseSeason(requestUrl.searchParams.get('season'))))
+    sendJson(response, 200, await dependencies.loadMetadata(parseSeason(requestUrl.searchParams.get('season')), { signal }))
     return true
   }
 
   if (request.method === 'GET' && requestUrl.pathname === '/api/analytics/llm-health') {
     try {
-      sendJson(response, 200, await dependencies.llama.checkHealth())
+      sendJson(response, 200, await dependencies.llama.checkHealth(signal))
     } catch (error) {
       const mapped = statusForApiError(error)
       sendJson(response, 200, {
@@ -378,8 +438,29 @@ export async function handleAnalyticsApiRequest(
       dependencies.dataSource,
       parsePreset(body.preset),
       body.filters,
+      { signal },
     )
-    sendJson(response, 200, { snapshot })
+    sendRead({ snapshot }, snapshot.games.total)
+    return true
+  }
+
+  if (request.method === 'POST' && requestUrl.pathname === '/api/analytics/overview') {
+    const body = await readJsonBody(request)
+    const snapshot = await generateAnalyticsOverview(dependencies.dataSource, parsePreset(body.preset), body.filters, { signal })
+    sendRead({ snapshot }, snapshot.games.total)
+    return true
+  }
+
+  if (request.method === 'GET' && requestUrl.pathname === '/api/analytics/weekly/summaries') {
+    if (!dependencies.weekly?.summaries) throw new AnalyticsApiError(503, 'weekly_unavailable', 'Weekly summaries are unavailable.')
+    const cursor = parseCursor('createdAt')
+    const week = requestUrl.searchParams.get('week') || undefined
+    if (week && week.length > 100) throw new AnalyticsApiError(400, 'invalid_week', 'Invalid week filter.')
+    const page = await dependencies.weekly.summaries({
+      season: parseSeason(requestUrl.searchParams.get('season')), week, signal,
+      ...(cursor ? { before: { id: cursor.id, createdAt: cursor.timestamp } } : {}),
+    })
+    sendRead(page, page.runs.length)
     return true
   }
 
@@ -390,6 +471,13 @@ export async function handleAnalyticsApiRequest(
   }
 
   const weeklyRunMatch = requestUrl.pathname.match(weeklyRunPathPattern)
+  if (weeklyRunMatch && request.method === 'GET') {
+    if (!dependencies.weekly?.view) throw new AnalyticsApiError(503, 'weekly_unavailable', 'Weekly details are unavailable.')
+    const run = await dependencies.weekly.view(weeklyRunMatch[1], signal)
+    if (!run) throw new AnalyticsApiError(404, 'weekly_run_not_found', 'Weekly analysis run was not found.')
+    sendRead({ run }, run.suggestions.length)
+    return true
+  }
   if (weeklyRunMatch && request.method === 'DELETE') {
     if (!dependencies.weekly) throw new AnalyticsApiError(503, 'weekly_unavailable', 'Weekly analysis is unavailable.')
     if (!await dependencies.weekly.delete(weeklyRunMatch[1])) {
@@ -403,7 +491,7 @@ export async function handleAnalyticsApiRequest(
     if (!dependencies.weekly) throw new AnalyticsApiError(503, 'weekly_unavailable', 'Weekly analysis is unavailable.')
     const body = await readJsonBody(request)
     const season = parseRequiredSeason(body.season)
-    sendJson(response, 201, { run: await dependencies.weekly.analyze(season) })
+    sendJson(response, 201, { run: await dependencies.weekly.analyze(season, { signal }) })
     return true
   }
 
@@ -423,7 +511,7 @@ export async function handleAnalyticsApiRequest(
   if (weeklySuggestionLossMatch && request.method === 'POST') {
     if (!dependencies.weekly) throw new AnalyticsApiError(503, 'weekly_unavailable', 'Weekly analysis is unavailable.')
     const suggestionId = Number(weeklySuggestionLossMatch[1])
-    sendJson(response, 201, { analysis: await dependencies.weekly.analyzeLoss(suggestionId) })
+    sendJson(response, 201, { analysis: await dependencies.weekly.analyzeLoss(suggestionId, signal) })
     return true
   }
 
@@ -442,8 +530,9 @@ export async function handleAnalyticsApiRequest(
     const body = await readJsonBody(request)
     const preset = parsePreset(body.preset)
     const title = parseTitle(body.title)
-    const snapshot = await generateAnalyticsSnapshot(dependencies.dataSource, preset, body.filters)
-    const completion = await dependencies.llama.complete(snapshot)
+    const snapshot = await generateAnalyticsSnapshot(dependencies.dataSource, preset, body.filters, { signal })
+    const completion = await dependencies.llama.complete(snapshot, {}, signal)
+    signal.throwIfAborted()
     const session = await dependencies.store.saveInitial({
       title,
       preset,
@@ -458,13 +547,28 @@ export async function handleAnalyticsApiRequest(
   }
 
   if (request.method === 'GET' && requestUrl.pathname === '/api/analytics/sessions') {
+    if (requestUrl.searchParams.get('paged') === 'true') {
+      if (!dependencies.store.page) throw new AnalyticsApiError(503, 'sessions_unavailable', 'Saved analysis pagination is unavailable.')
+      const cursor = parseCursor('updatedAt')
+      sendJson(response, 200, await dependencies.store.page({
+        signal, ...(cursor ? { before: { id: cursor.id, updatedAt: cursor.timestamp } } : {}),
+      }))
+      return true
+    }
     sendJson(response, 200, { sessions: await dependencies.store.list() })
     return true
   }
 
   const sessionMatch = requestUrl.pathname.match(sessionPathPattern)
   if (sessionMatch && request.method === 'GET') {
-    const session = await dependencies.store.get(sessionMatch[1])
+    const before = requestUrl.searchParams.get('beforeMessage')
+    if (before && (!Number.isSafeInteger(Number(before)) || Number(before) <= 0)) {
+      throw new AnalyticsApiError(400, 'invalid_cursor', 'Invalid message cursor.')
+    }
+    const session = await dependencies.store.get(sessionMatch[1], {
+      signal,
+      ...(requestUrl.searchParams.get('paged') === 'true' ? { limit: 50, before: before ? Number(before) : undefined } : {}),
+    })
     if (!session) throw new AnalyticsApiError(404, 'session_not_found', 'Analysis session was not found.')
     sendJson(response, 200, { session })
     return true
@@ -488,7 +592,9 @@ export async function handleAnalyticsApiRequest(
   if (messageMatch && request.method === 'POST') {
     const body = await readJsonBody(request, 16_000)
     const question = parseQuestion(body.question)
-    const session = await dependencies.store.get(messageMatch[1])
+    const session = await dependencies.store.get(messageMatch[1], {
+      signal, limit: dependencies.llama.config.maxHistoryMessages,
+    })
     if (!session) throw new AnalyticsApiError(404, 'session_not_found', 'Analysis session was not found.')
     await streamFollowUp(request, response, dependencies, session, question)
     return true

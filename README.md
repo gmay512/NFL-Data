@@ -293,6 +293,59 @@ available.
 All browser requests go to this app's `/api/analytics` routes. The browser never
 connects directly to llama.cpp.
 
+### Analytics loading and freshness
+
+Historical navigation uses `POST /api/analytics/overview` for the visible
+results, trends, and line-quality counts, without loading model supporting
+data. `POST /api/analytics/query` remains the full-grounding contract. New model
+analyses always read fresh source data; saved conversations retain their
+immutable grounding snapshots.
+
+Weekly navigation uses `GET /api/analytics/weekly/summaries` and fetches only
+the selected run through `GET /api/analytics/weekly/runs/:id`. Lists omit
+grounding and loss evidence; selected details include the loss metrics used by
+the display, not the original evidence snapshot. Records and week options
+cover the complete selected season, independently of the displayed page.
+Saved lists use stable 25-item cursor pages with **Load older analyses**
+controls. Conversations initially show the newest 50 messages and can load
+older messages; model follow-ups use only the configured recent history.
+
+The browser shares in-flight reads and keeps exact-filter results in a bounded
+in-memory cache: 60 seconds for data, five minutes for metadata, and five
+seconds for model health. Same-filter revisits show cached content while
+refreshing; different filters never borrow another filter's results. Mutations
+invalidate related reads. Expired same-filter content is explicitly marked as
+refreshing rather than silently presented as current; expired model health
+cannot keep generation enabled. Known saved output remains visible if its
+background refresh fails, with an explicit error and retry control. Ordinary reads have
+a 15-second deadline and health checks at most five seconds; generation and
+ingestion retain their separate budgets. Obsolete reads and disconnected model
+requests are cancelled. Incomplete streams are not reported as saved, and
+mutations/model generation are never automatically retried.
+
+Apply `202610030002_optimize_analytics_loading.sql` **before deploying the
+updated application**. It preserves closing-result semantics while calculating
+consensus once per bounded batch, and adds the service-role-only weekly-summary
+RPC. No timeout increase, database reset, or history pruning is required.
+Rollout is a separate operation; editing this repository does not deploy it.
+
+Read-only diagnostics against the sampled 2026 production history measured the
+closing-results SQL body at approximately **76 ms for the previously failing
+ten-game batch**, versus **8.85 seconds** for the original query. All 98
+completed games took **816 ms** in one SQL-body diagnostic. The two-run summary
+projection measured **732 bytes**, versus **162,820 bytes** for the previous
+full-run list. Adding the sampled selected-detail projection (about 6 KB) still
+reduces that initial transfer by approximately **96%**. The real overview
+handler and data-source pipeline, using a read-only SQL adapter against
+production instead of installing the RPC, completed the 98-game selection in
+**2.53 seconds** initially and **2.00 seconds** on repeat; two concurrent
+requests each took about **2.08 seconds**, and a seven-game team selection took
+**551 ms**. These include diagnostic SSH overhead but are not deployed
+end-to-end page benchmarks. Confirm browser cold/warm page timings after the
+separately authorized rollout.
+Analytics read logs include request IDs, durations, row counts, payload bytes,
+and structured failure codes, without recording model context or messages.
+
 The production topology uses:
 
 - application host: `192.168.4.237`;

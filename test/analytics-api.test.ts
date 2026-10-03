@@ -9,6 +9,7 @@ import {
   type AnalyticsApiDependencies,
 } from '../server/analytics-api'
 import { LlamaClient } from '../server/llama-client'
+import { AnalyticsDatabaseError } from '../server/analytics-reads'
 import type {
   AnalysisSession,
   AnalysisSessionSummary,
@@ -172,6 +173,60 @@ function llama(baseUrl: string) {
 }
 
 describe('analytics API contracts', () => {
+  it('serves projected overview data without requesting model supporting data', async () => {
+    const deps = dependencies(llama('http://127.0.0.1:1'), createMemoryStore().store)
+    deps.dataSource = {
+      async load() { throw new Error('Full grounding must not load') },
+      async overview(_filters, options) {
+        assert(options?.signal instanceof AbortSignal)
+        return []
+      },
+    }
+    const response = await request('/api/analytics/overview', deps, 'POST', {
+      preset: 'season_overview', filters: { season: 2026 },
+    })
+    assert.equal(response.status, 200)
+    const payload = await response.json() as { snapshot: Record<string, unknown> }
+    assert.deepEqual(Object.keys(payload.snapshot).sort(),
+      ['dataQuality', 'filters', 'games', 'generatedAt', 'preset', 'summary', 'teamTrends'])
+    assert.deepEqual(payload.snapshot.dataQuality, { gamesMissingSpread: 0, gamesMissingTotal: 0 })
+    const invalid = await request('/api/analytics/overview', deps, 'POST', {
+      preset: 'matchup_preview', filters: { season: 2026, gameId: 42 },
+    })
+    assert.equal(invalid.status, 400)
+    assert.equal((await invalid.json() as { code: string }).code, 'invalid_filters')
+  })
+
+  it('maps database timeouts without disguising them as empty successes', async () => {
+    const deps = dependencies(llama('http://127.0.0.1:1'), createMemoryStore().store)
+    deps.dataSource.overview = async () => { throw new AnalyticsDatabaseError('Closing results', { code: '57014', message: 'statement timeout' }) }
+    const response = await request('/api/analytics/overview', deps, 'POST', {
+      preset: 'season_overview', filters: { season: 2026 },
+    })
+    assert.equal(response.status, 504)
+    assert.equal((await response.json() as { code: string }).code, 'database_timeout')
+    assert(response.headers.get('x-request-id'))
+  })
+
+  it('validates stable saved-session cursors and passes cancellation to list reads', async () => {
+    const deps = dependencies(llama('http://127.0.0.1:1'), createMemoryStore().store)
+    const before = { id: sessionId, updatedAt: '2026-09-01T00:00:00.000Z' }
+    deps.store.page = async (options) => {
+      assert.deepEqual(options.before, before)
+      assert(options.signal instanceof AbortSignal)
+      return { sessions: [], next: null }
+    }
+    const response = await request(`/api/analytics/sessions?paged=true&before=${encodeURIComponent(JSON.stringify(before))}`, deps)
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { sessions: [], next: null })
+    for (const cursor of ['broken JSON', JSON.stringify({ ...before, updatedAt: 'invalid' }), JSON.stringify({ ...before, id: 'invalid' })]) {
+      const invalid = await request(`/api/analytics/sessions?paged=true&before=${encodeURIComponent(cursor)}`, deps)
+      assert.equal(invalid.status, 400)
+      assert.equal((await invalid.json() as { code: string }).code, 'invalid_cursor')
+    }
+    assert.equal((await request(`/api/analytics/sessions/${sessionId}?paged=true&beforeMessage=-1`, deps)).status, 400)
+  })
+
   it('loads completed-game filter metadata without querying betting views', async () => {
     const tables: string[] = []
     const operations: Array<{ table: string; method: string; args: unknown[] }> = []
@@ -315,6 +370,16 @@ describe('analytics API contracts', () => {
       async list() {
         return runExists ? [run] : []
       },
+      async summaries(options) {
+        assert(options.signal instanceof AbortSignal)
+        return { runs: [], weeks: ['Week 2'], record: { wins: 0, losses: 0, pushes: 0, pending: 0 }, total: 0, selectedSeason: 2025, next: null }
+      },
+      async view(id) {
+        return id === run.id ? {
+          id, season: run.season, stage: run.stage, week: run.week, model: run.model,
+          summary: run.summary, createdAt: run.createdAt, suggestions: [],
+        } : null
+      },
       async delete(id) {
         if (!runExists || id !== run.id) return false
         runExists = false
@@ -337,6 +402,12 @@ describe('analytics API contracts', () => {
     const listResponse = await request('/api/analytics/weekly/runs', deps)
     assert.equal(listResponse.status, 200)
     assert.equal((await listResponse.json() as { runs: unknown[] }).runs.length, 1)
+    const summaries = await request('/api/analytics/weekly/summaries?season=2025&week=Week%202', deps)
+    assert.equal(summaries.status, 200)
+    assert.deepEqual((await summaries.json() as { weeks: string[] }).weeks, ['Week 2'])
+    const detail = await request(`/api/analytics/weekly/runs/${run.id}`, deps)
+    assert.equal(detail.status, 200)
+    assert.equal('context' in (await detail.json() as { run: object }).run, false)
 
     const analyzeResponse = await request('/api/analytics/weekly/analyze', deps, 'POST', { season: 2025 })
     assert.equal(analyzeResponse.status, 201)
