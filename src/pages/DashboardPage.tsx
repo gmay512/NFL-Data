@@ -28,6 +28,7 @@ import { useVisiblePolling } from '../hooks/useVisiblePolling'
 import type { GameAnalysisPreset } from '../lib/game-format'
 import { hasSupabaseEnv, supabase } from '../lib/supabase'
 import { getRefreshableGameIds, hasLiveGameChanged, reconcileRowsByKey } from '../lib/game-sync'
+import { selectCurrentSeason } from '../lib/season'
 import type { GameOddsRow, GameRow, GameTeamStatRow, LatestGameEventRow, LeagueSeasonRow, TeamRow } from '../types/nfl'
 
 type DashboardMode = 'season' | 'live' | 'team'
@@ -72,6 +73,11 @@ export function DashboardPage() {
     return view === 'live' || view === 'team' ? view : 'season'
   })
   const [isLoading, setIsLoading] = useState(true)
+  const [isLoadingOdds, setIsLoadingOdds] = useState(false)
+  const [isLoadingStats, setIsLoadingStats] = useState(false)
+  const [oddsError, setOddsError] = useState<string | null>(null)
+  const [statsError, setStatsError] = useState<string | null>(null)
+  const [seasonDiscoveryError, setSeasonDiscoveryError] = useState<string | null>(null)
   const [isRefreshingLive, setIsRefreshingLive] = useState(false)
   const [isIngestingSeason, setIsIngestingSeason] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
@@ -89,8 +95,18 @@ export function DashboardPage() {
   const liveGameSnapshot = useRef<Map<number, GameRow>>(new Map())
   const liveHighlightTimeouts = useRef<Map<number, number>>(new Map())
   const displayedGamesKey = useRef<string | null>(null)
+  const oddsRequestId = useRef(0)
 
   useEffect(() => {
+    let cancelled = false
+    const discoveredSeasons = getAvailableSeasons()
+      .then((payload) => payload.seasons)
+      .catch((discoveryError: unknown) => {
+        if (!cancelled) setSeasonDiscoveryError(discoveryError instanceof Error
+          ? discoveryError.message : 'Could not discover additional seasons.')
+        return [] as SeasonOption[]
+      })
+
     const loadDashboardMeta = async () => {
       if (!supabase) {
         setIsLoading(false)
@@ -101,37 +117,41 @@ export function DashboardPage() {
       try {
         metadata = await getDashboardMetadata()
       } catch (metadataError) {
+        if (cancelled) return
         setError(metadataError instanceof Error ? metadataError.message : 'Could not load dashboard metadata.')
         setIsLoading(false)
         return
       }
+      if (cancelled) return
 
       const seasonRows = metadata.seasons as LeagueSeasonRow[]
       const localSeasons = seasonRows
         .map((row) => ({ season: row.season_year, current: row.is_current }))
         .filter((season, index, all) => all.findIndex((candidate) => candidate.season === season.season) === index)
 
-      let apiSeasons: SeasonOption[] = []
-      try {
-        const payload = await getAvailableSeasons()
-        apiSeasons = payload.seasons
-      } catch {
-        // Local season metadata remains available when the API is not configured.
-      }
-
-      const seasonsByYear = new Map(apiSeasons.map((season) => [season.season, season]))
+      const currentSeason = selectCurrentSeason(localSeasons)
+      const seasonsByYear = new Map<number, SeasonOption>([
+        [currentSeason, { season: currentSeason, current: true }],
+      ])
       for (const season of localSeasons) {
-        seasonsByYear.set(season.season, season)
+        seasonsByYear.set(season.season, { ...season, current: season.season === currentSeason })
       }
       const availableSeasons = Array.from(seasonsByYear.values()).sort((left, right) => right.season - left.season)
 
       setSeasons(availableSeasons)
       setTeams(metadata.teams)
-      setSelectedSeason((current) => current || String((availableSeasons.find((season) => season.current) ?? availableSeasons[0])?.season ?? ''))
-      setIsLoading(false)
+      setSelectedSeason((current) => current || String(currentSeason))
+
+      const apiSeasons = await discoveredSeasons
+      if (cancelled) return
+      for (const season of apiSeasons) {
+        if (!seasonsByYear.has(season.season)) seasonsByYear.set(season.season, season)
+      }
+      setSeasons(Array.from(seasonsByYear.values()).sort((left, right) => right.season - left.season))
     }
 
     void loadDashboardMeta()
+    return () => { cancelled = true }
   }, [])
 
   useEffect(() => {
@@ -144,6 +164,8 @@ export function DashboardPage() {
           setGames([])
           setTeamGameStats({})
           setGameOdds({})
+          setIsLoadingStats(false)
+          setStatsError(null)
           displayedGamesKey.current = `team:${selectedSeason}:none`
           setIsLoading(false)
         }
@@ -156,6 +178,12 @@ export function DashboardPage() {
       const isInitialLoad = displayedGamesKey.current !== queryKey
       if (isInitialLoad) setIsLoading(true)
       setError(null)
+      setStatsError(null)
+      setIsLoadingStats(false)
+      if (isInitialLoad) {
+        setTeamGameStats({})
+        setGameOdds({})
+      }
 
       const fetchGames = () => getSeasonGames(
         Number(selectedSeason),
@@ -164,46 +192,28 @@ export function DashboardPage() {
 
       try {
         const loadedGames = await fetchGames()
-        let statsData: GameTeamStatRow[] = []
-        let statsError: unknown
-        if (mode === 'team' && selectedTeamId && loadedGames.length > 0) {
-          try {
-            statsData = await getTeamStatsForGames(Number(selectedTeamId), loadedGames.map((game) => game.id))
-          } catch (loadStatsError) {
-            statsError = loadStatsError
-          }
-        }
-        let oddsData: GameOddsRow[] = []
-        let oddsError: unknown
-        if (loadedGames.length > 0) {
-          try {
-            oddsData = await getGameOdds(loadedGames.map((game) => game.id))
-          } catch (loadOddsError) {
-            oddsError = loadOddsError
-          }
-        }
-
         if (cancelled) return
         setGames((current) => reconcileRowsByKey(current, loadedGames, 'id'))
-        setGameOdds(Object.fromEntries(oddsData.map((odds) => [odds.game_id, odds])))
-        if (oddsError) {
-          setError(oddsError instanceof Error ? oddsError.message : 'Could not load game odds.')
-        }
+        displayedGamesKey.current = queryKey
+        setIsLoading(false)
+
         if (mode === 'team' && selectedTeamId && loadedGames.length > 0) {
-          if (statsError) {
-            setError(statsError instanceof Error ? statsError.message : 'Could not load team statistics.')
-            setTeamGameStats({})
-          } else {
-            setTeamGameStats((current) => Object.fromEntries(
-              reconcileRowsByKey(Object.values(current), statsData, 'game_id')
-                .map((stats) => [stats.game_id, stats]),
-            ))
+          setIsLoadingStats(true)
+          try {
+            const statsData = await getTeamStatsForGames(Number(selectedTeamId), loadedGames.map((game) => game.id))
+            if (!cancelled) setTeamGameStats(Object.fromEntries(statsData.map((stats) => [stats.game_id, stats])))
+          } catch (loadStatsError) {
+            if (!cancelled) {
+              setStatsError(loadStatsError instanceof Error ? loadStatsError.message : 'Could not load team statistics.')
+              setTeamGameStats({})
+            }
+          } finally {
+            if (!cancelled) setIsLoadingStats(false)
           }
         } else {
           setTeamGameStats({})
         }
-        displayedGamesKey.current = queryKey
-        setIsLoading(false)
+        if (cancelled) return
 
         const refreshableGameIds = getRefreshableGameIds(loadedGames)
         if (refreshableGameIds.length > 0) {
@@ -283,10 +293,9 @@ export function DashboardPage() {
         return
       }
 
-      const [data, latestEvents, oddsData] = await Promise.all([
+      const [data, latestEvents] = await Promise.all([
         getGamesByIds(gameIds),
         getLatestGameEvents(gameIds),
-        getGameOdds(gameIds),
       ])
       if (requestId !== liveRequestId.current) return
 
@@ -322,7 +331,6 @@ export function DashboardPage() {
         reconcileRowsByKey(Object.values(current), latestEvents, 'game_id')
           .map((event) => [event.game_id, event]),
       ))
-      setGameOdds(Object.fromEntries(oddsData.map((odds) => [odds.game_id, odds])))
       setSelectedWeek('')
       setLastLiveCheckedAt(new Date())
       displayedGamesKey.current = 'live'
@@ -343,25 +351,6 @@ export function DashboardPage() {
   }, [])
 
   useVisiblePolling(refreshLiveGames, mode === 'live')
-
-  const refreshStoredOdds = useCallback(async () => {
-    if (!supabase || !games.length) return
-    try {
-      const oddsData = await getGameOdds(games.map((game) => game.id))
-      setGameOdds((current) => Object.fromEntries(
-        reconcileRowsByKey(Object.values(current), oddsData, 'game_id')
-          .map((odds) => [odds.game_id, odds]),
-      ))
-    } catch (oddsError) {
-      setError(oddsError instanceof Error ? oddsError.message : 'Could not refresh game odds.')
-    }
-  }, [games])
-
-  useVisiblePolling(
-    refreshStoredOdds,
-    mode !== 'live' && games.length > 0,
-    ODDS_REFRESH_INTERVAL_MS,
-  )
 
   useEffect(() => {
     if (mode !== 'live') return
@@ -402,6 +391,46 @@ export function DashboardPage() {
   const displayedGames = useMemo(
     () => (mode === 'season' ? games.filter((game) => getWeekKey(game) === activeWeek) : games),
     [activeWeek, games, mode],
+  )
+  const visibleGameIds = displayedGames.map((game) => game.id).sort((left, right) => left - right).join(',')
+  const oddsScope = `${mode}:${selectedSeason}:${selectedTeamId}:${activeWeek}:${visibleGameIds}`
+  const refreshStoredOdds = useCallback(async () => {
+    const requestId = ++oddsRequestId.current
+    setOddsError(null)
+    if (!supabase || !visibleGameIds) {
+      setGameOdds({})
+      setIsLoadingOdds(false)
+      return
+    }
+    setIsLoadingOdds(true)
+    try {
+      const oddsData = await getGameOdds(visibleGameIds.split(',').map(Number))
+      if (requestId === oddsRequestId.current) {
+        setGameOdds(Object.fromEntries(oddsData.map((odds) => [odds.game_id, odds])))
+      }
+    } catch (loadOddsError) {
+      if (requestId === oddsRequestId.current) {
+        setOddsError(loadOddsError instanceof Error ? loadOddsError.message : 'Could not load game odds.')
+      }
+    } finally {
+      if (requestId === oddsRequestId.current) setIsLoadingOdds(false)
+    }
+  }, [visibleGameIds])
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      setGameOdds({})
+      void refreshStoredOdds()
+    }, 0)
+    return () => {
+      window.clearTimeout(timeoutId)
+      oddsRequestId.current += 1
+    }
+  }, [oddsScope, refreshStoredOdds, reloadKey])
+  useVisiblePolling(
+    refreshStoredOdds,
+    displayedGames.length > 0,
+    mode === 'live' ? 60_000 : ODDS_REFRESH_INTERVAL_MS,
   )
   const selectedSeasonLabel = seasons.find((season) => String(season.season) === selectedSeason)?.season
   const dashboardPath = `${location.pathname}${location.search}`
@@ -550,6 +579,9 @@ export function DashboardPage() {
 
       {!hasSupabaseEnv && <StatusMessage title="Database connection required" message="Set the VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY variables to load game data." />}
       {error && <StatusMessage title="Unable to load games" message={error} error />}
+      {oddsError && <StatusMessage title="Unable to load odds" message={oddsError} error />}
+      {statsError && <StatusMessage title="Unable to load statistics" message={statsError} error />}
+      {seasonDiscoveryError && <StatusMessage title="Additional seasons unavailable" message={seasonDiscoveryError} />}
       {loadMessage && <StatusMessage title="Season loaded" message={loadMessage} />}
 
       {mode === 'team' && (
@@ -613,6 +645,9 @@ export function DashboardPage() {
               <p className="eyebrow">{mode === 'live' ? 'Live scoreboard' : mode === 'team' ? 'Team results' : 'Games'}</p>
               <h2>{mode === 'live' ? 'In progress' : mode === 'team' ? `${selectedSeasonLabel ?? ''} season` : getWeekLabel(activeWeek || UNASSIGNED_WEEK)}</h2>
             </div>
+            {!isLoading && (isLoadingOdds || isLoadingStats) && (
+              <p role="status">{isLoadingOdds ? 'Loading odds...' : ''}{isLoadingOdds && isLoadingStats ? ' ' : ''}{isLoadingStats ? 'Loading statistics...' : ''}</p>
+            )}
             <span>{displayedGames.length} {displayedGames.length === 1 ? 'game' : 'games'}</span>
           </div>
 

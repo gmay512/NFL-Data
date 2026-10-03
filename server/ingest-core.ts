@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import type { AvailableSeason, IngestSummary } from '../src/api/contracts'
 import { getCurrentConsensusOdds } from '../src/data/current-consensus'
+import { getCurrentNflSeason, shouldImportSeasonMetadata } from '../src/lib/season'
 
 export type { AvailableSeason, IngestSummary } from '../src/api/contracts'
 
@@ -1529,7 +1530,7 @@ export async function refreshAvailableOdds(config: IngestConfig) {
   return { bookmakers, betTypes, odds }
 }
 
-export async function refreshLeagueMetadata(config: IngestConfig) {
+export async function refreshLeagueMetadata(config: IngestConfig, requestedSeasons = [getCurrentNflSeason()]) {
   const { supabase, fetchEndpoint } = await createApiClient(config)
   type LeagueApi = { league?: Dict; country?: Dict; seasons?: Dict[] }
   const payload = await fetchEndpoint<LeagueApi>('/leagues', { id: config.leagueId ?? 1 })
@@ -1554,7 +1555,9 @@ export async function refreshLeagueMetadata(config: IngestConfig) {
 
     for (const seasonItem of item.seasons ?? []) {
       const row = mapLeagueSeasonRow(leagueId, seasonItem)
-      if (row) seasonRows.push(row)
+      if (row && shouldImportSeasonMetadata(Number(row.season_year), requestedSeasons)) {
+        seasonRows.push(row)
+      }
     }
   }
 
@@ -1885,7 +1888,7 @@ async function refreshGamePlayerStatsByGameIdWithClient(
 }
 
 export async function refreshSeasonStatistics(config: IngestConfig, season: number) {
-  const leagueMetadata = await refreshLeagueMetadata(config)
+  const leagueMetadata = await refreshLeagueMetadata(config, [season])
   const standings = await refreshSeasonStandings(config, season)
   const playerSeasonStats = await refreshPlayerSeasonStats(config, season)
   const gameTeamStats = await upsertGameTeamStats(config, season)
@@ -1897,7 +1900,7 @@ export async function ingestSeason(config: IngestConfig, season: number): Promis
   console.log(`[Ingest] Starting ingest for season ${season}`)
 
   console.log(`[Ingest] Step 1: Upserting league metadata...`)
-  const leagueMetadata = await refreshLeagueMetadata(config)
+  const leagueMetadata = await refreshLeagueMetadata(config, [season])
   console.log(`[Ingest] Step 1 complete: ${leagueMetadata.leagues} leagues, ${leagueMetadata.leagueSeasons} seasons`)
 
   console.log(`[Ingest] Step 2: Upserting teams...`)

@@ -1,5 +1,6 @@
 import { planHistoricalBackfill, runHistoricalBackfill } from '../server/backfill-core'
 import { getIngestConfig } from '../server/config'
+import { getCurrentNflSeason } from '../src/lib/season'
 
 function hasFlag(name: string) {
   return process.argv.includes(`--${name}`)
@@ -16,8 +17,8 @@ function readInteger(name: string, fallback: number) {
 
 async function run() {
   const config = getIngestConfig(process.env)
-  const startSeason = readInteger('start-season', 2020)
-  const endSeason = readInteger('end-season', 2026)
+  const startSeason = readInteger('start-season', getCurrentNflSeason())
+  const endSeason = readInteger('end-season', getCurrentNflSeason())
   const dailyCeiling = readInteger('daily-ceiling', 7_000)
   const dryRun = hasFlag('dry-run')
 

@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import { getCurrentNflSeason } from '../src/lib/season'
 import {
   refreshCurrentInjuries,
   refreshGameEventsByGameId,
@@ -205,8 +206,8 @@ function isTerminal(
 
 export async function planHistoricalBackfill(
   config: IngestConfig,
-  startSeason = 2020,
-  endSeason = 2026,
+  startSeason = getCurrentNflSeason(),
+  endSeason = getCurrentNflSeason(),
 ): Promise<BackfillPlan> {
   if (!config.supabaseUrl || !config.serviceRoleKey) {
     throw new Error('Missing production Supabase configuration.')
@@ -392,7 +393,10 @@ export async function runHistoricalBackfill(
           break
         }
         case 'league_metadata': {
-          const result = await refreshLeagueMetadata(guardedConfig)
+          const result = await refreshLeagueMetadata(
+            guardedConfig,
+            Array.from({ length: plan.endSeason - plan.startSeason + 1 }, (_, index) => plan.startSeason + index),
+          )
           responseCount = result.leagues + result.leagueSeasons
           break
         }

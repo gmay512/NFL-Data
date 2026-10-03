@@ -1,5 +1,6 @@
 import { getIngestConfig } from '../server/config'
 import { ingestSeason } from '../server/ingest-core'
+import { getCurrentNflSeason } from '../src/lib/season'
 
 function readCliArg(name: string): string | null {
   const prefix = `--${name}=`
@@ -7,7 +8,7 @@ function readCliArg(name: string): string | null {
   return match ? match.slice(prefix.length) : null
 }
 
-export function parseSeason(raw: string | null, fallback = '2023') {
+export function parseSeason(raw: string | null, fallback = String(getCurrentNflSeason())) {
   const value = raw ?? fallback
   const season = Number(value)
   if (!Number.isInteger(season) || season < 1900 || season > 3000) {

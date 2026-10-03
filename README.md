@@ -96,9 +96,25 @@ You can override the ingest season at runtime:
 npm run ingest -- --season=2024
 ```
 
-If `--season` is omitted, the script falls back to `API_SPORTS_SEASON` from `.env.local`.
+If `--season` is omitted, the script uses `API_SPORTS_SEASON` from `.env.local`
+when set, otherwise the current NFL season.
 
-The dashboard is the main ingest flow. It loads available seasons from `/seasons`; when the selected season has no local games, the dashboard offers a button that POSTs the season to the local dev server so the documented API-Sports endpoints are ingested with service-role credentials.
+The dashboard is the main ingest flow. Stored schedules appear without waiting
+for provider season discovery, odds, or team statistics. Odds load and refresh
+only for displayed games, and statistics load independently in the team view.
+Secondary failures remain visible without hiding the schedule.
+
+The default is the current NFL season (2026 initially), not the oldest stored
+season or a hard-coded historical year. Current provider metadata takes
+precedence in the UI; the date fallback retains the previous season through
+February and advances in March. CLI ingest/backfill use the same date fallback.
+An explicit `--season` or `API_SPORTS_SEASON` still overrides the ingest default.
+
+Available seasons are discovered in the background from `/seasons`; when the
+selected season has no local games, the dashboard offers a button that POSTs
+the season to the app server. Older seasons remain available for explicit
+imports. Normal metadata refreshes retain 2026 onward; explicit historical
+imports also retain metadata for their requested season/range.
 
 The CLI entry point is a thin adapter over the same ingestion engine used by the app server. It currently calls and upserts data from:
 
@@ -355,7 +371,7 @@ later desired.
 Keep this HTTP endpoint on the trusted private LAN with the source-restricted
 firewall rule. Use TLS or a private tunnel if that trust boundary changes.
 
-The production-only historical runner fills missing 2020–2026 resources, records
+The production-only backfill runner defaults to the current NFL season, records
 complete and provider-empty checkpoints, preserves season team membership in
 `team_rosters`, and stops before the configured API daily ceiling:
 
@@ -364,9 +380,57 @@ npm run backfill -- --dry-run
 npm run backfill -- --confirm-production
 ```
 
-Use `--start-season`, `--end-season`, `--daily-ceiling`, and `--verbose-plan` to
-override the safe defaults. The runtime refuses mutating runs against the known
-local Supabase address.
+Use explicit `--start-season` and `--end-season` values to import a historical
+range; `--daily-ceiling` and `--verbose-plan` customize its budget and output.
+The runtime refuses mutating runs against the known local Supabase address.
+
+## One-time historical cleanup
+
+Cleanup is separate from schema migrations and never runs automatically.
+It keeps the specified NFL season and all later seasons, while deleting older
+games, dependent odds/events/box scores, season statistics, standings, rosters,
+metadata, and backfill checkpoints. Saved analyses and weekly runs containing
+older grounding are deleted with their messages, suggestions, and loss
+explanations. Shared reference tables and active injuries are preserved.
+
+Dry-run both targets first:
+
+```bash
+npm run prune -- --target=local --keep-from=2026
+npm run prune -- --target=production --keep-from=2026
+```
+
+Explicitly confirm each destructive operation:
+
+```bash
+npm run prune -- --target=local --keep-from=2026 --confirm=local-before-2026
+npm run prune -- --target=production --keep-from=2026 --confirm=production-before-2026
+```
+
+The local container defaults to `supabase_db_NFL_Data`; production defaults to
+`glenn@192.168.4.237` / `supabase-db`. Override `LOCAL_DB_CONTAINER`,
+`DEPLOY_HOST`, or `REMOTE_DB_CONTAINER` when needed. Restore the local stack
+with `npm run db:start` first; **do not reset it** just to run cleanup.
+
+Game deletion uses the recorded NFL season, so January playoff games from an
+older season are also removed. Injuries have no season field: resolved episodes
+dated before March 1 of the retained year are considered historical, matching
+the date-based season rollover. Active injuries are kept regardless of date.
+Undated resolved episodes are reported and block deletion until reviewed.
+
+Execution locks the affected NFL tables against concurrent writes, deletes in
+foreign-key-safe order, and verifies historical absence plus counts and
+fingerprints of every retained table's rows before committing. Any failure
+rolls back the entire operation. A rerun is safe, but will delete older data
+that was explicitly reimported in the meantime. There is no ongoing retention
+job: historical imports remain allowed and persist after this one-time cleanup.
+
+Run isolated cleanup regression fixtures against a temporary database in the
+local NFL Supabase container:
+
+```bash
+NFL_CLEANUP_TEST=1 node --import tsx --test test/prune-season-data.test.ts
+```
 
 ## Migrations
 

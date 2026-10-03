@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import type { GameOddsRow } from '../types/nfl'
 
 const consensusGameIdChunkSize = 10
+const consensusConcurrency = 2
 
 function normalizeNullableNumber(value: unknown) {
   if (value == null) return null
@@ -42,12 +43,17 @@ export async function getCurrentConsensusOdds(
   }
 
   const rows: GameOddsRow[] = []
-  for (let index = 0; index < requestedGameIds.length; index += chunkSize) {
-    const { data, error } = await client.rpc('get_game_consensus_odds', {
-      requested_game_ids: requestedGameIds.slice(index, index + chunkSize),
-    })
-    if (error) throw error
-    rows.push(...normalizeConsensusRows(data))
+  for (let index = 0; index < requestedGameIds.length; index += chunkSize * consensusConcurrency) {
+    const batches = Array.from(
+      { length: Math.min(consensusConcurrency, Math.ceil((requestedGameIds.length - index) / chunkSize)) },
+      (_, batch) => requestedGameIds.slice(index + batch * chunkSize, index + (batch + 1) * chunkSize),
+    )
+    const results = await Promise.all(batches.map(async (gameIds) => {
+      const { data, error } = await client.rpc('get_game_consensus_odds', { requested_game_ids: gameIds })
+      if (error) throw error
+      return normalizeConsensusRows(data)
+    }))
+    rows.push(...results.flat())
   }
   return rows.sort((left, right) => left.game_id - right.game_id)
 }

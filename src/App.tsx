@@ -1,11 +1,11 @@
 import './App.css'
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import { DashboardPage } from './pages/DashboardPage'
-import { GameDetailPage } from './pages/GameDetailPage'
-import { GameTeamDetailPage } from './pages/GameTeamDetailPage'
-import { AnalyticsPage } from './pages/AnalyticsPage'
-import { WeeklyAnalysisPage } from './pages/WeeklyAnalysisPage'
+const GameDetailPage = lazy(() => import('./pages/GameDetailPage').then((module) => ({ default: module.GameDetailPage })))
+const GameTeamDetailPage = lazy(() => import('./pages/GameTeamDetailPage').then((module) => ({ default: module.GameTeamDetailPage })))
+const AnalyticsPage = lazy(() => import('./pages/AnalyticsPage').then((module) => ({ default: module.AnalyticsPage })))
+const WeeklyAnalysisPage = lazy(() => import('./pages/WeeklyAnalysisPage').then((module) => ({ default: module.WeeklyAnalysisPage })))
 
 function App() {
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -41,6 +41,7 @@ function App() {
         </div>
       </header>
 
+      <Suspense fallback={<p className="empty-state" role="status">Loading page...</p>}>
       <Routes>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/games" element={<DashboardPage />} />
@@ -51,6 +52,7 @@ function App() {
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      </Suspense>
     </div>
   )
 }

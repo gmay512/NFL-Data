@@ -1,6 +1,6 @@
 begin;
 
-select plan(8);
+select plan(12);
 
 select ok(
   to_regprocedure('public.get_game_consensus_odds(integer[])') is not null,
@@ -134,6 +134,30 @@ select is(
   (select count(*)::integer from public.get_game_consensus_odds(array[]::integer[])),
   0,
   'returns no rows for an empty request'
+);
+select is(
+  (select count(*)::integer from public.get_game_consensus_odds(null::integer[])),
+  0,
+  'returns no rows for a null request'
+);
+select is(
+  (select count(*)::integer from public.get_game_consensus_odds(array[991001, null, 991001])),
+  1,
+  'deduplicates requested IDs and ignores null IDs'
+);
+
+insert into public.odds (game_id, bookmaker_id, bet_id, bet_value, odd, provider_updated_at)
+values (991001, 991002, 991001, 'Home -1.5', 1.91, '2099-08-31 12:00:00+00');
+
+select is(
+  (select home_spread from public.get_game_consensus_odds(array[991001])),
+  (-3.5)::numeric,
+  'does not fall back to an older complete spread when the current snapshot is incomplete'
+);
+select is(
+  (select total from public.get_game_consensus_odds(array[991001])),
+  44.5::numeric,
+  'preserves the shared bookmaker snapshot boundary across current markets'
 );
 
 select * from finish();

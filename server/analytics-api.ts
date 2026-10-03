@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import { selectCurrentSeason } from '../src/lib/season'
 import { readJsonBody, sendJson } from './api/request'
 import { getIngestConfig, getRequiredEnv, type AppEnv } from './config'
 import { refreshGamesByIds, refreshGameTeamStatsByGameId } from './ingest-core'
@@ -158,16 +159,23 @@ export async function loadAnalyticsMetadata(
   requestedSeason?: number,
 ): Promise<AnalyticsFilterMetadata> {
   const [{ data: seasonData, error: seasonError }, { data: teamData, error: teamError }] = await Promise.all([
-    client.from('league_seasons').select('season_year').order('season_year', { ascending: false }),
+    client.from('league_seasons').select('season_year,is_current').order('season_year', { ascending: false }),
     client.from('teams').select('id,name').order('name'),
   ])
   if (seasonError) throw new Error(seasonError.message)
   if (teamError) throw new Error(teamError.message)
 
-  const seasons = [...new Set((seasonData ?? []).map((row) => Number(row.season_year)))]
+  const currentSeason = selectCurrentSeason((seasonData ?? []).map((row) => ({
+    season: Number(row.season_year), current: Boolean(row.is_current),
+  })))
+  const seasons = [...new Set([
+    currentSeason,
+    ...(requestedSeason == null ? [] : [requestedSeason]),
+    ...(seasonData ?? []).map((row) => Number(row.season_year)),
+  ])]
     .filter(Number.isInteger)
     .sort((left, right) => right - left)
-  const selectedSeason = requestedSeason ?? seasons[0] ?? null
+  const selectedSeason = requestedSeason ?? currentSeason
   let stages: string[] = []
   let weeks: string[] = []
 

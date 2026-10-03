@@ -16,7 +16,8 @@
     "db:reset": "supabase db reset",
     "db:push": "supabase db push",
     "ingest": "node --env-file=.env.local --import tsx scripts/ingest-api-sports.ts",
-    "backfill": "node --import tsx scripts/backfill-api-sports.ts"
+    "backfill": "node --import tsx scripts/backfill-api-sports.ts",
+    "prune": "bash scripts/prune-season-data.sh"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.108.2",

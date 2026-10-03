@@ -18,6 +18,25 @@ function clientWithRows(
 }
 
 describe('current consensus odds loader', () => {
+  it('runs no more than two bounded batches concurrently', async () => {
+    let active = 0
+    let peak = 0
+    const calls: number[][] = []
+    const client = {
+      rpc: async (_name: string, args: { requested_game_ids: number[] }) => {
+        calls.push(args.requested_game_ids)
+        active += 1
+        peak = Math.max(peak, active)
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        active -= 1
+        return { data: [], error: null }
+      },
+    } as unknown as SupabaseClient
+    await getCurrentConsensusOdds(client, Array.from({ length: 51 }, (_, index) => index + 1))
+    assert.equal(peak, 2)
+    assert.equal(calls.length, 6)
+    assert(calls.every((ids) => ids.length <= 10))
+  })
   it('keeps default requests below the production statement timeout', async () => {
     const { calls, client } = clientWithRows(() => ({ data: [], error: null }))
 
