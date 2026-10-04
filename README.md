@@ -181,7 +181,8 @@ they are intentionally not persisted with NFL domain records.
 The `/analytics` route provides deterministic historical results, team trends,
 saved analysis sessions, and grounded model conversations. Calculations are
 performed by the app before a prompt is sent to the model. llama.cpp receives a
-bounded JSON snapshot and explains it; it does not receive database credentials,
+bounded JSON fact catalog and selects supported observations; the application
+validates those references and renders the factual statements. It does not receive database credentials,
 SQL access, or a tool that can change application data.
 
 Apply the analytics migrations before opening the page:
@@ -251,11 +252,70 @@ The page reports missing lines, missing required team statistics, and bounded or
 truncated collections in its deterministic snapshot. Saved sessions retain that
 immutable snapshot so later follow-ups use the same grounding data.
 
+### Factual reports and evidence scope
+
+Regular-season matchup previews default to completed regular-season games in the
+selected season, involving the target teams, strictly before kickoff. Preseason
+games are not included merely because closing odds or box scores exist.
+Explicit stage filters remain available; postseason previews retain
+regular/postseason history with preseason excluded. Historical presets keep
+their requested filters. **Grounding details** on both dashboard previews and
+saved conversations show the requested filters and effective history scope.
+
+Selected-game home-cover and over rates describe that selection, not necessarily
+the league, a particular team, or a comparable-matchup cohort. Team ATS records
+and home/away splits are calculated from the team's perspective. Pushes and
+ungraded games are separate from decisions. Each team-stat metric has its own
+valid observation count, sum, and source game IDs; null statistics are never
+filled with zeros. A truncated detail list does not shrink a full-sample
+aggregate, and its game IDs are not represented as complete aggregate evidence.
+
+Turnovers are turnovers committed, not turnover differential. The generic
+provider `sacks` metric is not labeled sacks allowed. Offensive sacks allowed
+are parsed only from the separate passing sacks/yardage field's `count-yards`
+format; missing or unrecognized values are unavailable, with malformed formats
+reported as data-quality warnings.
+
+Injury reports preserve supplied status and position. Questionable does not
+mean confirmed out. Injury dates, first/last observation dates, and report
+generation time are distinct; none confirms final game-day availability.
+Target odds are **stored current consensus**, distinct from historical closing
+lines. Reading them for a new report does not establish provider freshness or
+opening-line movement. Standings and player season totals are stored current
+records, not reconstructed historical observations.
+
+All saved Analytics presets and follow-ups require structured model output
+containing only fact references and supported comparison templates. The server
+also supplies a strict JSON response schema with catalog-ID enums, exact fields,
+and a 1-40 observation limit to llama.cpp so generation follows the same shape
+as validation. Semantic comparison and duplicate checks still run in the app.
+The model-facing catalog omits redundant metadata and is bounded to 600 facts
+and 60,000 serialized fact characters, prioritizing sample/ATS/totals facts and
+turnover/sacks-allowed coverage across teams before optional detail. Omitted
+facts are disclosed and cannot be selected, including in follow-ups; full
+metrics remain in the immutable snapshot, and grounding details show coverage.
+This avoids filling the model context with repeated prose on league-wide selections.
+The server rejects extra fields, invented references, duplicate observations, incompatible
+comparisons, free-form factual prose, and unfinished completions before saving.
+Unsupported questions can cite explicit missing-data limitations instead.
+Follow-up SSE connections retain heartbeats and cancellation, but raw model
+tokens are buffered: only validated, application-rendered content is displayed
+after successful persistence. Validation failures show an error and do not
+create a successful exchange.
+
+New snapshots use analytics schema version 2. Existing version-1 snapshots and
+messages remain unchanged and readable, with a legacy warning. Follow-ups can
+use their supplied facts but cannot infer missing scope, per-field denominators,
+injury observations, or freshness from prior prose. Regenerate an analysis when
+those facts are needed; follow-ups never silently refresh an immutable snapshot.
+No database reset or external fact-checking service is required.
+
 ### Upcoming-week suggestions and tracking
 
 The Weekly Analysis page can manually analyze the nearest future scheduled week
 for the selected season. Regular-season and postseason games are eligible;
 preseason games are excluded from both target weeks and historical evidence.
+Regular-season targets use the same regular-season-only preview history policy.
 It builds a bounded snapshot for every matchup using the current consensus
 spread and total, team-perspective scoring, season-to-date ATS and totals
 results, available team and player statistics, standings, and current injuries.

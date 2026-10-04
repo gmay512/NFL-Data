@@ -62,7 +62,7 @@ type WeeklyTeamPerformance = {
 
 type WeeklyInjury = Pick<
   AnalyticsSnapshot['currentInjuries']['items'][number],
-  'playerName' | 'teamName' | 'injury_date' | 'status' | 'description'
+  'playerName' | 'teamName' | 'injury_date' | 'status' | 'description' | 'first_seen_at' | 'last_seen_at' | 'position'
 >
 
 type WeeklyPlayerStat = Pick<
@@ -311,7 +311,7 @@ export async function buildWeeklyMatchups(
       analysis = await generateAnalyticsSnapshot(
         dataSource,
         'matchup_preview',
-        { season, excludeStage: 'Pre Season', gameId: Number(game.id) },
+        { season, gameId: Number(game.id) },
         { generatedAt: () => generatedAt, limits: weeklyLimits, scope, signal },
       )
     } catch (error) {
@@ -365,6 +365,9 @@ export async function buildWeeklyMatchups(
         injury_date: item.injury_date,
         status: item.status,
         description: item.description,
+        first_seen_at: item.first_seen_at,
+        last_seen_at: item.last_seen_at,
+        position: item.position,
       })),
       playerStats: analysis.playerStats.items.map((item) => ({
         team_id: item.team_id,

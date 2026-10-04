@@ -642,8 +642,8 @@ describe('weekly matchup batching', () => {
     assert.equal(result.week, 'Week 1')
     assert.deepEqual(result.matchups.map((matchup) => matchup.gameId), [42, 43])
     assert.deepEqual(receivedFilters, [
-      { season: 2026, excludeStage: 'Pre Season', gameId: 42 },
-      { season: 2026, excludeStage: 'Pre Season', gameId: 43 },
+      { season: 2026, gameId: 42 },
+      { season: 2026, gameId: 43 },
     ])
     assert.equal(operations.filter(([column, value]) => column === 'not:stage' && value === 'Pre Season').length, 1)
     assert.equal(operations.filter(([column, value]) => column === 'stage' && value === 'Regular Season').length, 1)
@@ -659,7 +659,6 @@ describe('weekly matchup batching', () => {
     assert.deepEqual(postseason.matchups.map((matchup) => matchup.gameId), [50])
     assert.deepEqual(receivedFilters.at(-1), {
       season: 2026,
-      excludeStage: 'Pre Season',
       gameId: 50,
     })
   })
@@ -873,6 +872,11 @@ function suggestion(overrides: Partial<WeeklySuggestion> = {}): WeeklySuggestion
 }
 
 describe('weekly suggestion grading', () => {
+  it('grades Dallas +3 as a win when Houston wins 25-23, and a push for a three-point margin', () => {
+    const pick = suggestion({ selection: 'away', lockedLine: 3 })
+    assert.deepEqual(gradeWeeklySuggestion(pick, 23, 25), { delta: 1, result: 'win' })
+    assert.deepEqual(gradeWeeklySuggestion(pick, 23, 26), { delta: 0, result: 'push' })
+  })
   it('grades both sides against the locked home spread', () => {
     assert.deepEqual(gradeWeeklySuggestion(suggestion(), 20, 27), { delta: 3.5, result: 'win' })
     assert.deepEqual(

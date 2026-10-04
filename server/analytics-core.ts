@@ -48,6 +48,7 @@ export type AnalyticsTeamStatRow = {
   rush_yards: number | null
   turnovers_total: number | null
   sacks: number | null
+  sacks_yards_lost?: string | null
 }
 
 export type AnalyticsStandingRow = {
@@ -69,6 +70,8 @@ export type AnalyticsInjuryRow = {
   injury_date: string | null
   status: string | null
   description: string | null
+  first_seen_at?: string | null
+  last_seen_at?: string | null
 }
 
 export type AnalyticsPlayerStatRow = {
@@ -126,6 +129,21 @@ export type AnalyticsSourceData = {
   playerStats: AnalyticsPlayerStatRow[]
   players: AnalyticsPlayerRow[]
   targetMatchup?: AnalyticsTargetMatchup | null
+  evidenceScope?: AnalyticsEvidenceScope
+}
+
+export type AnalyticsEvidenceScope = {
+  season: number
+  stage: string | null
+  excludedStage: string | null
+  beforeKickoff: number | null
+  teamIds: number[]
+}
+
+export type AnalyticsMetricSample = {
+  sum: number | null
+  count: number
+  gameIds: number[]
 }
 
 export type AnalyticsLimits = {
@@ -151,11 +169,12 @@ type ResultCounts = {
 }
 
 export type AnalyticsSnapshot = {
-  schemaVersion: 1
+  schemaVersion: 1 | 2
   generatedAt: string
   preset: AnalyticsPreset
   filters: AnalyticsFilters
   targetMatchup: AnalyticsTargetMatchup | null
+  evidenceScope?: AnalyticsEvidenceScope
   definitions: {
     spreadDelta: string
     totalDelta: string
@@ -194,6 +213,10 @@ export type AnalyticsSnapshot = {
     averageTeamSpreadDelta: number | null
     averagePointsFor: number | null
     averagePointsAgainst: number | null
+    locationSplits?: {
+      home: AnalyticsTeamLocationTrend
+      away: AnalyticsTeamLocationTrend
+    }
   }>
   teamStatTrends: BoundedAnalyticsItems<{
     teamId: number
@@ -204,6 +227,8 @@ export type AnalyticsSnapshot = {
     averageRushYards: number | null
     averageTurnovers: number | null
     averageSacks: number | null
+    averageSacksAllowed?: number | null
+    metricSamples?: Record<AnalyticsStatMetric, AnalyticsMetricSample>
   }>
   games: BoundedAnalyticsItems<{
     gameId: number
@@ -228,7 +253,11 @@ export type AnalyticsSnapshot = {
     totalResult: BettingGameRow['total_result']
   }>
   standings: BoundedAnalyticsItems<AnalyticsStandingRow & { teamName: string }>
-  currentInjuries: BoundedAnalyticsItems<AnalyticsInjuryRow & { playerName: string; teamName: string | null }>
+  currentInjuries: BoundedAnalyticsItems<AnalyticsInjuryRow & {
+    playerName: string
+    teamName: string | null
+    position?: string | null
+  }>
   playerStats: BoundedAnalyticsItems<AnalyticsPlayerStatRow & {
     playerName: string
     position: string | null
@@ -237,8 +266,16 @@ export type AnalyticsSnapshot = {
     gamesMissingSpread: number
     gamesMissingTotal: number
     gamesMissingRequiredTeamStats: number
+    warnings?: string[]
   }
 }
+
+export type AnalyticsTeamLocationTrend = Omit<
+  AnalyticsSnapshot['teamTrends']['items'][number], 'locationSplits'
+>
+
+export type AnalyticsStatMetric =
+  | 'totalYards' | 'passYards' | 'rushYards' | 'turnovers' | 'sacks' | 'sacksAllowed'
 
 export type AnalyticsOverview = Pick<AnalyticsSnapshot, 'generatedAt' | 'preset' | 'filters' | 'summary' | 'teamTrends' | 'games'> & {
   dataQuality: Pick<AnalyticsSnapshot['dataQuality'], 'gamesMissingSpread' | 'gamesMissingTotal'>
@@ -430,7 +467,9 @@ function buildSummary(games: BettingGameRow[]): AnalyticsSnapshot['summary'] {
   }
 }
 
-function buildTeamTrends(games: BettingGameRow[], names: Map<number, string>) {
+function buildTeamTrends(
+  games: BettingGameRow[], names: Map<number, string>, withSplits = true,
+): AnalyticsSnapshot['teamTrends']['items'] {
   type MutableTrend = AnalyticsSnapshot['teamTrends']['items'][number] & {
     spreadDeltas: number[]
     pointsFor: number[]
@@ -499,12 +538,43 @@ function buildTeamTrends(games: BettingGameRow[], names: Map<number, string>) {
       averageTeamSpreadDelta: average(spreadDeltas),
       averagePointsFor: average(pointsFor),
       averagePointsAgainst: average(pointsAgainst),
+      ...(withSplits ? {
+        locationSplits: {
+          home: buildTeamTrends(
+            games.filter((game) => game.home_team_id === trend.teamId),
+            new Map([[trend.teamId, trend.teamName]]), false,
+          )[0],
+          away: buildTeamTrends(
+            games.filter((game) => game.away_team_id === trend.teamId),
+            new Map([[trend.teamId, trend.teamName]]), false,
+          )[0],
+        },
+      } : {}),
     }))
     .sort((left, right) =>
       (right.atsWinRate ?? -1) - (left.atsWinRate ?? -1)
       || right.games - left.games
       || left.teamName.localeCompare(right.teamName)
       || left.teamId - right.teamId)
+}
+
+export function parseSacksAllowed(value: string | null | undefined): number | null {
+  if (value == null) return null
+  const match = value.trim().match(/^(\d+)\s*-\s*\d+$/)
+  const count = match ? Number(match[1]) : null
+  return count != null && Number.isSafeInteger(count) ? count : null
+}
+
+function metricSample(rows: AnalyticsTeamStatRow[], read: (row: AnalyticsTeamStatRow) => number | null) {
+  const values = rows.flatMap((row) => {
+    const value = read(row)
+    return value != null && Number.isFinite(value) ? [{ gameId: row.game_id, value }] : []
+  })
+  return {
+    sum: values.length ? values.reduce((sum, entry) => sum + entry.value, 0) : null,
+    count: values.length,
+    gameIds: values.map((entry) => entry.gameId).sort((left, right) => left - right),
+  }
 }
 
 function buildTeamStatTrends(teamStats: AnalyticsTeamStatRow[], names: Map<number, string>) {
@@ -525,6 +595,15 @@ function buildTeamStatTrends(teamStats: AnalyticsTeamStatRow[], names: Map<numbe
       averageRushYards: average(rows.map((row) => row.rush_yards)),
       averageTurnovers: average(rows.map((row) => row.turnovers_total)),
       averageSacks: average(rows.map((row) => row.sacks)),
+      averageSacksAllowed: average(rows.map((row) => parseSacksAllowed(row.sacks_yards_lost))),
+      metricSamples: {
+        totalYards: metricSample(rows, (row) => row.yards_total),
+        passYards: metricSample(rows, (row) => row.pass_yards),
+        rushYards: metricSample(rows, (row) => row.rush_yards),
+        turnovers: metricSample(rows, (row) => row.turnovers_total),
+        sacks: metricSample(rows, (row) => row.sacks),
+        sacksAllowed: metricSample(rows, (row) => parseSacksAllowed(row.sacks_yards_lost)),
+      },
     }))
     .sort((left, right) => right.games - left.games
       || left.teamName.localeCompare(right.teamName)
@@ -606,7 +685,12 @@ export function buildAnalyticsSnapshot(
       .filter(([teamId]) => includeTeam(teamId))
       .map(([, key]) => key),
   )
-  for (const stats of source.teamStats) expectedTeamStats.delete(`${stats.game_id}:${stats.team_id}`)
+  for (const stats of source.teamStats) {
+    if ([stats.yards_total, stats.pass_yards, stats.rush_yards, stats.turnovers_total, stats.sacks]
+      .every((value) => value != null && Number.isFinite(value))) {
+      expectedTeamStats.delete(`${stats.game_id}:${stats.team_id}`)
+    }
+  }
 
   const gameItems = [...source.games]
     .sort((left, right) => (right.game_timestamp ?? 0) - (left.game_timestamp ?? 0) || right.game_id - left.game_id)
@@ -643,6 +727,7 @@ export function buildAnalyticsSnapshot(
       ...injury,
       playerName: players.get(injury.player_id)?.name ?? `Player ${injury.player_id}`,
       teamName: injury.team_id == null ? null : names.get(injury.team_id) ?? `Team ${injury.team_id}`,
+      position: players.get(injury.player_id)?.position ?? null,
     }))
     .sort((left, right) => (right.injury_date ?? '').localeCompare(left.injury_date ?? '')
       || left.playerName.localeCompare(right.playerName)
@@ -657,11 +742,18 @@ export function buildAnalyticsSnapshot(
     })))
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt,
     preset,
     filters,
     targetMatchup: source.targetMatchup ?? null,
+    evidenceScope: source.evidenceScope ?? {
+      season: filters.season,
+      stage: filters.stage ?? null,
+      excludedStage: filters.excludeStage ?? null,
+      beforeKickoff: source.targetMatchup?.kickoff.timestamp ?? null,
+      teamIds: [...focusTeamIds].sort((left, right) => left - right),
+    },
     definitions: {
       spreadDelta: 'Home final margin plus closing home spread; positive means home cover.',
       totalDelta: 'Final combined score minus closing total; positive means over.',
@@ -687,6 +779,9 @@ export function buildAnalyticsSnapshot(
       gamesMissingRequiredTeamStats: new Set(
         Array.from(expectedTeamStats, (key) => Number(key.split(':')[0])),
       ).size,
+      warnings: source.teamStats
+        .filter((row) => row.sacks_yards_lost != null && parseSacksAllowed(row.sacks_yards_lost) == null)
+        .map((row) => `Game ${row.game_id}, team ${row.team_id}: unrecognized offensive sacks/yardage format; sacks allowed unavailable.`),
     },
   }
 }

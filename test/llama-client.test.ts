@@ -92,12 +92,13 @@ describe('llama.cpp configuration and grounding', () => {
     })
 
     assert.equal(messages[0].content, ANALYTICS_GROUNDING_PROMPT)
-    assert.match(messages[1].content, /"schemaVersion":1/)
-    assert.deepEqual(messages.slice(2).map((message) => message.content), [
+    assert.match(messages[1].content, /"schemaVersion":2/)
+    assert.deepEqual(messages.slice(2, -1).map((message) => message.content), [
       'recent answer',
       'recent question',
-      'What is supported?',
     ])
+    assert.match(messages.at(-1)!.content, /Question \(not source evidence\): What is supported\?/)
+    assert.match(messages.at(-1)!.content, /Return JSON only/)
   })
 
   it('rejects prompts over the configured context bound', () => {
@@ -215,6 +216,14 @@ describe('llama.cpp grounded completions', () => {
     assert.equal(body?.model, 'test-model')
     assert.equal(body?.stream, false)
     assert.equal(body?.max_tokens, 512)
+    const format = body?.response_format as {
+      type: string
+      json_schema: { strict: boolean; schema: { properties: { observations: { minItems: number; maxItems: number } } } }
+    }
+    assert.equal(format.type, 'json_schema')
+    assert.equal(format.json_schema.strict, true)
+    assert.equal(format.json_schema.schema.properties.observations.minItems, 1)
+    assert.equal(format.json_schema.schema.properties.observations.maxItems, 40)
     assert.match(JSON.stringify(body?.messages), /Use only facts/)
   })
 
@@ -234,6 +243,7 @@ describe('llama.cpp grounded completions', () => {
     const baseUrl = await startServer(async (request, response) => {
       const body = await readJsonBody(request)
       assert.equal(body.stream, true)
+      assert.equal((body.response_format as { type: string }).type, 'json_schema')
       response.writeHead(200, { 'Content-Type': 'text/event-stream' })
       response.write(`data: ${JSON.stringify({
         model: 'test-model',

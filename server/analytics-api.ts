@@ -32,6 +32,7 @@ import {
 import { createWeeklyAnalysisStore } from './weekly-analysis-store'
 import { statusForWeeklyLossAnalysisError } from './weekly-loss-analysis'
 import { AnalyticsDatabaseError } from './analytics-reads'
+import { AnalyticsReportError, renderAnalyticsReport } from './analytics-report'
 
 export type AnalyticsFilterMetadata = {
   seasons: number[]
@@ -135,6 +136,9 @@ function llamaStatus(error: LlamaClientError) {
 }
 
 export function statusForApiError(error: unknown) {
+  if (error instanceof AnalyticsReportError) {
+    return { statusCode: 502, code: error.code, message: error.message }
+  }
   if (error instanceof AnalyticsDatabaseError) {
     return { statusCode: error.code === 'database_timeout' ? 504 : 503, code: error.code, message: error.message }
   }
@@ -275,6 +279,7 @@ async function streamFollowUp(
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   })
+  response.flushHeaders()
   const heartbeat = setInterval(() => {
     if (!response.destroyed && !response.writableEnded) response.write(': heartbeat\n\n')
   }, 10_000)
@@ -285,11 +290,13 @@ async function streamFollowUp(
       question,
     }, controller.signal)) {
       if (event.type === 'content') {
-        writeSse(response, 'content', { content: event.content })
         continue
       }
       if (controller.signal.aborted) return
-      await dependencies.store.appendExchange(session.id, question, event)
+      const content = renderAnalyticsReport(event.content, session.context, event.finishReason)
+      await dependencies.store.appendExchange(session.id, question, { ...event, content })
+      if (controller.signal.aborted) return
+      writeSse(response, 'content', { content })
       writeSse(response, 'complete', {
         model: event.model,
         finishReason: event.finishReason,
@@ -532,6 +539,7 @@ export async function handleAnalyticsApiRequest(
     const title = parseTitle(body.title)
     const snapshot = await generateAnalyticsSnapshot(dependencies.dataSource, preset, body.filters, { signal })
     const completion = await dependencies.llama.complete(snapshot, {}, signal)
+    completion.content = renderAnalyticsReport(completion.content, snapshot, completion.finishReason)
     signal.throwIfAborted()
     const session = await dependencies.store.saveInitial({
       title,

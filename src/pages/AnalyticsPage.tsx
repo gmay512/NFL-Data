@@ -25,6 +25,7 @@ import { analyticsKey, invalidateAnalyticsReads, useAnalyticsRead } from '../dat
 import { AnalyticsReadStatuses } from '../features/analytics/AnalyticsReadStatus'
 import { AnalyticsModelHelp, AnalyticsModelStatus } from '../features/analytics/AnalyticsModelStatus'
 import { AnalyticsNav } from '../features/analytics/AnalyticsNav'
+import { AnalyticsGroundingDetails } from '../features/analytics/AnalyticsGroundingDetails'
 import { StatusMessage } from '../features/dashboard/DashboardComponents'
 
 function numberParam(value: string | null) {
@@ -586,7 +587,7 @@ export function AnalyticsPage() {
           {!isLoading && snapshot && (
             <aside className="panel panel-wide analysis-actions">
               <div className="section-heading"><h2>Local analysis</h2></div>
-              <p>Generate a saved explanation grounded in the metrics currently shown.</p>
+              <p>Generate a saved report of validated, model-selected facts from the current source data.</p>
               {availablePresets.map((item) => <button key={item} type="button" disabled={isAnalyzing || llmHealth?.status !== 'available'} onClick={() => void createReport(item)}>
                 {isAnalyzing ? 'Analyzing…' : presetLabel(item)}
               </button>)}
@@ -621,16 +622,8 @@ export function AnalyticsPage() {
               </div>)}
               {pendingAnswer && <div className={`analysis-message is-assistant ${isStreaming ? 'is-streaming' : ''}`}><strong>{answerSaved ? 'Local model (saved)' : isStreaming ? 'Local model' : 'Local model (save not confirmed)'}</strong><p>{pendingAnswer}</p></div>}
             </div>
-            <details className="grounding-details"><summary>Grounding details</summary><pre>{JSON.stringify({
-              filters: activeSession.filters,
-              generatedAt: activeSession.context.generatedAt,
-              dataQuality: activeSession.context.dataQuality,
-              truncation: {
-                games: activeSession.context.games.truncated,
-                playerStats: activeSession.context.playerStats.truncated,
-                injuries: activeSession.context.currentInjuries.truncated,
-              },
-            }, null, 2)}</pre></details>
+            <AnalyticsGroundingDetails snapshot={activeSession.context} />
+            {isStreaming && !pendingAnswer && <p role="status">Generating and validating the answer before display...</p>}
             <form className="analysis-chat-form" onSubmit={(event) => void submitQuestion(event)}>
               <textarea value={question} maxLength={4000} disabled={isStreaming || isAnalyzing || isOpeningSession} placeholder="Ask a follow-up grounded in this saved dataset…" onChange={(event) => setQuestion(event.target.value)} />
               <div>

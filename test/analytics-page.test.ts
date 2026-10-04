@@ -659,5 +659,23 @@ describe('AnalyticsPage', () => {
 
     assert.match(container.textContent ?? '', /2025 season overview/)
     assert.match(container.textContent ?? '', /The supplied game finished over the closing total/)
+    assert.match(container.textContent ?? '', /Grounding details/)
+    assert.match(container.textContent ?? '', /effective history|all stages/i)
+    assert.match(container.textContent ?? '', /Provider freshness/)
+  })
+
+  it('discloses unknown legacy scope without rewriting a saved message', async () => {
+    const legacy = {
+      ...session, context: { ...snapshot, schemaVersion: 1, evidenceScope: undefined },
+    }
+    const container = await renderPage(async (input, init) => {
+      if (new URL(String(input), 'http://localhost').pathname === '/api/analytics/sessions/session-1') {
+        return json({ session: legacy })
+      }
+      return baseFetch({ saved: true })(input, init)
+    }, '/analytics?session=session-1')
+    assert.match(container.textContent ?? '', /Legacy report/)
+    assert.match(container.textContent ?? '', /effective history scope was not recorded/)
+    assert.match(container.textContent ?? '', /The supplied game finished over the closing total/)
   })
 })

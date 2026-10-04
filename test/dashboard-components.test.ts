@@ -10,6 +10,7 @@ import {
 import type { AnalysisSession } from '../src/api/contracts'
 import { getGameAnalysisPreset } from '../src/lib/game-format'
 import type { GameOddsRow, GameRow, LatestGameEventRow } from '../src/types/nfl'
+import { buildAnalyticsSnapshot } from '../server/analytics-core'
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React
 
@@ -108,7 +109,9 @@ describe('game analysis modal', () => {
     title: 'Visitors at Hosts preview',
     preset: 'matchup_preview',
     filters: { season: 2026, gameId: 1 },
-    context: {} as AnalysisSession['context'],
+    context: buildAnalyticsSnapshot('matchup_preview', { season: 2026, gameId: 1 }, {
+      games: [], teamStats: [], standings: [], injuries: [], playerStats: [], players: [],
+    }),
     model: 'qwen3-coder-next',
     createdAt: '2026-09-02T00:00:00.000Z',
     updatedAt: '2026-09-02T00:00:00.000Z',
@@ -149,5 +152,7 @@ describe('game analysis modal', () => {
     assert.match(result, /Open full conversation/)
     assert.match(result, new RegExp(`/analytics\\?session=${session.id}`))
     assert.match(result, /aria-modal="true"/)
+    assert.match(result, /Grounding details/)
+    assert.match(result, /Provider freshness/)
   })
 })

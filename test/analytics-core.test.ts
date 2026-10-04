@@ -233,7 +233,8 @@ describe('deterministic analytics snapshot', () => {
   })
 
   it('calculates team-perspective ATS records and deltas', () => {
-    assert.deepEqual(snapshot.teamTrends.items, [{
+    const { locationSplits, ...trend } = snapshot.teamTrends.items[0]
+    assert.deepEqual(trend, {
       teamId: 1,
       teamName: 'Arizona',
       games: 3,
@@ -250,11 +251,16 @@ describe('deterministic analytics snapshot', () => {
       averageTeamSpreadDelta: 1.833,
       averagePointsFor: 25,
       averagePointsAgainst: 20.333,
-    }])
+    })
+    assert.equal(locationSplits?.home.games, 2)
+    assert.equal(locationSplits?.home.atsPushes, 1)
+    assert.equal(locationSplits?.away.games, 1)
+    assert.equal(locationSplits?.away.atsWins, 1)
   })
 
   it('aggregates team statistics and reports missing team box scores', () => {
-    assert.deepEqual(snapshot.teamStatTrends.items, [{
+    const { metricSamples, averageSacksAllowed, ...trend } = snapshot.teamStatTrends.items[0]
+    assert.deepEqual(trend, {
       teamId: 1,
       teamName: 'Arizona',
       games: 2,
@@ -263,7 +269,9 @@ describe('deterministic analytics snapshot', () => {
       averageRushYards: 125,
       averageTurnovers: 1.5,
       averageSacks: 2,
-    }])
+    })
+    assert.equal(averageSacksAllowed, null)
+    assert.deepEqual(metricSamples?.turnovers, { sum: 3, count: 2, gameIds: [1, 2] })
     assert.equal(snapshot.dataQuality.gamesMissingRequiredTeamStats, 1)
   })
 
@@ -291,7 +299,7 @@ describe('deterministic analytics snapshot', () => {
     )
     assert.equal(snapshot.playerStats.total, 1)
     assert.equal(snapshot.generatedAt, '2025-10-01T00:00:00.000Z')
-    assert.equal(snapshot.schemaVersion, 1)
+    assert.equal(snapshot.schemaVersion, 2)
   })
 
   it('balances bounded player detail across stat categories', () => {

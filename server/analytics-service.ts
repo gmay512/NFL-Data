@@ -251,7 +251,10 @@ async function loadMatchupHistory(
     .abortSignal(scope.signal)
 
   if (stage) query = query.eq('stage', stage)
-  if (excludeStage) query = query.neq('stage', excludeStage)
+  if (excludeStage) {
+    query = query.neq('stage', excludeStage)
+    if (excludeStage === 'Pre Season') query = query.neq('stage', 'Preseason')
+  }
 
   const { data, error, count } = await query
   throwQueryError(error, `Could not select matchup history before ${kickoffTimestamp}`)
@@ -305,7 +308,7 @@ async function loadTeamStats(client: SupabaseClient, gameIds: number[], teamIds:
     rows.push(...await fetchAllPages<AnalyticsTeamStatRow>(async (from, to) => {
       const { data, error } = await client
         .from('game_team_stats')
-        .select('game_id,team_id,yards_total,pass_yards,rush_yards,turnovers_total,sacks')
+        .select('game_id,team_id,yards_total,pass_yards,rush_yards,turnovers_total,sacks,sacks_yards_lost')
         .in('game_id', gameIdChunk)
         .in('team_id', teamIds)
         .order('game_id')
@@ -337,7 +340,7 @@ async function loadInjuries(client: SupabaseClient, teamIds: number[], signal: A
   return fetchAllPages<AnalyticsInjuryRow>(async (from, to) => {
     const { data, error } = await client
       .from('injuries')
-      .select('player_id,team_id,injury_date,status,description')
+      .select('player_id,team_id,injury_date,status,description,first_seen_at,last_seen_at')
       .in('team_id', teamIds)
       .is('resolved_at', null)
       .order('injury_date', { ascending: false })
@@ -426,14 +429,21 @@ export function createSupabaseAnalyticsDataSource(client: SupabaseClient): Analy
       const targetTeamIds = targetMatchup
         ? [targetMatchup.awayTeam.id, targetMatchup.homeTeam.id].sort((left, right) => left - right)
         : null
+      const historyStage = filters.stage
+        ?? (targetMatchup?.stage?.trim().toLowerCase() === 'regular season' && !filters.excludeStage
+          ? targetMatchup.stage : undefined)
+      const historyExcludedStage = filters.excludeStage
+        ?? (targetMatchup && !historyStage
+          && !['pre season', 'preseason'].includes(targetMatchup.stage?.trim().toLowerCase() ?? '')
+          ? 'Pre Season' : undefined)
       const games = targetMatchup
         ? await loadMatchupHistory(
             client,
             filters.season,
             targetMatchup.kickoff.timestamp,
             targetTeamIds!,
-            filters.stage,
-            filters.excludeStage,
+            historyStage,
+            historyExcludedStage,
             scope,
           )
         : await loadGames(client, filters, scope)
@@ -451,7 +461,16 @@ export function createSupabaseAnalyticsDataSource(client: SupabaseClient): Analy
       ])].sort((left, right) => left - right)
       const players = await scope.read(`players:${playerIds.join(',')}`, () => loadPlayers(client, playerIds, scope.signal))
 
-      return { games, teamStats, standings, injuries, playerStats, players, targetMatchup }
+      return {
+        games, teamStats, standings, injuries, playerStats, players, targetMatchup,
+        evidenceScope: {
+          season: filters.season,
+          stage: targetMatchup ? historyStage ?? null : filters.stage ?? null,
+          excludedStage: targetMatchup ? historyExcludedStage ?? null : filters.excludeStage ?? null,
+          beforeKickoff: targetMatchup?.kickoff.timestamp ?? null,
+          teamIds,
+        },
+      }
     },
   }
 }

@@ -513,7 +513,7 @@ describe('analytics API contracts', () => {
       response.setHeader('Content-Type', 'application/json')
       response.end(JSON.stringify({
         model: 'test-model',
-        choices: [{ message: { content: 'Grounded overview.' }, finish_reason: 'stop' }],
+        choices: [{ message: { content: JSON.stringify({ observations: [{ kind: 'fact', factId: 'sample.spread' }] }) }, finish_reason: 'stop' }],
         usage: { prompt_tokens: 20, completion_tokens: 2, total_tokens: 22 },
       }))
     })
@@ -551,7 +551,7 @@ describe('analytics API contracts', () => {
       response.setHeader('Content-Type', 'application/json')
       response.end(JSON.stringify({
         model: 'test-model',
-        choices: [{ message: { content: 'Grounded matchup.' }, finish_reason: 'stop' }],
+        choices: [{ message: { content: JSON.stringify({ observations: [{ kind: 'fact', factId: 'matchup.identity' }] }) }, finish_reason: 'stop' }],
       }))
     })
     const memory = createMemoryStore()
@@ -597,7 +597,7 @@ describe('analytics API contracts', () => {
       response.writeHead(200, { 'Content-Type': 'text/event-stream' })
       response.write(`data: ${JSON.stringify({
         model: 'test-model',
-        choices: [{ delta: { content: 'Follow-up answer.' }, finish_reason: 'stop' }],
+        choices: [{ delta: { content: JSON.stringify({ observations: [{ kind: 'fact', factId: 'sample.totals' }] }) }, finish_reason: 'stop' }],
       })}\n\n`)
       if (body.stream && endStream) response.end('data: [DONE]\n\n')
       else response.end()
@@ -643,8 +643,116 @@ describe('analytics API contracts', () => {
     })
     const incompleteBody = await incomplete.text()
     assert.match(incompleteBody, /event: error/)
+    assert.doesNotMatch(incompleteBody, /event: content/)
     assert.doesNotMatch(incompleteBody, /event: complete/)
     assert.equal(memory.getAppendCount(), 1)
+  })
+
+  it('rejects invalid report selections before persistence or SSE display, including legacy follow-ups', async () => {
+    let content = 'Dallas is 2-2 ATS and the closing total is 48.5.'
+    let finishReason = 'stop'
+    const modelUrl = await startServer(async (incoming, response) => {
+      const chunks: Buffer[] = []
+      for await (const chunk of incoming) chunks.push(Buffer.from(chunk))
+      const body = JSON.parse(Buffer.concat(chunks).toString()) as { stream: boolean }
+      if (body.stream) {
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' })
+        response.write(`data: ${JSON.stringify({
+          model: 'test-model', choices: [{ delta: { content }, finish_reason: finishReason }],
+        })}\n\n`)
+        response.end('data: [DONE]\n\n')
+      } else {
+        response.setHeader('Content-Type', 'application/json')
+        response.end(JSON.stringify({
+          model: 'test-model', choices: [{ message: { content }, finish_reason: finishReason }],
+        }))
+      }
+    })
+    const memory = createMemoryStore()
+    const deps = dependencies(llama(modelUrl), memory.store)
+    const invalid = await request('/api/analytics/analyze', deps, 'POST', {
+      title: 'Invalid report', preset: 'season_overview', filters: { season: 2025 },
+    })
+    assert.equal(invalid.status, 502)
+    assert.equal((await invalid.json() as { code: string }).code, 'invalid_report_output')
+    assert.equal(memory.getSession(), null)
+
+    const legacyContext = { ...context, schemaVersion: 1 as const, evidenceScope: undefined }
+    await memory.store.saveInitial({
+      title: 'Legacy', preset: 'season_overview', filters: context.filters, context: legacyContext,
+      model: 'test-model', prompt: 'Old question', completion: {
+        content: 'Original unvalidated answer', model: 'test-model', finishReason: 'stop', usage: null, latencyMs: 1,
+      },
+    })
+    const before = JSON.stringify(memory.getSession()?.context)
+    for (const invalidContent of [
+      content,
+      '{"observations":[{"kind":"fact","factId":"game.999.score"}]}',
+      '{"observations":[{"kind":"fact","factId":"sample.spread","value":99}]}',
+    ]) {
+      content = invalidContent
+      const failed = await request(`/api/analytics/sessions/${sessionId}/messages`, deps, 'POST', { question: 'Tell me the record.' })
+      const body = await failed.text()
+      assert.match(body, /event: error/)
+      assert.match(body, /invalid_report_output/)
+      assert.doesNotMatch(body, /event: content|event: complete|Dallas is 2-2/)
+      assert.equal(memory.getAppendCount(), 0)
+    }
+    content = '{"observations":[{"kind":"fact","factId":"limitation.market-history"}]}'
+    finishReason = 'length'
+    const truncated = await request(`/api/analytics/sessions/${sessionId}/messages`, deps, 'POST', { question: 'Opening odds?' })
+    assert.doesNotMatch(await truncated.text(), /event: content|event: complete/)
+    assert.equal(memory.getAppendCount(), 0)
+    finishReason = 'stop'
+    const valid = await request(`/api/analytics/sessions/${sessionId}/messages`, deps, 'POST', { question: 'Opening odds?' })
+    const validBody = await valid.text()
+    assert.match(validBody, /Opening odds and line movement are unavailable/)
+    assert.match(validBody, /Legacy report/)
+    assert.match(validBody, /event: complete/)
+    assert.equal(memory.getAppendCount(), 1)
+    assert.equal(JSON.stringify(memory.getSession()?.context), before)
+    assert.equal(memory.getSession()?.messages[1].content, 'Original unvalidated answer')
+  })
+
+  it('cancels buffered follow-ups without exposing model tokens or saving an exchange', { timeout: 2_000 }, async () => {
+    let started: () => void = () => {}
+    const modelStarted = new Promise<void>((resolve) => { started = resolve })
+    const modelUrl = await startServer(async (incoming, response) => {
+      for await (const chunk of incoming) void chunk
+      response.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      response.write(`data: ${JSON.stringify({
+        model: 'test-model', choices: [{ delta: {
+          content: '{"observations":[{"kind":"fact","factId":"sample.spread"}]}',
+        }, finish_reason: null }],
+      })}\n\n`)
+      started()
+    })
+    const memory = createMemoryStore()
+    await memory.store.saveInitial({
+      title: 'Existing', preset: 'season_overview', filters: context.filters, context,
+      model: 'test-model', prompt: 'Original', completion: {
+        content: 'Original report', model: 'test-model', finishReason: 'stop', usage: null, latencyMs: 1,
+      },
+    })
+    const deps = dependencies(llama(modelUrl), memory.store)
+    let finished: () => void = () => {}
+    const handlerFinished = new Promise<void>((resolve) => { finished = resolve })
+    const apiUrl = await startServer(async (incoming, response) => {
+      try { await handleApiRequest(incoming, response, {}, deps) } finally { finished() }
+    })
+    const controller = new AbortController()
+    const response = await fetch(`${apiUrl}/api/analytics/sessions/${sessionId}/messages`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Explain the results.' }), signal: controller.signal,
+    })
+    await modelStarted
+    const reading = response.body!.getReader().read()
+    const rejected = assert.rejects(reading, (error: Error) => error.name === 'AbortError')
+    controller.abort()
+    await rejected
+    await handlerFinished
+    assert.equal(memory.getAppendCount(), 0)
+    assert.equal(memory.getSession()?.messages.length, 2)
   })
 
   it('reports local model availability as data rather than failing the page', async () => {
