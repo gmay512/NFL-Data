@@ -10,6 +10,8 @@ import {
 } from '../server/analytics-api'
 import { LlamaClient } from '../server/llama-client'
 import { AnalyticsDatabaseError } from '../server/analytics-reads'
+import type { WeeklyAnalysisRun, WeeklyRunView } from '../server/weekly-analysis'
+import { readWeeklyAnalysisStream } from '../src/api/app-api'
 import type {
   AnalysisSession,
   AnalysisSessionSummary,
@@ -173,6 +175,60 @@ function llama(baseUrl: string) {
 }
 
 describe('analytics API contracts', () => {
+  it('preserves citation omission warnings and only saved suggestions in direct and streamed Weekly results', async () => {
+    for (const picksRemain of [true, false]) {
+      const deps = dependencies(llama('http://127.0.0.1:1'), createMemoryStore().store)
+      const id = '99000000-0000-4000-8000-000000000099'
+      const run: WeeklyAnalysisRun = {
+        id, season: 2025, stage: 'Regular Season', week: 'Week 2', model: 'test-model',
+        context: { schemaVersion: 2, generatedAt: '2025-09-10T00:00:00.000Z',
+          season: 2025, stage: 'Regular Season', week: 'Week 2', matchups: [] },
+        summary: `${picksRemain ? '1 tracked suggestion.' : 'No supported bets met the model selection criteria for this run.'}`
+          + "\n\nApplication note: 1 model suggestion omitted because cited game IDs were outside the target matchup's supplied history (pick 7).",
+        createdAt: '2025-09-10T00:00:00.000Z',
+        suggestions: picksRemain ? [{
+          id: 1, runId: id, gameId: 42, season: 2025, stage: 'Regular Season', week: 'Week 2',
+          kickoffAt: '2025-09-21T17:00:00.000Z', awayTeamId: 2, awayTeamName: 'Visitors',
+          homeTeamId: 1, homeTeamName: 'Hosts', market: 'spread', selection: 'away',
+          lockedLine: 3.5, confidence: 61, rationale: 'Supported recorded facts.',
+          supportingGameIds: [31], result: 'ungraded', resultDelta: null,
+          finalAwayScore: null, finalHomeScore: null, gradedAt: null,
+          createdAt: '2025-09-10T00:00:00.000Z', lossAnalysis: null,
+        }] : [],
+      }
+      const projected: WeeklyRunView = {
+        id, season: run.season, stage: run.stage, week: run.week, model: run.model,
+        summary: run.summary, createdAt: run.createdAt, suggestions: run.suggestions, isFinal: true,
+      }
+      deps.weekly = {
+        async analyze() { return run },
+        async list() { return [run] },
+        async view() { return projected },
+        async delete() { return false },
+        async grade() { return { requestedGames: 0, refreshedGames: 0, graded: 0 } },
+        async analyzeLoss() { throw new Error('Must not analyze losses') },
+        async deleteLossAnalysis() { return false },
+      }
+      const direct = await request('/api/analytics/weekly/analyze', deps, 'POST', { season: 2025 })
+      assert.equal(direct.status, 201)
+      const payload = await direct.json() as { run: WeeklyAnalysisRun }
+      assert.equal(payload.run.summary, run.summary)
+      assert.deepEqual(payload.run.suggestions, run.suggestions)
+      const stream = await request('/api/analytics/weekly/analyze-stream', deps, 'POST', { season: 2025 })
+      assert.equal(stream.status, 200)
+      assert(stream.body)
+      const completed: WeeklyRunView[] = []
+      await readWeeklyAnalysisStream(stream.body, (event) => {
+        if (event.type === 'complete') completed.push(event.run)
+        if (event.type === 'error') assert.fail(event.error)
+      })
+      assert.deepEqual(completed, [projected])
+      const detail = await request(`/api/analytics/weekly/runs/${id}`, deps)
+      assert.equal(detail.status, 200)
+      assert.deepEqual(await detail.json(), { run: projected })
+    }
+  })
+
   it('serves projected overview data without requesting model supporting data', async () => {
     const deps = dependencies(llama('http://127.0.0.1:1'), createMemoryStore().store)
     deps.dataSource = {

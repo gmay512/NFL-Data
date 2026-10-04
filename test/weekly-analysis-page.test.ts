@@ -165,6 +165,44 @@ function baseFetch(getRuns: () => WeeklyAnalysisRun[]) {
 }
 
 describe('WeeklyAnalysisPage', () => {
+  for (const picksRemain of [true, false]) {
+    it(`shows citation omission warnings after generation with ${picksRemain ? 'accepted picks' : 'zero picks'}`, async () => {
+      const warning = "Application note: 1 model suggestion omitted because cited game IDs were outside the target matchup's supplied history (pick 7)."
+      const created = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z',
+        `${picksRemain ? '1 tracked suggestion.' : 'No supported bets met the model selection criteria for this run.'}\n\n${warning}`)
+      if (!picksRemain) created.suggestions = []
+      else created.suggestions[0].rationale = 'Supported recorded facts.'
+      let runs: WeeklyAnalysisRun[] = []
+      let generations = 0
+      const container = await renderPage(async (input, init) => {
+        const path = new URL(String(input), 'http://localhost').pathname
+        if (path === '/api/analytics/weekly/analyze-stream') {
+          generations++
+          runs = [created]
+          return new Response(`event: complete\ndata: ${JSON.stringify({ run: created })}\n\n`, {
+            headers: { 'Content-Type': 'text/event-stream' },
+          })
+        }
+        return baseFetch(() => runs)(input, init)
+      })
+      const analyze = [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((button) => button.textContent === 'Analyze upcoming week')
+      assert(analyze)
+      await React.act(() => analyze.click())
+      await settle()
+      assert.equal(generations, 1)
+      assert.equal(container.querySelector('.weekly-summary')?.textContent, created.summary)
+      assert.equal(container.querySelectorAll('.weekly-pick').length, picksRemain ? 1 : 0)
+      assert.equal(container.querySelector('.weekly-run-option')?.getAttribute('aria-pressed'), 'true')
+      assert.match(container.querySelector('.weekly-run-option')?.textContent ?? '', new RegExp(`${picksRemain ? 1 : 0} picks`))
+      for (const label of ['Tracked suggestion record', 'Selected analysis record']) {
+        assert.match(container.querySelector(`[aria-label="${label}"]`)?.textContent ?? '', new RegExp(`${picksRemain ? 1 : 0} pending`))
+      }
+      assert.equal(container.querySelectorAll('[role="alert"]').length, 0)
+      assert.equal(container.querySelector('.weekly-pick')?.textContent.includes(warning) ?? false, false)
+    })
+  }
+
   it('keeps selected output and model-help layout stable across timed refreshes', async (context) => {
     const expire = captureAnalyticsExpiries(context)
     const newer = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Newer output.')

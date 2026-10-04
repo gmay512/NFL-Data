@@ -455,7 +455,8 @@ export function buildWeeklyMessages(snapshot: WeeklyAnalysisSnapshot): LlamaChat
         '"selection":"away"|"home"|"over"|"under","confidence":integer 1-100,',
         '"supportingGameIds":integer[]}]}',
         'Return at most the 8 strongest picks across the week.',
-        'Each pick must cite 1 to 3 supplied supporting game IDs. Do not return picks for matchups without prior games.',
+        'Each pick must cite 1 to 3 game IDs from recentGames of the matchup with the same gameId as the pick.',
+        'Do not cite the upcoming target game or borrow IDs from another matchup. Do not return picks for matchups without prior games.',
         'Use at most one pick per game and market. Do not include a line field; the application locks the supplied',
         'current consensus line after validating the selection. Omit a market when its line is null or evidence is insufficient.',
         'Do not return a summary, rationale, or factual prose; the application generates those from validated facts.',
@@ -575,6 +576,13 @@ function buildWeeklySummary(picks: WeeklyPick[], snapshot: WeeklyAnalysisSnapsho
     + `${strongest.market} ${strongest.selection} (${strongest.confidence}%).`
 }
 
+function weeklyOmissionNote(pickNumbers: number[], reason: string) {
+  if (!pickNumbers.length) return ''
+  const plural = pickNumbers.length === 1 ? '' : 's'
+  return `\n\nApplication note: ${pickNumbers.length} model suggestion${plural} omitted ${reason}`
+    + ` (pick${plural} ${pickNumbers.join(', ')}).`
+}
+
 export function parseWeeklyModelAnalysis(content: string, snapshot: WeeklyAnalysisSnapshot): WeeklyModelAnalysis {
   let parsed: unknown
   try {
@@ -598,8 +606,10 @@ export function parseWeeklyModelAnalysis(content: string, snapshot: WeeklyAnalys
 
   const matchups = new Map(snapshot.matchups.map((matchup) => [matchup.gameId, matchup]))
   const seen = new Set<string>()
-  let omittedMissingLines = 0
-  let omittedMissingHistory = 0
+  const omittedMissingLines: number[] = []
+  const omittedMissingHistory: number[] = []
+  const omittedMissingCitations: number[] = []
+  const omittedUnsupportedCitations: number[] = []
   const picks = root.picks.map((value, index): WeeklyPick | null => {
     const pick = record(value, `Pick ${index + 1} must be an object.`)
     if (typeof pick.rationale === 'string') delete pick.rationale
@@ -629,20 +639,24 @@ export function parseWeeklyModelAnalysis(content: string, snapshot: WeeklyAnalys
       || new Set(pick.supportingGameIds).size !== pick.supportingGameIds.length) {
       throw new WeeklyAnalysisError('invalid_model_output', `Pick ${index + 1} has invalid supporting game IDs.`)
     }
-    const availableGameIds = new Set(matchup.recentGames.map((game) => game.gameId))
-    if (!availableGameIds.size) {
-      omittedMissingHistory += 1
-      return null
-    }
-    if (!pick.supportingGameIds.length
-      || pick.supportingGameIds.some((id) => !availableGameIds.has(Number(id)))) {
-      throw new WeeklyAnalysisError('invalid_model_output', `Pick ${index + 1} cites a game outside its supplied history.`)
-    }
     const uniqueKey = `${gameId}:${pick.market}`
     if (seen.has(uniqueKey)) {
       throw new WeeklyAnalysisError('invalid_model_output', `The model returned duplicate ${pick.market} picks for game ${gameId}.`)
     }
     seen.add(uniqueKey)
+    const availableGameIds = new Set(matchup.recentGames.map((game) => game.gameId))
+    if (!availableGameIds.size) {
+      omittedMissingHistory.push(index + 1)
+      return null
+    }
+    if (!pick.supportingGameIds.length) {
+      omittedMissingCitations.push(index + 1)
+      return null
+    }
+    if (pick.supportingGameIds.some((id) => !availableGameIds.has(Number(id)))) {
+      omittedUnsupportedCitations.push(index + 1)
+      return null
+    }
     const suppliedLine = pick.market === 'spread'
       ? matchup.target.currentConsensusOdds.homeSpread == null
         ? null
@@ -651,7 +665,7 @@ export function parseWeeklyModelAnalysis(content: string, snapshot: WeeklyAnalys
           : matchup.target.currentConsensusOdds.homeSpread
       : matchup.target.currentConsensusOdds.total
     if (suppliedLine == null) {
-      omittedMissingLines += 1
+      omittedMissingLines.push(index + 1)
       return null
     }
     const weeklyPick: WeeklyPick = {
@@ -666,13 +680,13 @@ export function parseWeeklyModelAnalysis(content: string, snapshot: WeeklyAnalys
     weeklyPick.rationale = buildWeeklyRationale(matchup, weeklyPick)
     return weeklyPick
   }).filter((pick): pick is WeeklyPick => pick != null)
-  const omissionNote = omittedMissingLines
-    ? `\n\nApplication note: ${omittedMissingLines} model suggestion${omittedMissingLines === 1 ? '' : 's'} omitted because no consensus line was available.`
-    : ''
-  const historyNote = omittedMissingHistory
-    ? `\n\nApplication note: ${omittedMissingHistory} model suggestion${omittedMissingHistory === 1 ? '' : 's'} omitted because no prior non-preseason games were available.`
-    : ''
-  return { summary: `${buildWeeklySummary(picks, snapshot)}${omissionNote}${historyNote}`, picks }
+  const notes = [
+    weeklyOmissionNote(omittedMissingLines, 'because no consensus line was available'),
+    weeklyOmissionNote(omittedMissingHistory, 'because no prior non-preseason games were available'),
+    weeklyOmissionNote(omittedMissingCitations, 'because no supporting game IDs were provided'),
+    weeklyOmissionNote(omittedUnsupportedCitations, "because cited game IDs were outside the target matchup's supplied history"),
+  ].join('')
+  return { summary: `${buildWeeklySummary(picks, snapshot)}${notes}`, picks }
 }
 
 export class WeeklyAnalysisService {

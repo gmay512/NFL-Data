@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
-import { describe, it } from 'node:test'
-import type { SupabaseClient } from '@supabase/supabase-js'
+import { describe, it, type TestContext } from 'node:test'
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { buildAnalyticsSnapshot, type AnalyticsTargetMatchup } from '../server/analytics-core'
 import {
   buildWeeklyMessages,
@@ -13,9 +13,11 @@ import {
   WeeklyAnalysisError,
   type WeeklyAnalysisSnapshot,
   type WeeklyAnalysisStore,
+  type WeeklyModelAnalysis,
   type WeeklySuggestion,
 } from '../server/weekly-analysis'
 import { createWeeklyAnalysisStore, gradeWeeklySuggestion } from '../server/weekly-analysis-store'
+import { getLlamaConfig, LlamaClient } from '../server/llama-client'
 
 const target: AnalyticsTargetMatchup = {
   gameId: 42,
@@ -109,17 +111,35 @@ const snapshot: WeeklyAnalysisSnapshot = {
   }],
 }
 
+function modelPick(overrides: Record<string, unknown> = {}) {
+  return {
+    gameId: 42,
+    market: 'spread',
+    selection: 'away',
+    confidence: 61,
+    supportingGameIds: [31],
+    ...overrides,
+  }
+}
+
 function output(overrides: Record<string, unknown> = {}) {
-  return JSON.stringify({
-    picks: [{
-      gameId: 42,
-      market: 'spread',
-      selection: 'away',
-      confidence: 61,
-      supportingGameIds: [31],
-      ...overrides,
-    }],
-  })
+  return JSON.stringify({ picks: [modelPick(overrides)] })
+}
+
+function multiMatchupSnapshot(): WeeklyAnalysisSnapshot {
+  return {
+    ...snapshot,
+    matchups: [42, 43, 44, 45].map((gameId, index) => ({
+      ...snapshot.matchups[0],
+      gameId,
+      target: { ...target, gameId },
+      recentGames: recentGames.map((game) => ({ ...game, gameId: 31 + index })),
+      teamPerformance: snapshot.matchups[0].teamPerformance.map((team) => ({
+        ...team,
+        recentGames: team.recentGames.map((game) => ({ ...game, gameId: 31 + index })),
+      })),
+    })),
+  }
 }
 
 function invalidOutput(error: unknown) {
@@ -158,9 +178,10 @@ describe('weekly model analysis validation', () => {
   })
 
   it('allows a valid no-pick analysis', () => {
-    assert.deepEqual(parseWeeklyModelAnalysis(JSON.stringify({
+    assert.deepEqual(parseWeeklyModelAnalysis(JSON.stringify({ picks: [] }), snapshot), {
       picks: [],
-    }), snapshot).picks, [])
+      summary: 'No supported bets met the model selection criteria for this run.',
+    })
   })
 
   it('omits suggestions whose market has no consensus line and reports the omission', () => {
@@ -199,12 +220,85 @@ describe('weekly model analysis validation', () => {
     assert.match(parsed.summary, /1 model suggestion omitted because no prior non-preseason games were available/)
   })
 
-  it('rejects line drift, incompatible selections, and unsupported citations', () => {
+  it('omits original pick seven while preserving valid picks before and after it', () => {
+    const supplied = multiMatchupSnapshot()
+    const picks = supplied.matchups.flatMap((matchup, index) => [
+      modelPick({ gameId: matchup.gameId, confidence: 70 - index, supportingGameIds: [31 + index] }),
+      modelPick({ gameId: matchup.gameId, market: 'total', selection: 'over', confidence: 60 - index, supportingGameIds: [31 + index] }),
+    ])
+    picks[6] = { ...picks[6], confidence: 99, supportingGameIds: [31] }
+    const parsed = parseWeeklyModelAnalysis(JSON.stringify({ picks }), supplied)
+    const accepted = parseWeeklyModelAnalysis(JSON.stringify({ picks: picks.filter((_, index) => index !== 6) }), supplied)
+    assert.deepEqual(parsed.picks, accepted.picks)
+    assert.equal(parsed.picks.length, 7)
+    assert.match(parsed.summary, /7 tracked suggestions.*3 spreads and 4 totals/)
+    assert.match(parsed.summary, /1 model suggestion omitted because cited game IDs were outside the target matchup's supplied history \(pick 7\)/)
+    assert.doesNotMatch(parsed.summary, /99%/)
+    assert.equal(parsed.picks.at(-1)?.gameId, 45)
+    assert.equal(parsed.picks.at(-1)?.market, 'total')
+  })
+
+  it('omits unknown, cross-matchup, target, and mixed citations without salvaging the pick', () => {
+    const supplied = multiMatchupSnapshot()
+    for (const supportingGameIds of [[999], [32], [42], [31, 999], [31, 32]]) {
+      const parsed = parseWeeklyModelAnalysis(output({ supportingGameIds }), supplied)
+      assert.deepEqual(parsed.picks, [])
+      assert.match(parsed.summary, /^No supported bets met/)
+      assert.match(parsed.summary, /outside the target matchup's supplied history \(pick 1\)/)
+    }
+  })
+
+  it('reports missing citations separately and saves an explicitly warned zero-pick result', () => {
+    const parsed = parseWeeklyModelAnalysis(JSON.stringify({
+      picks: [modelPick({ supportingGameIds: [] }),
+        modelPick({ market: 'total', selection: 'over', supportingGameIds: [999] })],
+    }), snapshot)
+    assert.deepEqual(parsed.picks, [])
+    assert.match(parsed.summary, /^No supported bets met/)
+    assert.match(parsed.summary, /no supporting game IDs were provided \(pick 1\)/)
+    assert.match(parsed.summary, /outside the target matchup's supplied history \(pick 2\)/)
+
+    const multiple = parseWeeklyModelAnalysis(JSON.stringify({
+      picks: [modelPick({ supportingGameIds: [999] }),
+        modelPick({ market: 'total', selection: 'over', supportingGameIds: [998] })],
+    }), snapshot)
+    assert.match(multiple.summary, /2 model suggestions omitted.*\(picks 1, 2\)/)
+  })
+
+  it('preserves distinct missing-line, history, and citation omission reasons', () => {
+    const supplied = multiMatchupSnapshot()
+    supplied.matchups[0].target.currentConsensusOdds = { ...target.currentConsensusOdds, homeSpread: null }
+    supplied.matchups[1].recentGames = []
+    const parsed = parseWeeklyModelAnalysis(JSON.stringify({
+      picks: supplied.matchups.map((matchup, index) => modelPick({
+        gameId: matchup.gameId, supportingGameIds: index === 2 ? [] : index === 3 ? [999] : [31 + index],
+      })),
+    }), supplied)
+    assert.deepEqual(parsed.picks, [])
+    assert.match(parsed.summary, /no consensus line was available \(pick 1\)/)
+    assert.match(parsed.summary, /no prior non-preseason games were available \(pick 2\)/)
+    assert.match(parsed.summary, /no supporting game IDs were provided \(pick 3\)/)
+    assert.match(parsed.summary, /outside the target matchup's supplied history \(pick 4\)/)
+    assert.equal(parsed.summary.match(/Application note:/g)?.length, 4)
+  })
+
+  it('still rejects invalid fields and supporting-ID formats rather than omitting them', () => {
     assert.throws(() => parseWeeklyModelAnalysis(output({ line: 4 }), snapshot), invalidOutput)
     assert.throws(() => parseWeeklyModelAnalysis(output({ selection: 'over' }), snapshot), invalidOutput)
-    assert.throws(() => parseWeeklyModelAnalysis(output({ supportingGameIds: [999] }), snapshot), invalidOutput)
-    assert.throws(() => parseWeeklyModelAnalysis(output({ supportingGameIds: [] }), snapshot), invalidOutput)
-    assert.throws(() => parseWeeklyModelAnalysis(output({ supportingGameIds: [31, 31] }), snapshot), invalidOutput)
+    for (const overrides of [
+      { gameId: 999 }, { market: 'moneyline' }, { confidence: 0 }, { confidence: 101 },
+      { confidence: 61.5 }, { confidence: '61' }, { selection: 'over', supportingGameIds: [999] },
+      { supportingGameIds: null }, { supportingGameIds: '31' }, { supportingGameIds: ['31'] },
+      { supportingGameIds: [0] }, { supportingGameIds: [-1] }, { supportingGameIds: [31.5] },
+      { supportingGameIds: [31, 31] }, { supportingGameIds: [31, 32, 33, 34] }, { extra: true },
+    ]) {
+      assert.throws(() => parseWeeklyModelAnalysis(output(overrides), snapshot), invalidOutput)
+    }
+    assert.throws(() => parseWeeklyModelAnalysis(JSON.stringify({ picks: [null] }), snapshot), invalidOutput)
+    assert.throws(() => parseWeeklyModelAnalysis(JSON.stringify({ picks: [{}] }), snapshot), invalidOutput)
+    assert.throws(() => parseWeeklyModelAnalysis(JSON.stringify({ picks: 'invalid' }), snapshot), invalidOutput)
+    assert.throws(() => parseWeeklyModelAnalysis(JSON.stringify({ picks: [], extra: true }), snapshot), invalidOutput)
+    assert.throws(() => parseWeeklyModelAnalysis(JSON.stringify({ picks: Array.from({ length: 9 }, () => modelPick()) }), snapshot), invalidOutput)
   })
 
   it('rejects duplicate game-market picks and non-JSON prose', () => {
@@ -214,10 +308,147 @@ describe('weekly model analysis validation', () => {
     assert.throws(() => parseWeeklyModelAnalysis('```json\n{}\n```', snapshot), invalidOutput)
   })
 
+  it('rejects duplicate markets even when one or both picks would be omitted', () => {
+    const noHistory = { ...snapshot, matchups: [{ ...snapshot.matchups[0], recentGames: [] }] }
+    const noLine = { ...snapshot, matchups: [{
+      ...snapshot.matchups[0], target: { ...target, currentConsensusOdds: { ...target.currentConsensusOdds, homeSpread: null } },
+    }] }
+    for (const supplied of [snapshot, noHistory, noLine]) {
+      for (const citations of [[[999], [31]], [[31], [999]], [[999], [998]], [[], []]]) {
+        assert.throws(() => parseWeeklyModelAnalysis(JSON.stringify({
+          picks: citations.map((supportingGameIds) => modelPick({ supportingGameIds })),
+        }), supplied), /duplicate spread picks for game 42/)
+      }
+    }
+  })
+
   it('keeps the model contract free of factual prose and within the payload guard', () => {
     const messages = buildWeeklyMessages(snapshot)
     assert.doesNotMatch(messages.at(-1)?.content ?? '', /"(?:rationale|summary)"/)
+    assert.match(messages.at(-1)?.content ?? '', /recentGames of the matchup with the same gameId as the pick/)
+    assert.match(messages.at(-1)?.content ?? '', /Do not cite the upcoming target game or borrow IDs from another matchup/)
     assert.ok(messages.reduce((total, message) => total + message.content.length, 0) < 240_000)
+  })
+})
+
+describe('weekly analysis citation recovery and persistence', () => {
+  function harness(context: TestContext, content: string, finishReason = 'stop') {
+    const supplied = multiMatchupSnapshot()
+    const client = createClient('http://weekly.test', 'test-key', {
+      global: { fetch: async (input) => {
+        const url = new URL(String(input))
+        assert.equal(url.pathname, '/rest/v1/games')
+        const rows = supplied.matchups.map((matchup) => ({
+          id: matchup.gameId, season: supplied.season, stage: supplied.stage,
+          week: supplied.week, game_timestamp: matchup.target.kickoff.timestamp, status_short: 'NS',
+        }))
+        return new Response(JSON.stringify(url.searchParams.get('limit') === '1' ? rows.slice(0, 1) : rows), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } },
+    })
+    const llama = new LlamaClient(getLlamaConfig({ LLM_MODEL: 'test-model' }))
+    const completion = context.mock.method(llama, 'completeMessages', async () => ({
+      content, finishReason, model: 'test-model', usage: null, latencyMs: 1,
+    }))
+    const saved: WeeklyModelAnalysis[] = []
+    const store: WeeklyAnalysisStore = {
+      async save(savedSnapshot, model, parsed) {
+        saved.push(parsed)
+        return {
+          id: '99000000-0000-4000-8000-000000000099',
+          season: savedSnapshot.season, stage: savedSnapshot.stage, week: savedSnapshot.week,
+          model, context: savedSnapshot, summary: parsed.summary, createdAt: savedSnapshot.generatedAt,
+          suggestions: parsed.picks.map((pick, index) => suggestion({
+            id: index + 1, runId: '99000000-0000-4000-8000-000000000099',
+            gameId: pick.gameId, market: pick.market, selection: pick.selection,
+            lockedLine: pick.line, confidence: pick.confidence, rationale: pick.rationale,
+            supportingGameIds: pick.supportingGameIds,
+          })),
+        }
+      },
+      async list() { return [] },
+      async delete() { return false },
+      async listPendingGameIds() { return [] },
+      async gradePending() { return 0 },
+      async getLossAnalysisInput() { return null },
+      async saveLossAnalysis() { throw new Error('Must not save a loss analysis') },
+      async deleteLossAnalysis() { return false },
+    }
+    const service = new WeeklyAnalysisService(client, {
+      async load(filters) {
+        const index = supplied.matchups.findIndex((matchup) => matchup.gameId === filters.gameId)
+        assert(index >= 0)
+        return {
+          games: [{ ...historyGame, game_id: 31 + index }],
+          teamStats: [], standings: [], injuries: [], playerStats: [], players: [],
+          targetMatchup: supplied.matchups[index].target,
+        }
+      },
+    }, llama, store, async () => { throw new Error('Must not refresh games') },
+    () => supplied.generatedAt, () => {})
+    return { service, saved, llama, completion }
+  }
+
+  it('calls the model and store once and saves only fully supported picks', async (context) => {
+    const { service, saved, completion } = harness(context, JSON.stringify({
+      picks: [
+        modelPick(),
+        modelPick({ gameId: 43, supportingGameIds: [31], confidence: 99 }),
+        modelPick({ gameId: 44, supportingGameIds: [33], market: 'total', selection: 'over' }),
+      ],
+    }))
+    const stages: string[] = []
+    const run = await service.analyze(2026, { onProgress: (progress) => stages.push(progress.stage) })
+    assert.equal(completion.mock.callCount(), 1)
+    assert.equal(saved.length, 1)
+    assert.deepEqual(saved[0].picks.map((pick) => pick.gameId), [42, 44])
+    assert.deepEqual(run.suggestions.map((pick) => pick.supportingGameIds), [[31], [33]])
+    assert.deepEqual(run.suggestions.map((pick) => pick.lockedLine), [3.5, 44.5])
+    assert.match(run.summary, /2 tracked suggestions/)
+    assert.match(run.summary, /outside the target matchup's supplied history \(pick 2\)/)
+    assert.equal(run.summary, saved[0].summary)
+    assert.doesNotMatch(run.summary, /99%/)
+    assert.deepEqual(stages, ['building_context', 'running_model', 'saving'])
+  })
+
+  it('saves a warned zero-pick run when no citation-supported selections remain', async (context) => {
+    const { service, saved, completion } = harness(context, output({ supportingGameIds: [999] }))
+    const run = await service.analyze(2026)
+    assert.equal(completion.mock.callCount(), 1)
+    assert.equal(saved.length, 1)
+    assert.deepEqual(saved[0].picks, [])
+    assert.deepEqual(run.suggestions, [])
+    assert.match(run.summary, /^No supported bets met/)
+    assert.match(run.summary, /outside the target matchup's supplied history \(pick 1\)/)
+  })
+
+  it('does not save invalid run-level output or incomplete model responses', async (context) => {
+    for (const [content, finishReason] of [
+      ['not JSON', 'stop'],
+      [output({ gameId: 999 }), 'stop'],
+      [JSON.stringify({ picks: [modelPick(), modelPick({ gameId: 43, confidence: 0, supportingGameIds: [31] })] }), 'stop'],
+      [JSON.stringify({ picks: [modelPick({ supportingGameIds: [999] }), modelPick()] }), 'stop'],
+      [output(), 'length'],
+    ]) {
+      const { service, saved, completion } = harness(context, content, finishReason)
+      await assert.rejects(service.analyze(2026), invalidOutput)
+      assert.equal(completion.mock.callCount(), 1)
+      assert.deepEqual(saved, [])
+    }
+  })
+
+  it('does not save a valid recovered result if cancelled before persistence', async (context) => {
+    const controller = new AbortController()
+    const content = JSON.stringify({ picks: [modelPick(), modelPick({ gameId: 43, supportingGameIds: [31] })] })
+    const { service, saved, completion } = harness(context, content)
+    completion.mock.mockImplementation(async () => {
+      controller.abort()
+      return { content, finishReason: 'stop', model: 'test-model', usage: null, latencyMs: 1 }
+    })
+    await assert.rejects(service.analyze(2026, { signal: controller.signal }), { name: 'AbortError' })
+    assert.equal(completion.mock.callCount(), 1)
+    assert.deepEqual(saved, [])
   })
 })
 

@@ -262,8 +262,17 @@ results, available team and player statistics, standings, and current injuries.
 The local model returns only structured pick selections, confidence, and cited
 game IDs. The server validates those fields and generates the displayed summary
 and rationale from recorded scores and trend facts, preventing model-written
-score attribution. Malformed output, unknown games, duplicate markets,
-unsupported citations, and changed or missing lines reject the entire run.
+score attribution. Each pick must cite one to three games from that target
+matchup's supplied history, not the upcoming game or another matchup's history.
+Picks with missing or out-of-history citations are omitted in full; the app
+does not substitute evidence or keep only the valid portion of a citation list.
+Picks without prior history or an available consensus line are also omitted.
+The saved summary reports omission counts, reasons, and original pick numbers,
+while valid picks retain their original order. If none remain, a zero-pick run
+is saved with those warnings and contributes nothing to the tracked record.
+Malformed output, unknown target games, invalid fields or supporting-ID formats,
+duplicate game-market picks (including omitted picks), and model-supplied line
+fields still reject the entire run.
 
 Every valid suggestion is automatically saved in `betting_analysis_runs` and
 `betting_suggestions`. These tables are separate from the source game schema and
@@ -351,11 +360,17 @@ and structured failure codes, without recording model context or messages.
 The production topology uses:
 
 - application host: `192.168.4.237`;
-- llama.cpp host: `192.168.4.241`;
-- private model endpoint: `http://192.168.4.241:8089`.
+- llama.cpp host: `192.168.4.46`;
+- private model endpoint: `http://192.168.4.46:8089`.
 
-On `192.168.4.241`, start llama.cpp manually with one IPv4 listener for both
-loopback and LAN requests:
+Reserve `192.168.4.46` for the LLM workstation's network interface in the
+router/DHCP server, or use a stable LAN hostname. The current address works, but
+this application configuration does not create a DHCP reservation. If the
+address changes, update `LLM_BASE_URL` and redeploy; a running model on a new
+address cannot be reached through an old configured endpoint.
+
+On `192.168.4.46`, llama.cpp needs one IPv4 listener for both loopback and LAN
+requests. An equivalent manual launch is:
 
 ```bash
 llama-server \
@@ -369,13 +384,13 @@ llama-server \
 Binding to `127.0.0.1` would make the model unreachable from production.
 Binding to `0.0.0.0` lets local clients continue using
 `http://127.0.0.1:8089` while production uses
-`http://192.168.4.241:8089`. Because it listens on every IPv4 interface, keep
+`http://192.168.4.46:8089`. Because it listens on every IPv4 interface, keep
 UFW enabled and permit only the application host:
 
 ```bash
 sudo ufw allow proto tcp \
   from 192.168.4.237 \
-  to 192.168.4.241 port 8089 \
+  to 192.168.4.46 port 8089 \
   comment 'NFL analytics llama.cpp'
 sudo ufw status numbered
 ```
@@ -388,7 +403,7 @@ not the browser, is the LLM client.
 Set the endpoint in `.env.local` before deploying:
 
 ```text
-LLM_BASE_URL=http://192.168.4.241:8089
+LLM_BASE_URL=http://192.168.4.46:8089
 LLM_MODEL=qwen3-coder-next
 ```
 
@@ -400,20 +415,29 @@ After starting llama.cpp, verify the route from the application host and from
 inside the app container:
 
 ```bash
-curl --fail http://192.168.4.241:8089/v1/models
+curl --fail http://192.168.4.46:8089/v1/models
 docker exec nfl-data-app node -e \
-  "fetch('http://192.168.4.241:8089/v1/models').then(r=>{if(!r.ok)process.exit(1);return r.text()}).then(console.log).catch(()=>process.exit(1))"
+  "fetch('http://192.168.4.46:8089/v1/models').then(r=>{if(!r.ok)process.exit(1);return r.text()}).then(console.log).catch(()=>process.exit(1))"
 curl --fail http://127.0.0.1:3000/api/analytics/llm-health
 ```
 
 The health response must report `available` with model
-`qwen3-coder-next`. Because llama.cpp is started manually, an `unavailable`
-health response is expected while it is stopped; deterministic analytics and
-saved-session viewing remain available.
+`qwen3-coder-next`. An `unavailable` health response is expected while the
+service is stopped or unreachable; deterministic analytics and saved-session
+viewing remain available.
 
 The installed user unit is
-`~/.config/systemd/user/llama-server.service`. After changing its bind address,
-reload the unit and restart the manually managed process:
+`~/.config/systemd/user/llama-server.service`. Start and inspect it manually
+without launching a second server on the same port:
+
+```bash
+systemctl --user start llama-server
+systemctl --user status llama-server
+```
+
+The service remains running until explicitly stopped with
+`systemctl --user stop llama-server` or the user service manager shuts down.
+After changing the unit's bind address, reload the unit and restart it:
 
 ```bash
 systemctl --user daemon-reload

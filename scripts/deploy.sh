@@ -26,7 +26,7 @@ llm_max_output_tokens="${LLM_MAX_OUTPUT_TOKENS:-$(sed -n 's/^LLM_MAX_OUTPUT_TOKE
 llm_max_history_messages="${LLM_MAX_HISTORY_MESSAGES:-$(sed -n 's/^LLM_MAX_HISTORY_MESSAGES=//p' "$ROOT/.env.local" | tail -n 1)}"
 llm_max_history_chars="${LLM_MAX_HISTORY_CHARS:-$(sed -n 's/^LLM_MAX_HISTORY_CHARS=//p' "$ROOT/.env.local" | tail -n 1)}"
 
-llm_base_url="${llm_base_url:-http://192.168.4.241:8089}"
+llm_base_url="${llm_base_url:-http://192.168.4.46:8089}"
 llm_model="${llm_model:-qwen3-coder-next}"
 llm_timeout_ms="${llm_timeout_ms:-120000}"
 llm_max_context_chars="${llm_max_context_chars:-240000}"
