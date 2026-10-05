@@ -11,6 +11,8 @@ import type { AnalysisSession } from '../src/api/contracts'
 import { getGameAnalysisPreset } from '../src/lib/game-format'
 import type { GameOddsRow, GameRow, LatestGameEventRow } from '../src/types/nfl'
 import { buildAnalyticsSnapshot } from '../server/analytics-core'
+import { JSDOM } from 'jsdom'
+import { formattedReportMarkdown } from './analytics-report-fixtures'
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React
 
@@ -154,5 +156,27 @@ describe('game analysis modal', () => {
     assert.match(result, /aria-modal="true"/)
     assert.match(result, /Grounding details/)
     assert.match(result, /Provider freshness/)
+  })
+
+  it('renders saved Markdown as structured report elements without rewriting the session', () => {
+    const formatted = {
+      ...session,
+      messages: [{ ...session.messages[0], content: formattedReportMarkdown }],
+    }
+    const before = JSON.stringify(formatted)
+    const dom = new JSDOM(renderModal({ session: formatted }))
+    try {
+      const report = dom.window.document.querySelector('.game-analysis-answer .analytics-report-content')
+      assert(report)
+      assert.equal(report.querySelector('h3')?.textContent, 'Validated factual report')
+      assert.equal(report.querySelector('h4')?.textContent, 'Team trends')
+      assert.equal(report.querySelector('li strong')?.textContent, 'Dallas:')
+      assert.equal(report.querySelectorAll('tbody tr').length, 2)
+      assert(report.querySelector('.analytics-report-table'))
+      assert.doesNotMatch(report.textContent ?? '', /##|\*\*|\| ---/)
+    } finally {
+      dom.window.close()
+    }
+    assert.equal(JSON.stringify(formatted), before)
   })
 })

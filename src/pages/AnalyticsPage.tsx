@@ -26,6 +26,7 @@ import { AnalyticsReadStatuses } from '../features/analytics/AnalyticsReadStatus
 import { AnalyticsModelHelp, AnalyticsModelStatus } from '../features/analytics/AnalyticsModelStatus'
 import { AnalyticsNav } from '../features/analytics/AnalyticsNav'
 import { AnalyticsGroundingDetails } from '../features/analytics/AnalyticsGroundingDetails'
+import { AnalyticsReportContent } from '../features/analytics/AnalyticsReportContent'
 import { StatusMessage } from '../features/dashboard/DashboardComponents'
 
 function numberParam(value: string | null) {
@@ -618,9 +619,10 @@ export function AnalyticsPage() {
             <div className="analysis-messages">
               {activeSession.nextMessageId && <button type="button" disabled={isLoadingMessages || isAnalyzing || isStreaming} onClick={() => void loadOlderMessages()}>Load older messages</button>}
               {activeSession.messages.map((message) => <div className={`analysis-message is-${message.role}`} key={message.id}>
-                <strong>{message.role === 'assistant' ? 'Local model' : 'You'}</strong><p>{message.content}</p>
+                <strong>{message.role === 'assistant' ? 'Local model' : 'You'}</strong>
+                {message.role === 'assistant' ? <AnalyticsReportContent content={message.content} /> : <p>{message.content}</p>}
               </div>)}
-              {pendingAnswer && <div className={`analysis-message is-assistant ${isStreaming ? 'is-streaming' : ''}`}><strong>{answerSaved ? 'Local model (saved)' : isStreaming ? 'Local model' : 'Local model (save not confirmed)'}</strong><p>{pendingAnswer}</p></div>}
+              {pendingAnswer && <div className={`analysis-message is-assistant ${isStreaming ? 'is-streaming' : ''}`}><strong>{answerSaved ? 'Local model (saved)' : isStreaming ? 'Local model' : 'Local model (save not confirmed)'}</strong><AnalyticsReportContent content={pendingAnswer} /></div>}
             </div>
             <AnalyticsGroundingDetails snapshot={activeSession.context} />
             {isStreaming && !pendingAnswer && <p role="status">Generating and validating the answer before display...</p>}

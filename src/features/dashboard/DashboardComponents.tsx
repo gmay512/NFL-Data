@@ -14,6 +14,7 @@ import type { GameAnalysisPreset } from '../../lib/game-format'
 import type { GameOddsRow, GameRow, GameTeamStatRow, LatestGameEventRow, TeamRow } from '../../types/nfl'
 import { GameOddsDisplay } from '../odds/GameOddsDisplay'
 import { AnalyticsGroundingDetails } from '../analytics/AnalyticsGroundingDetails'
+import { AnalyticsReportContent } from '../analytics/AnalyticsReportContent'
 
 function TeamMark({ team, fallback }: { team?: TeamRow; fallback: string }) {
   return <span className="team-mark">{team?.logo_url ? <img src={team.logo_url} alt="" /> : fallback}</span>
@@ -208,7 +209,7 @@ export function GameAnalysisModal({
           )}
           {!isLoading && !error && answer && (
             <div className="game-analysis-answer">
-              <p>{answer.content}</p>
+              <AnalyticsReportContent content={answer.content} />
               <small>{session?.context.schemaVersion === 2
                 ? `Selected by ${session.model}; factual statements rendered by the application.`
                 : `Stored legacy report by ${session?.model}; original prose was not fact-selection validated.`} Descriptive analysis only; not betting or financial advice.</small>

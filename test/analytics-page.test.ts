@@ -7,6 +7,7 @@ import { buildAnalyticsSnapshot, type AnalyticsSourceData } from '../server/anal
 import type { AnalysisSession } from '../server/analysis-store'
 import { invalidateAnalyticsReads, useAnalyticsRead } from '../src/data/analytics-repository'
 import { captureAnalyticsExpiries, deferredAnalyticsReads } from './analytics-refresh-helpers'
+import { formattedReportMarkdown } from './analytics-report-fixtures'
 
 const source: AnalyticsSourceData = {
   games: [{
@@ -589,11 +590,11 @@ describe('AnalyticsPage', () => {
           messages: [...session.messages, {
             ...session.messages[0],
             id: 2,
-            content: 'The home side covered by 3.5 points.',
+            content: formattedReportMarkdown,
           }],
         }
         return new Response(
-          'event: content\ndata: {"content":"The home side covered"}\n\n'
+          `event: content\ndata: ${JSON.stringify({ content: formattedReportMarkdown })}\n\n`
           + 'event: complete\ndata: {"model":"qwen3-coder-next","finishReason":"stop"}\n\n',
           { headers: { 'Content-Type': 'text/event-stream' } },
         )
@@ -618,7 +619,11 @@ describe('AnalyticsPage', () => {
     })
     await React.act(async () => form.requestSubmit())
     await settle()
-    assert.match(container.textContent ?? '', /The home side covered by 3.5 points/)
+    const reports = container.querySelectorAll('.is-assistant .analytics-report-content')
+    const followUp = reports[reports.length - 1]
+    assert.equal(followUp.querySelector('h3')?.textContent, 'Validated factual report')
+    assert.equal(followUp.querySelector('li strong')?.textContent, 'Dallas:')
+    assert.equal(followUp.querySelectorAll('tbody tr').length, 2)
   })
 
   it('does not offer to regenerate an already saved reply when its reload fails', async () => {
@@ -628,7 +633,7 @@ describe('AnalyticsPage', () => {
       if (path.endsWith('/messages')) {
         saved = true
         return new Response(
-          'event: content\ndata: {"content":"Saved reply."}\n\n'
+          `event: content\ndata: ${JSON.stringify({ content: formattedReportMarkdown })}\n\n`
           + 'event: complete\ndata: {"model":"test","finishReason":"stop"}\n\n',
           { headers: { 'Content-Type': 'text/event-stream' } },
         )
@@ -649,7 +654,10 @@ describe('AnalyticsPage', () => {
     await settle()
     assert.match(container.textContent ?? '', /The reply was saved, but the conversation could not be refreshed/)
     assert.match(container.textContent ?? '', /Local model \(saved\)/)
-    assert.match(container.textContent ?? '', /Saved reply/)
+    const pendingReport = container.querySelector('.is-assistant:last-child .analytics-report-content')
+    assert.equal(pendingReport?.querySelector('h3')?.textContent, 'Validated factual report')
+    assert.equal(pendingReport?.querySelector('li strong')?.textContent, 'Dallas:')
+    assert.equal(pendingReport?.querySelectorAll('tbody tr').length, 2)
     assert([...container.querySelectorAll('button')].some((button) => button.textContent === 'Retry conversation'))
     assert([...container.querySelectorAll('button')].every((button) => button.textContent !== 'Retry'))
   })
@@ -677,5 +685,32 @@ describe('AnalyticsPage', () => {
     assert.match(container.textContent ?? '', /Legacy report/)
     assert.match(container.textContent ?? '', /effective history scope was not recorded/)
     assert.match(container.textContent ?? '', /The supplied game finished over the closing total/)
+  })
+
+  it('formats saved assistant Markdown while retaining literal user text and immutable saved content', async () => {
+    const formatted = {
+      ...session,
+      messages: [
+        { ...session.messages[0], role: 'user', content: '# Literal question with **asterisks**' },
+        { ...session.messages[0], id: 2, content: formattedReportMarkdown },
+      ],
+    }
+    const before = JSON.stringify(formatted)
+    const container = await renderPage(async (input, init) => {
+      if (new URL(String(input), 'http://localhost').pathname === '/api/analytics/sessions/session-1') {
+        return json({ session: formatted })
+      }
+      return baseFetch({ saved: true })(input, init)
+    }, '/analytics?session=session-1')
+    const report = container.querySelector('.is-assistant .analytics-report-content')
+    assert.equal(report?.querySelector('h3')?.textContent, 'Validated factual report')
+    assert.equal(report?.querySelector('h4')?.textContent, 'Team trends')
+    assert.equal(report?.querySelector('li strong')?.textContent, 'Dallas:')
+    assert.equal(report?.querySelectorAll('tbody tr').length, 2)
+    assert.doesNotMatch(report?.textContent ?? '', /##|\*\*|\| ---/)
+    const user = container.querySelector('.is-user')
+    assert.equal(user?.querySelector('p')?.textContent, '# Literal question with **asterisks**')
+    assert.equal(user?.querySelectorAll('h3, h4, p strong, .analytics-report-content').length, 0)
+    assert.equal(JSON.stringify(formatted), before)
   })
 })

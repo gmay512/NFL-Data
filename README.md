@@ -303,6 +303,19 @@ tokens are buffered: only validated, application-rendered content is displayed
 after successful persistence. Validation failures show an error and do not
 create a successful exchange.
 
+Validated selections are formatted into Markdown by the application, with
+section headings, observation lists, emphasized evidence labels, and tables
+for compatible numeric comparisons. The model still selects only fact
+references; it does not author factual prose or formatting. Dashboard game
+analyses and Analytics assistant messages/follow-ups use the same Markdown
+renderer, including scrollable tables on narrow screens. User messages stay
+plain text. Raw HTML and unsafe links are disabled, and embedded images are
+shown as text rather than loaded from external sources.
+
+Existing saved Markdown is rendered without rewriting messages or snapshots.
+Previously saved plain-text reports remain readable; their content is not
+reconstructed or upgraded to a newly validated report by the display layer.
+
 New snapshots use analytics schema version 2. Existing version-1 snapshots and
 messages remain unchanged and readable, with a legacy warning. Follow-ups can
 use their supplied facts but cannot infer missing scope, per-field denominators,

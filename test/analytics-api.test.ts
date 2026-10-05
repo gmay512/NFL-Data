@@ -11,7 +11,8 @@ import {
 import { LlamaClient } from '../server/llama-client'
 import { AnalyticsDatabaseError } from '../server/analytics-reads'
 import type { WeeklyAnalysisRun, WeeklyRunView } from '../server/weekly-analysis'
-import { readWeeklyAnalysisStream } from '../src/api/app-api'
+import { readAnalysisStream, readWeeklyAnalysisStream } from '../src/api/app-api'
+import { renderAnalyticsReport } from '../server/analytics-report'
 import type {
   AnalysisSession,
   AnalysisSessionSummary,
@@ -527,9 +528,18 @@ describe('analytics API contracts', () => {
     })
     assert.equal(createResponse.status, 201)
     assert.equal(memory.getSession()?.messages.length, 2)
+    const { session: created } = await createResponse.json() as { session: AnalysisSession }
+    const expected = renderAnalyticsReport(JSON.stringify({
+      observations: [{ kind: 'fact', factId: 'sample.spread' }],
+    }), created.context, 'stop')
+    assert.equal(created.messages[1].content, expected)
+    assert.equal(memory.getSession()?.messages[1].content, expected)
+    assert.match(expected, /^# Validated factual report\n\n## Selected-game results/)
 
     assert.equal((await request('/api/analytics/sessions', deps)).status, 200)
-    assert.equal((await request(`/api/analytics/sessions/${sessionId}`, deps)).status, 200)
+    const loaded = await request(`/api/analytics/sessions/${sessionId}`, deps)
+    assert.equal(loaded.status, 200)
+    assert.equal((await loaded.json() as { session: AnalysisSession }).session.messages[1].content, expected)
 
     const renameResponse = await request(`/api/analytics/sessions/${sessionId}`, deps, 'PATCH', {
       title: 'Renamed report',
@@ -636,6 +646,20 @@ describe('analytics API contracts', () => {
     assert.match(completedBody, /event: content/)
     assert.match(completedBody, /event: complete/)
     assert.equal(memory.getAppendCount(), 1)
+    const stream = new Response(completedBody).body
+    assert(stream)
+    let displayed = ''
+    await readAnalysisStream(stream, (event) => {
+      if (event.type === 'content') displayed += event.content
+    })
+    const expected = renderAnalyticsReport(JSON.stringify({
+      observations: [{ kind: 'fact', factId: 'sample.totals' }],
+    }), context, 'stop')
+    assert.equal(displayed, expected)
+    assert.equal(memory.getSession()?.messages.at(-1)?.content, expected)
+    assert.match(displayed, /^# Validated factual report\n\n## Selected-game results/)
+    assert.equal(memory.getSession()?.messages[1].content, 'Initial.')
+    assert.deepEqual(memory.getSession()?.context, context)
 
     endStream = false
     const incomplete = await request(`/api/analytics/sessions/${sessionId}/messages`, deps, 'POST', {

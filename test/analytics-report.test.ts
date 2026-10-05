@@ -4,6 +4,12 @@ import { buildAnalyticsSnapshot, parseSacksAllowed, type AnalyticsSnapshot, type
 import { analyticsPromptFact, buildAnalyticsFacts, MAX_REPORT_FACT_CONTEXT_CHARS } from '../server/analytics-facts'
 import { AnalyticsReportError, buildAnalyticsReportSchema, renderAnalyticsReport } from '../server/analytics-report'
 import { analyticsProvenance } from '../src/lib/analytics-provenance'
+import React, { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { JSDOM } from 'jsdom'
+import { AnalyticsReportContent } from '../src/features/analytics/AnalyticsReportContent'
+
+(globalThis as typeof globalThis & { React: typeof React }).React = React
 
 const source: AnalyticsSourceData = {
   games: Array.from({ length: 4 }, (_, index) => ({
@@ -162,6 +168,59 @@ describe('canonical analytics facts', () => {
 })
 
 describe('validated report selections', () => {
+  it('groups selected facts into Markdown sections without adding unselected facts or empty sections', () => {
+    const reported = render(output('team.29.all.totals', 'matchup.total', 'team.29.all.ats'))
+    assert(reported.startsWith('# Validated factual report\n\n'))
+    assert.match(reported, /## Matchup and current odds\n\n- Stored current consensus total/)
+    assert.match(reported, /## Team trends\n\n- Dallas/)
+    assert(reported.indexOf('Stored current consensus total') < reported.indexOf('Dallas, all locations'))
+    assert(reported.indexOf('totals (overs-unders-pushes)') < reported.indexOf('ATS (wins-losses-pushes)'))
+    assert.match(reported, /\*\*Evidence:\*\* teamId 29; gameIds/)
+    assert.match(reported, /## Source scope and limitations\n\n-/)
+    assert.match(reported, /\*\*Interpretation:\*\*/)
+    assert.doesNotMatch(reported, /## Team statistics|## Reported injuries|## Player statistics/)
+    assert.doesNotMatch(reported, /Known player|average sacks allowed/)
+  })
+
+  it('retains source disclosures when only a limitation is selected', () => {
+    const reported = render(output('limitation.market-history'))
+    assert.match(reported, /^# Validated factual report\n\n## Source scope and limitations/)
+    assert.match(reported, /Opening odds and line movement are unavailable/)
+    assert.match(reported, /Provider freshness and opening-line movement are not established/)
+    assert.doesNotMatch(reported, /## Matchup and current odds|## Team trends/)
+  })
+
+  it('renders a comparison table with unchanged fact values and a calculated difference', () => {
+    const context: AnalyticsSnapshot = {
+      ...snapshot,
+      teamTrends: {
+        ...snapshot.teamTrends,
+        items: snapshot.teamTrends.items.map((trend) =>
+          trend.teamId === 26 ? { ...trend, averagePointsFor: 20 } : trend),
+      },
+    }
+    const reported = render(JSON.stringify({ observations: [{
+      kind: 'comparison', leftFactId: 'team.29.all.pointsFor', rightFactId: 'team.26.all.pointsFor',
+    }] }), context)
+    assert.match(reported, /\| Source \| Supplied value \| Unit \|/)
+    assert.match(reported, /\| First: teamId 29 \| 24 \| points \|/)
+    assert.match(reported, /\| Second: teamId 26 \| 20 \| points \|/)
+    assert.match(reported, /\*\*Difference:\*\* The first supplied value is 4 points higher/)
+    assert.match(reported, /Dallas.*average points scored 24 across 4 games/)
+    assert.match(reported, /Houston.*average points scored 20 across 4 games/)
+    assert.match(reported, /descriptive, not a predictive conclusion/)
+    const dom = new JSDOM(renderToStaticMarkup(createElement(AnalyticsReportContent, { content: reported })))
+    try {
+      const report = dom.window.document.querySelector('.analytics-report-content')
+      assert.equal(report?.querySelectorAll('tbody tr').length, 2)
+      assert.equal(report?.querySelector('tbody td')?.textContent, 'First: teamId 29')
+      assert.equal(report?.querySelector('tbody td:nth-child(2)')?.textContent, '24')
+      assert.match(report?.textContent ?? '', /4 points higher/)
+    } finally {
+      dom.window.close()
+    }
+  })
+
   it('constrains generation to valid reference IDs, exact fields, and the same observation cap as validation', () => {
     const schema = buildAnalyticsReportSchema(snapshot)
     assert.equal(schema.additionalProperties, false)
@@ -211,7 +270,7 @@ describe('validated report selections', () => {
   it('uses the same fact boundary for every Analytics preset', () => {
     for (const preset of ['season_overview', 'team_analysis', 'game_review', 'matchup_preview', 'trend_comparison'] as const) {
       const context = { ...snapshot, preset }
-      assert.match(render(output('sample.spread'), context), /Validated factual report/)
+      assert.match(render(output('sample.spread'), context), /^# Validated factual report\n\n## Selected-game results/)
       assert.throws(() => render('Unvalidated prose.', context), AnalyticsReportError)
     }
   })
