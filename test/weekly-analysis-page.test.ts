@@ -165,6 +165,31 @@ function baseFetch(getRuns: () => WeeklyAnalysisRun[]) {
 }
 
 describe('WeeklyAnalysisPage', () => {
+  it('replaces new rationale paragraphs with plain-text bullets and preserves historical paragraphs', async () => {
+    const current = weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Current summary.')
+    const historical = weeklyRun(oldRunId, 'Week 2', '2025-09-11T00:00:00.000Z', 'Historical summary.')
+    const points = [
+      { text: 'Visitors scored 24 in their prior game, offering limited support for their offense.', evidenceIds: ['game.101.score'] },
+      { text: '<b>Visitors covered in the supplied one-game sample.</b>', evidenceIds: ['team.2.ats'] },
+    ]
+    current.suggestions[0].supportingPoints = points
+    const container = await renderPage(baseFetch(() => [current, historical]))
+    const list = container.querySelector('.weekly-pick > ul')
+    assert.equal(list?.getAttribute('aria-label'), 'Facts supporting this suggestion')
+    assert.deepEqual([...list!.querySelectorAll('li')].map((item) => item.textContent), points.map((point) => point.text))
+    assert.equal(list?.querySelector('b'), null)
+    assert.equal(container.querySelector('.weekly-pick > p'), null)
+    assert.equal(container.querySelector('.weekly-summary')?.textContent, current.summary)
+    assert(container.querySelector('.weekly-print-area .weekly-supporting-points'))
+    assert.match(container.querySelector('.weekly-pick')!.textContent, /Visitors \+3.5 · 61% confidence/)
+    const historicalButton = container.querySelector<HTMLButtonElement>('.weekly-run-option[aria-pressed="false"]')
+    assert(historicalButton)
+    await React.act(() => historicalButton.click())
+    await settle()
+    assert.equal(container.querySelector('.weekly-supporting-points'), null)
+    assert.equal(container.querySelector('.weekly-pick > p')?.textContent, historical.suggestions[0].rationale)
+  })
+
   for (const picksRemain of [true, false]) {
     it(`shows citation omission warnings after generation with ${picksRemain ? 'accepted picks' : 'zero picks'}`, async () => {
       const warning = "Application note: 1 model suggestion omitted because cited game IDs were outside the target matchup's supplied history (pick 7)."
@@ -481,6 +506,9 @@ describe('WeeklyAnalysisPage', () => {
       weeklyRun(newRunId, 'Week 2', '2025-09-12T00:00:00.000Z', 'Newest week two output.'),
       weeklyRun(oldRunId, 'Week 2', '2025-09-11T00:00:00.000Z', 'Older week two output.'),
     ]
+    runs[0].suggestions[0].supportingPoints = [
+      { text: 'Prior scoring offers limited support for this selection.', evidenceIds: ['game.101.score'] },
+    ]
     let printed = 0
     let deletedId: string | null = null
     const fetchHandler = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -504,6 +532,8 @@ describe('WeeklyAnalysisPage', () => {
     printButton.click()
     assert.equal(printed, 1)
     assert(container.querySelector('.weekly-print-area'))
+    assert.equal(container.querySelector('.weekly-print-area .weekly-supporting-points li')?.textContent,
+      runs[0].suggestions[0].supportingPoints[0].text)
 
     const deleteButton = [...container.querySelectorAll<HTMLButtonElement>('button')]
       .find((button) => button.textContent === 'Delete analysis')
@@ -574,6 +604,7 @@ describe('WeeklyAnalysisPage', () => {
       finalAwayScore: 20,
       finalHomeScore: 26,
       gradedAt: '2025-09-22T00:00:00.000Z',
+      supportingPoints: [{ text: 'Prior scoring offered limited support.', evidenceIds: ['game.101.score'] }],
     }
     let analyzedSuggestionId: number | null = null
     let deletedAnalysisId: number | null = null
@@ -637,6 +668,7 @@ describe('WeeklyAnalysisPage', () => {
     assert.match(container.textContent ?? '', /Turnovers were the strongest available clue\./)
     assert.match(container.textContent ?? '', /Visitors turnovers: 3/)
     assert.match(container.textContent ?? '', /1 unavailable metric/)
+    assert.equal(container.querySelector('.weekly-supporting-points li')?.textContent, 'Prior scoring offered limited support.')
 
     Object.defineProperty(window, 'confirm', { configurable: true, value: () => true })
     const deleteButton = [...container.querySelectorAll<HTMLButtonElement>('button')]
@@ -645,6 +677,7 @@ describe('WeeklyAnalysisPage', () => {
     await React.act(async () => deleteButton.click())
     await settle()
     assert.equal(deletedAnalysisId, 12)
+    assert.equal(container.querySelector('.weekly-supporting-points li')?.textContent, 'Prior scoring offered limited support.')
     assert([...container.querySelectorAll('button')].some((button) => button.textContent === 'Analyze loss'))
   })
 

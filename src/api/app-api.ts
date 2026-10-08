@@ -93,12 +93,23 @@ function validateRead<T>(payload: T, valid: boolean): T {
   return payload
 }
 
+function isWeeklySupportingPoints(value: unknown) {
+  return value == null || (Array.isArray(value) && value.length >= 1 && value.length <= 4
+    && value.every((point) => isObject(point)
+      && typeof point.text === 'string' && point.text.trim().length >= 1 && point.text.length <= 240
+      && !/[\r\n]/.test(point.text)
+      && Array.isArray(point.evidenceIds) && point.evidenceIds.length >= 1 && point.evidenceIds.length <= 4
+      && point.evidenceIds.every((id) => typeof id === 'string' && id.trim().length > 0)
+      && new Set(point.evidenceIds).size === point.evidenceIds.length))
+}
+
 function isWeeklyRunView(value: unknown): value is WeeklyRunView {
   return isObject(value) && typeof value.id === 'string' && Number.isInteger(value.season)
     && typeof value.week === 'string' && typeof value.model === 'string'
     && typeof value.summary === 'string' && typeof value.createdAt === 'string'
     && Array.isArray(value.suggestions) && value.suggestions.every((pick) => isObject(pick)
       && Number.isInteger(pick.id) && typeof pick.result === 'string'
+      && isWeeklySupportingPoints(pick.supportingPoints)
       && (pick.lossAnalysis == null || (isObject(pick.lossAnalysis)
         && Array.isArray(pick.lossAnalysis.clues) && Array.isArray(pick.lossAnalysis.missingMetrics)
         && isObject(pick.lossAnalysis.evidence) && isObject(pick.lossAnalysis.evidence.metrics))))

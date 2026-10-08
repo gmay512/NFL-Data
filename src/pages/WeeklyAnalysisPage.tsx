@@ -492,7 +492,11 @@ export function WeeklyAnalysisPage() {
                       <small>{pickSelection(pick)} · {pick.confidence}% confidence</small>
                     </div>
                     <b className={`result-pill is-${pick.result}`}>{pick.result}</b>
-                    <p>{pick.rationale}</p>
+                    {pick.supportingPoints ? (
+                      <ul className="weekly-supporting-points" aria-label="Facts supporting this suggestion">
+                        {pick.supportingPoints.map((point, index) => <li key={index}>{point.text}</li>)}
+                      </ul>
+                    ) : <p>{pick.rationale}</p>}
                     {pick.finalAwayScore != null && pick.finalHomeScore != null
                       ? <small>Final {pick.awayTeamName} {pick.finalAwayScore}, {pick.homeTeamName} {pick.finalHomeScore} · margin {signed(pick.resultDelta)}</small>
                       : <small>Kickoff {new Date(pick.kickoffAt).toLocaleString()}</small>}

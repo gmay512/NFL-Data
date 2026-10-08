@@ -193,6 +193,7 @@ describe('analytics API contracts', () => {
           kickoffAt: '2025-09-21T17:00:00.000Z', awayTeamId: 2, awayTeamName: 'Visitors',
           homeTeamId: 1, homeTeamName: 'Hosts', market: 'spread', selection: 'away',
           lockedLine: 3.5, confidence: 61, rationale: 'Supported recorded facts.',
+          supportingPoints: [{ text: 'Prior scoring offers limited support for this selection.', evidenceIds: ['game.31.score'] }],
           supportingGameIds: [31], result: 'ungraded', resultDelta: null,
           finalAwayScore: null, finalHomeScore: null, gradedAt: null,
           createdAt: '2025-09-10T00:00:00.000Z', lossAnalysis: null,

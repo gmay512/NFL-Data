@@ -45,6 +45,7 @@ type SuggestionRow = {
   locked_line: number
   confidence: number
   rationale: string
+  supporting_points: WeeklySuggestion['supportingPoints']
   supporting_game_ids: number[]
   result: WeeklySuggestion['result']
   result_delta: number | null
@@ -105,6 +106,7 @@ function suggestion(row: SuggestionRow, analysis: WeeklyLossAnalysis | null = nu
     lockedLine: Number(row.locked_line),
     confidence: Number(row.confidence),
     rationale: row.rationale,
+    supportingPoints: row.supporting_points ?? null,
     supportingGameIds: row.supporting_game_ids ?? [],
     result: row.result,
     resultDelta: row.result_delta == null ? null : Number(row.result_delta),
@@ -130,7 +132,7 @@ function run(row: RunRow, suggestions: WeeklySuggestion[]): WeeklyAnalysisRun {
   }
 }
 
-const suggestionColumns = 'id,run_id,game_id,season,stage,week,kickoff_at,away_team_id,away_team_name,home_team_id,home_team_name,market,selection,locked_line,confidence,rationale,supporting_game_ids,result,result_delta,final_away_score,final_home_score,graded_at,created_at'
+const suggestionColumns = 'id,run_id,game_id,season,stage,week,kickoff_at,away_team_id,away_team_name,home_team_id,home_team_name,market,selection,locked_line,confidence,rationale,supporting_points,supporting_game_ids,result,result_delta,final_away_score,final_home_score,graded_at,created_at'
 const lossColumns = 'id,suggestion_id,analysis_version,model_name,evidence_snapshot,summary,clues,missing_metrics,created_at'
 const lossViewColumns = 'id,suggestion_id,analysis_version,model_name,metrics:evidence_snapshot->metrics,summary,clues,missing_metrics,created_at'
 const runColumns = 'id,season,stage,week,model_name,summary,created_at'
@@ -231,6 +233,7 @@ export function createWeeklyAnalysisStore(client: SupabaseClient): WeeklyAnalysi
           locked_line: pick.line,
           confidence: pick.confidence,
           rationale: pick.rationale,
+          supporting_points: pick.supportingPoints ?? null,
           supporting_game_ids: pick.supportingGameIds,
         }
       })
@@ -333,7 +336,7 @@ export function createWeeklyAnalysisStore(client: SupabaseClient): WeeklyAnalysi
     async gradePending() {
       const pendingData = await readAllRows<SuggestionRow>((from, to) => client
         .from('betting_suggestions')
-        .select('id,run_id,game_id,season,stage,week,kickoff_at,away_team_id,away_team_name,home_team_id,home_team_name,market,selection,locked_line,confidence,rationale,supporting_game_ids,result,result_delta,final_away_score,final_home_score,graded_at,created_at')
+        .select(suggestionColumns)
         .eq('result', 'ungraded')
         .neq('stage', 'Pre Season')
         .order('id')
@@ -384,7 +387,7 @@ export function createWeeklyAnalysisStore(client: SupabaseClient): WeeklyAnalysi
     async getLossAnalysisInput(suggestionId: number) {
       const { data: suggestionData, error: suggestionError } = await client
         .from('betting_suggestions')
-        .select('id,run_id,game_id,season,stage,week,kickoff_at,away_team_id,away_team_name,home_team_id,home_team_name,market,selection,locked_line,confidence,rationale,supporting_game_ids,result,result_delta,final_away_score,final_home_score,graded_at,created_at')
+        .select(suggestionColumns)
         .eq('id', suggestionId)
         .neq('stage', 'Pre Season')
         .maybeSingle()

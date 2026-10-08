@@ -387,11 +387,11 @@ Regular-season targets use the same regular-season-only preview history policy.
 It builds a bounded snapshot for every matchup using the current consensus
 spread and total, team-perspective scoring, season-to-date ATS and totals
 results, available team and player statistics, standings, and current injuries.
-The local model returns only structured pick selections, confidence, and cited
-game IDs. The server validates those fields and generates the displayed summary
-and rationale from recorded scores and trend facts, preventing model-written
-score attribution. Each pick must cite one to three games from that target
-matchup's supplied history, not the upcoming game or another matchup's history.
+The local model first returns only structured pick selections, confidence, and
+cited game IDs. The server validates those fields and generates the run summary
+and a compatibility rationale from recorded scores and trend facts. Each pick
+must cite one to three games from that target matchup's supplied history, not the
+upcoming game or another matchup's history.
 Picks with missing or out-of-history citations are omitted in full; the app
 does not substitute evidence or keep only the valid portion of a citation list.
 Picks without prior history or an available consensus line are also omitted.
@@ -402,9 +402,25 @@ Malformed output, unknown target games, invalid fields or supporting-ID formats,
 duplicate game-market picks (including omitted picks), and model-supplied line
 fields still reject the entire run.
 
+For accepted picks, a second compact local-model request writes one to four
+concise supporting bullets per suggestion, strongest first. These explain how
+the supplied recent results, market-specific records, and scoring averages
+support the locked selection. Each bullet references facts from that suggestion's
+evidence catalog; the server validates the references, output shape, and length
+before saving. Season-to-date statistics are distinguished from cited recent
+games. Model-written explanations remain uncertain interpretations: a valid
+evidence reference does not prove every interpretation is correct.
+Malformed, incomplete, failed, or cancelled bullet generation rejects the run
+without saving partial suggestions. Zero-pick runs skip this second request.
+
 Every valid suggestion is automatically saved in `betting_analysis_runs` and
 `betting_suggestions`. These tables are separate from the source game schema and
-snapshot the matchup, kickoff, rationale, confidence, and consensus line. A
+snapshot the matchup, kickoff, rationale, supporting bullets, confidence, and
+consensus line. New analyses show the saved bullets instead of the rationale
+paragraph, both on screen and in print. Older saved analyses retain their
+original paragraphs and are not regenerated. Apply the
+`202610080001_weekly_supporting_points.sql` migration before running the updated
+server; it adds nullable supporting-point storage without rewriting old runs. A
 later analysis of the same week creates a new timestamped run rather than
 replacing earlier predictions. A model decision to make no pick remains in the
 run summary and does not count toward the tracked record.

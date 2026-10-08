@@ -18,6 +18,7 @@ import {
 } from '../server/weekly-analysis'
 import { createWeeklyAnalysisStore, gradeWeeklySuggestion } from '../server/weekly-analysis-store'
 import { getLlamaConfig, LlamaClient } from '../server/llama-client'
+import type { WeeklySupportingEvidence } from '../server/weekly-supporting-points'
 
 const target: AnalyticsTargetMatchup = {
   gameId: 42,
@@ -332,7 +333,7 @@ describe('weekly model analysis validation', () => {
 })
 
 describe('weekly analysis citation recovery and persistence', () => {
-  function harness(context: TestContext, content: string, finishReason = 'stop') {
+  function harness(context: TestContext, content: string, finishReason = 'stop', supportingContent?: string, supportingFinishReason = 'stop') {
     const supplied = multiMatchupSnapshot()
     const client = createClient('http://weekly.test', 'test-key', {
       global: { fetch: async (input) => {
@@ -348,9 +349,22 @@ describe('weekly analysis citation recovery and persistence', () => {
       } },
     })
     const llama = new LlamaClient(getLlamaConfig({ LLM_MODEL: 'test-model' }))
-    const completion = context.mock.method(llama, 'completeMessages', async () => ({
-      content, finishReason, model: 'test-model', usage: null, latencyMs: 1,
-    }))
+    let calls = 0
+    const completion = context.mock.method(llama, 'completeMessages', async (messages) => {
+      if (calls++ === 0) return { content, finishReason, model: 'test-model', usage: null, latencyMs: 1 }
+      const evidence: WeeklySupportingEvidence[] = JSON.parse(messages[1].content.split('\n').slice(1).join('\n'))
+      return {
+        content: supportingContent ?? JSON.stringify({ picks: evidence.map((pick) => ({
+          gameId: pick.gameId,
+          market: pick.market,
+          supportingPoints: [{
+            text: 'Recorded prior scoring offers limited support for this selection.',
+            evidenceIds: [Object.keys(pick.facts)[0]],
+          }],
+        })).reverse() }),
+        finishReason: supportingFinishReason, model: 'test-model', usage: null, latencyMs: 1,
+      }
+    })
     const saved: WeeklyModelAnalysis[] = []
     const store: WeeklyAnalysisStore = {
       async save(savedSnapshot, model, parsed) {
@@ -363,6 +377,7 @@ describe('weekly analysis citation recovery and persistence', () => {
             id: index + 1, runId: '99000000-0000-4000-8000-000000000099',
             gameId: pick.gameId, market: pick.market, selection: pick.selection,
             lockedLine: pick.line, confidence: pick.confidence, rationale: pick.rationale,
+            supportingPoints: pick.supportingPoints,
             supportingGameIds: pick.supportingGameIds,
           })),
         }
@@ -390,7 +405,7 @@ describe('weekly analysis citation recovery and persistence', () => {
     return { service, saved, llama, completion }
   }
 
-  it('calls the model and store once and saves only fully supported picks', async (context) => {
+  it('selects picks then summarizes them and saves only fully supported picks once', async (context) => {
     const { service, saved, completion } = harness(context, JSON.stringify({
       picks: [
         modelPick(),
@@ -400,16 +415,21 @@ describe('weekly analysis citation recovery and persistence', () => {
     }))
     const stages: string[] = []
     const run = await service.analyze(2026, { onProgress: (progress) => stages.push(progress.stage) })
-    assert.equal(completion.mock.callCount(), 1)
+    assert.equal(completion.mock.callCount(), 2)
     assert.equal(saved.length, 1)
     assert.deepEqual(saved[0].picks.map((pick) => pick.gameId), [42, 44])
     assert.deepEqual(run.suggestions.map((pick) => pick.supportingGameIds), [[31], [33]])
     assert.deepEqual(run.suggestions.map((pick) => pick.lockedLine), [3.5, 44.5])
+    assert.deepEqual(run.suggestions.map((pick) => pick.confidence), [61, 61])
+    assert.deepEqual(run.suggestions.map((pick) => pick.supportingPoints?.[0].evidenceIds), [['game.31.score'], ['game.33.score']])
+    assert(completion.mock.calls[1].arguments[0][1].content.includes('"gameId":44'))
+    assert(!completion.mock.calls[1].arguments[0][1].content.includes('"gameId":43'))
+    assert.equal(completion.mock.calls[1].arguments[2]?.json_schema.name, 'weekly_supporting_points')
     assert.match(run.summary, /2 tracked suggestions/)
     assert.match(run.summary, /outside the target matchup's supplied history \(pick 2\)/)
     assert.equal(run.summary, saved[0].summary)
     assert.doesNotMatch(run.summary, /99%/)
-    assert.deepEqual(stages, ['building_context', 'running_model', 'saving'])
+    assert.deepEqual(stages, ['building_context', 'running_model', 'running_model', 'saving'])
   })
 
   it('saves a warned zero-pick run when no citation-supported selections remain', async (context) => {
@@ -448,6 +468,51 @@ describe('weekly analysis citation recovery and persistence', () => {
     })
     await assert.rejects(service.analyze(2026, { signal: controller.signal }), { name: 'AbortError' })
     assert.equal(completion.mock.callCount(), 1)
+    assert.deepEqual(saved, [])
+  })
+
+  it('does not save a partial analysis when supporting output is invalid or incomplete', async (context) => {
+    for (const [supportingContent, supportingFinishReason] of [
+      ['not JSON', 'stop'], ['{"picks":[]}', 'stop'],
+      [JSON.stringify({ picks: [{
+        gameId: 42, market: 'spread',
+        supportingPoints: [{ text: 'Unsupported.', evidenceIds: ['game.999.score'] }],
+      }] }), 'stop'],
+      ['{"picks":[]}', 'length'],
+    ]) {
+      const { service, saved, completion } = harness(context, output(), 'stop', supportingContent, supportingFinishReason)
+      await assert.rejects(service.analyze(2026), invalidOutput)
+      assert.equal(completion.mock.callCount(), 2)
+      assert.deepEqual(saved, [])
+    }
+  })
+
+  it('forwards cancellation to the second request and does not save afterwards', async (context) => {
+    const controller = new AbortController()
+    const { service, saved, completion } = harness(context, output())
+    let calls = 0
+    completion.mock.mockImplementation(async (_messages, signal) => {
+      assert.equal(signal, controller.signal)
+      if (calls++ === 0) return { content: output(), finishReason: 'stop', model: 'test-model', usage: null, latencyMs: 1 }
+      controller.abort()
+      return { content: JSON.stringify({ picks: [{
+        gameId: 42, market: 'spread',
+        supportingPoints: [{ text: 'Prior scoring supports this selection.', evidenceIds: ['game.31.score'] }],
+      }] }), finishReason: 'stop', model: 'test-model', usage: null, latencyMs: 1 }
+    })
+    await assert.rejects(service.analyze(2026, { signal: controller.signal }), { name: 'AbortError' })
+    assert.equal(completion.mock.callCount(), 2)
+    assert.deepEqual(saved, [])
+  })
+
+  it('surfaces second-request model errors without saving', async (context) => {
+    const { service, saved, completion } = harness(context, output())
+    let calls = 0
+    completion.mock.mockImplementation(async () => {
+      if (calls++ > 0) throw new Error('Supporting model unavailable')
+      return { content: output(), finishReason: 'stop', model: 'test-model', usage: null, latencyMs: 1 }
+    })
+    await assert.rejects(service.analyze(2026), /Supporting model unavailable/)
     assert.deepEqual(saved, [])
   })
 })

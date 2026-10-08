@@ -17,6 +17,13 @@ import {
   type WeeklyLossAnalysis,
   type WeeklyLossEvidence,
 } from './weekly-loss-analysis'
+import {
+  buildWeeklySupportingEvidence,
+  buildWeeklySupportingMessages,
+  buildWeeklySupportingSchema,
+  parseWeeklySupportingPoints,
+  type WeeklySupportingPoint,
+} from './weekly-supporting-points'
 
 type WeeklyRecentGame = Pick<
   AnalyticsSnapshot['games']['items'][number],
@@ -98,6 +105,7 @@ export type WeeklyPick = {
   line: number
   confidence: number
   rationale: string
+  supportingPoints?: WeeklySupportingPoint[]
   supportingGameIds: number[]
 }
 
@@ -174,6 +182,7 @@ export type WeeklySuggestion = {
   lockedLine: number
   confidence: number
   rationale: string
+  supportingPoints?: WeeklySupportingPoint[] | null
   supportingGameIds: number[]
   result: 'win' | 'loss' | 'push' | 'ungraded'
   resultDelta: number | null
@@ -744,6 +753,27 @@ export class WeeklyAnalysisService {
     }
     const analysis = parseWeeklyModelAnalysis(completion.content, snapshot)
     options.signal?.throwIfAborted()
+    if (analysis.picks.length) {
+      options.onProgress?.({ stage: 'running_model', message: 'Summarizing supporting facts with the local model…' })
+      const evidence = buildWeeklySupportingEvidence(snapshot, analysis.picks)
+      const supportingCompletion = await this.llama.completeMessages(
+        buildWeeklySupportingMessages(evidence),
+        options.signal,
+        {
+          type: 'json_schema',
+          json_schema: { name: 'weekly_supporting_points', strict: true, schema: buildWeeklySupportingSchema(evidence) },
+        },
+      )
+      if (supportingCompletion.finishReason !== 'stop') {
+        throw new WeeklyAnalysisError(
+          'invalid_model_output',
+          `Supporting-point generation did not complete normally (finish reason: ${supportingCompletion.finishReason ?? 'missing'}).`,
+        )
+      }
+      const supportingPoints = parseWeeklySupportingPoints(supportingCompletion.content, evidence)
+      analysis.picks.forEach((pick, index) => { pick.supportingPoints = supportingPoints[index] })
+      options.signal?.throwIfAborted()
+    }
     options.onProgress?.({ stage: 'saving', message: 'Saving tracked suggestions…' })
     const saved = await this.store.save(snapshot, completion.model, analysis)
     this.log(`[Weekly Analysis] Saved run ${saved.id} with ${saved.suggestions.length} picks.`)
