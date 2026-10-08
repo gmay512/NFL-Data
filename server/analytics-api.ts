@@ -33,6 +33,7 @@ import { createWeeklyAnalysisStore } from './weekly-analysis-store'
 import { statusForWeeklyLossAnalysisError } from './weekly-loss-analysis'
 import { AnalyticsDatabaseError } from './analytics-reads'
 import { AnalyticsReportError, renderAnalyticsReport } from './analytics-report'
+import { generateMatchupReport } from './matchup-report'
 
 export type AnalyticsFilterMetadata = {
   seasons: number[]
@@ -538,8 +539,12 @@ export async function handleAnalyticsApiRequest(
     const preset = parsePreset(body.preset)
     const title = parseTitle(body.title)
     const snapshot = await generateAnalyticsSnapshot(dependencies.dataSource, preset, body.filters, { signal })
-    const completion = await dependencies.llama.complete(snapshot, {}, signal)
-    completion.content = renderAnalyticsReport(completion.content, snapshot, completion.finishReason)
+    const completion = preset === 'matchup_preview'
+      ? await generateMatchupReport(dependencies.llama, snapshot, signal)
+      : await dependencies.llama.complete(snapshot, {}, signal)
+    if (preset !== 'matchup_preview') {
+      completion.content = renderAnalyticsReport(completion.content, snapshot, completion.finishReason)
+    }
     signal.throwIfAborted()
     const session = await dependencies.store.saveInitial({
       title,

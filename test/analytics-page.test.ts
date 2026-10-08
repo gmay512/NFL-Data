@@ -713,4 +713,37 @@ describe('AnalyticsPage', () => {
     assert.equal(user?.querySelectorAll('h3, h4, p strong, .analytics-report-content').length, 0)
     assert.equal(JSON.stringify(formatted), before)
   })
+
+  it('prints the selected saved matchup reply with its warning, not other conversation messages', async () => {
+    const preview: AnalysisSession = {
+      ...session, preset: 'matchup_preview',
+      context: { ...snapshot, preset: 'matchup_preview' },
+      messages: [
+        session.messages[0],
+        { ...session.messages[0], id: 2, content: `${formattedReportMarkdown}\n\n**Unverified statement:** Availability not established.` },
+      ],
+    }
+    const container = await renderPage(async (input, init) => {
+      if (new URL(String(input), 'http://localhost').pathname === '/api/analytics/sessions/session-1') {
+        return json({ session: preview })
+      }
+      return baseFetch({ saved: true })(input, init)
+    }, '/analytics?session=session-1')
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>('.analytics-print-button')]
+    assert.equal(buttons.length, 2)
+    let printCalls = 0
+    window.print = () => {
+      printCalls++
+      const report = document.querySelector('.analytics-print-root')
+      assert(report)
+      assert.equal(report.querySelectorAll('tbody tr').length, 2)
+      assert.match(report.textContent ?? '', /Unverified statement: Availability not established/)
+      assert.doesNotMatch(report.textContent ?? '', /The supplied game finished over the closing total|Ask a follow-up|Grounding details/)
+    }
+    await React.act(() => buttons[1].click())
+    assert.equal(printCalls, 1)
+    await React.act(() => window.dispatchEvent(new window.Event('afterprint')))
+    assert.equal(document.querySelector('.analytics-print-root'), null)
+    assert(!document.body.hasAttribute('data-analytics-print'))
+  })
 })

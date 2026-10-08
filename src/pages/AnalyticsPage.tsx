@@ -27,6 +27,7 @@ import { AnalyticsModelHelp, AnalyticsModelStatus } from '../features/analytics/
 import { AnalyticsNav } from '../features/analytics/AnalyticsNav'
 import { AnalyticsGroundingDetails } from '../features/analytics/AnalyticsGroundingDetails'
 import { AnalyticsReportContent } from '../features/analytics/AnalyticsReportContent'
+import { AnalyticsPrintButton } from '../features/analytics/AnalyticsPrintButton'
 import { StatusMessage } from '../features/dashboard/DashboardComponents'
 
 function numberParam(value: string | null) {
@@ -620,9 +621,15 @@ export function AnalyticsPage() {
               {activeSession.nextMessageId && <button type="button" disabled={isLoadingMessages || isAnalyzing || isStreaming} onClick={() => void loadOlderMessages()}>Load older messages</button>}
               {activeSession.messages.map((message) => <div className={`analysis-message is-${message.role}`} key={message.id}>
                 <strong>{message.role === 'assistant' ? 'Local model' : 'You'}</strong>
-                {message.role === 'assistant' ? <AnalyticsReportContent content={message.content} /> : <p>{message.content}</p>}
+                {message.role === 'assistant' ? <>
+                  {activeSession.preset === 'matchup_preview' && <AnalyticsPrintButton content={message.content} title={activeSession.title} />}
+                  <AnalyticsReportContent content={message.content} />
+                </> : <p>{message.content}</p>}
               </div>)}
-              {pendingAnswer && <div className={`analysis-message is-assistant ${isStreaming ? 'is-streaming' : ''}`}><strong>{answerSaved ? 'Local model (saved)' : isStreaming ? 'Local model' : 'Local model (save not confirmed)'}</strong><AnalyticsReportContent content={pendingAnswer} /></div>}
+              {pendingAnswer && <div className={`analysis-message is-assistant ${isStreaming ? 'is-streaming' : ''}`}><strong>{answerSaved ? 'Local model (saved)' : isStreaming ? 'Local model' : 'Local model (save not confirmed)'}</strong>
+                {activeSession.preset === 'matchup_preview' && answerSaved && !isStreaming && <AnalyticsPrintButton content={pendingAnswer} title={activeSession.title} />}
+                <AnalyticsReportContent content={pendingAnswer} />
+              </div>}
             </div>
             <AnalyticsGroundingDetails snapshot={activeSession.context} />
             {isStreaming && !pendingAnswer && <p role="status">Generating and validating the answer before display...</p>}

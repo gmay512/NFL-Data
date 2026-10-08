@@ -181,8 +181,9 @@ they are intentionally not persisted with NFL domain records.
 The `/analytics` route provides deterministic historical results, team trends,
 saved analysis sessions, and grounded model conversations. Calculations are
 performed by the app before a prompt is sent to the model. llama.cpp receives a
-bounded JSON fact catalog and selects supported observations; the application
-validates those references and renders the factual statements. It does not receive database credentials,
+bounded JSON fact catalog. Most reports select supported observations, which the
+application validates and renders. Pregame reports also include model-written
+narratives with explicit statement-level checks and warnings. It does not receive database credentials,
 SQL access, or a tool that can change application data.
 
 Apply the analytics migrations before opening the page:
@@ -284,7 +285,7 @@ lines. Reading them for a new report does not establish provider freshness or
 opening-line movement. Standings and player season totals are stored current
 records, not reconstructed historical observations.
 
-All saved Analytics presets and follow-ups require structured model output
+Other Analytics presets and focused conversational follow-ups require structured model output
 containing only fact references and supported comparison templates. The server
 also supplies a strict JSON response schema with catalog-ID enums, exact fields,
 and a 1-40 observation limit to llama.cpp so generation follows the same shape
@@ -315,6 +316,50 @@ shown as text rather than loaded from external sources.
 Existing saved Markdown is rendered without rewriting messages or snapshots.
 Previously saved plain-text reports remain readable; their content is not
 reconstructed or upgraded to a newly validated report by the display layer.
+
+### Pregame matchup reports and printing
+
+New pregame matchup reports follow a fixed layout: a matchup summary,
+prior-performance tables, current injuries, and these five numbered observations:
+Home Spread Performance; Totals Performance; Offensive Efficiency & Turnovers;
+Missing/Ungraded Data; and Odds Context. Every section includes an interpretation
+and summary, followed by overall observations and a summary of uncertainty.
+The application renders the tables directly from the saved source snapshot,
+including away/home splits, metric-specific samples, missing values, and
+source-scope disclosures. Completed-game reviews and weekly suggestions keep
+their existing formats.
+
+The local model writes short, structured interpretations and summaries citing
+catalog facts. Application checks flag unknown or out-of-section references,
+unsupported numeric values and identities, and permit calculated differences
+only for compatible finite metrics. A separate, batched local-model pass
+checks each entire statement against its cited evidence, including units,
+denominators, time/location/stage scope, and injury/market terminology.
+**Model verification is an additional check, not a guarantee of correctness.**
+
+Unsupported statements and statements that cannot be verified remain in the
+report with explicit labels, source references, and reasons. They do not
+prevent saving an otherwise well-formed analysis and are not endorsed as
+source facts. A failed or incomplete verification pass is disclosed as
+unverified rather than silently accepted. Malformed or unfinished narrative
+generation, cancellation, source-read failures, and save failures still report
+errors. Both model passes use the configured local service and its existing
+request/context/output limits; generation and verification usage are combined
+when available.
+
+**Print analysis** in the dashboard preview or beside a saved matchup reply
+opens the browser print dialog for that selected report only. It prints
+rendered Markdown headings, tables, interpretations, summaries, evidence,
+and verification warnings, without navigation, controls, other messages, or
+raw grounding JSON. The browser's Save as PDF option can also be used.
+Printing is independent of the page's light/dark theme and does not change the
+existing Weekly Analysis print action.
+
+Saved messages and their snapshots are not rewritten. Generate a new preview
+to obtain the new layout; existing reports can still print their original
+rendered content. Conversational follow-ups stay focused, use the immutable
+saved snapshot and the stricter fact-selection contract, and never treat prior
+model narratives or flagged statements as verified source evidence.
 
 New snapshots use analytics schema version 2. Existing version-1 snapshots and
 messages remain unchanged and readable, with a legacy warning. Follow-ups can

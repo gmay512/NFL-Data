@@ -715,6 +715,10 @@
 .analytics-report-table th, .analytics-report-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
 .analytics-report-table th { background: var(--surface); text-align: left; }
 .analytics-report-table tr:last-child td { border-bottom: 0; }
+.analytics-print-button { padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; }
+.analysis-message .analytics-print-button { margin-bottom: 10px; }
+.analytics-print-error { color: #b42318; font-size: .85rem; }
+.analytics-print-root { display: none; }
 .grounding-details { margin: 0 20px; padding: 10px 0; border-top: 1px solid var(--border); color: var(--muted-text); font-size: .78rem; }
 .grounding-details summary { cursor: pointer; font-weight: 800; }
 .grounding-details pre { max-height: 240px; overflow: auto; color: var(--text); font-size: .72rem; }
@@ -791,6 +795,30 @@
   .weekly-picks { grid-template-columns: 1fr 1fr; }
   .weekly-pick { break-inside: avoid; border-color: #bbb; background: white; }
   .weekly-disclaimer { margin-top: 16px; padding-top: 10px; border-top: 1px solid #bbb; }
+  body[data-analytics-print] > :not(.analytics-print-root) { display: none !important; }
+  body[data-analytics-print] { overflow: visible !important; }
+  body[data-analytics-print] .analytics-print-root {
+    --text: #111;
+    --muted-text: #444;
+    --surface: #fff;
+    --border: #bbb;
+    --accent-dark: #111;
+    display: block;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    background: white;
+    color: #111;
+    font-size: 10pt;
+  }
+  .analytics-print-root .analytics-report-content { line-height: 1.4; }
+  .analytics-print-root h3, .analytics-print-root h4, .analytics-print-root h5, .analytics-print-root h6 { break-after: avoid; }
+  .analytics-print-root .analytics-report-table { overflow: visible; border: 0; border-radius: 0; }
+  .analytics-print-root table { width: 100%; min-width: 0; table-layout: fixed; font-size: 8pt; }
+  .analytics-print-root th, .analytics-print-root td { padding: 5px; overflow-wrap: anywhere; }
+  .analytics-print-root thead { display: table-header-group; }
+  .analytics-print-root tr { break-inside: avoid; }
+  .analytics-print-root pre { white-space: pre-wrap; overflow: visible; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -13,6 +13,7 @@ import { AnalyticsDatabaseError } from '../server/analytics-reads'
 import type { WeeklyAnalysisRun, WeeklyRunView } from '../server/weekly-analysis'
 import { readAnalysisStream, readWeeklyAnalysisStream } from '../src/api/app-api'
 import { renderAnalyticsReport } from '../server/analytics-report'
+import { createMatchupDraft, supportedMatchupVerdicts } from './matchup-report-fixtures'
 import type {
   AnalysisSession,
   AnalysisSessionSummary,
@@ -553,6 +554,10 @@ describe('analytics API contracts', () => {
   })
 
   it('registers matchup previews and persists their preset-specific initial prompt', async () => {
+    const draft = createMatchupDraft()
+    draft.sections.injuries.summary = { text: 'An uncited statement about an unavailable injury.', factIds: [] }
+    draft.sections.injuries.interpretation = { text: 'An invented player is out.', factIds: ['injury.999'] }
+    let modelCalls = 0
     const modelUrl = await startServer(async (incoming, response) => {
       await new Promise<void>((resolve) => {
         incoming.on('data', () => {})
@@ -561,7 +566,7 @@ describe('analytics API contracts', () => {
       response.setHeader('Content-Type', 'application/json')
       response.end(JSON.stringify({
         model: 'test-model',
-        choices: [{ message: { content: JSON.stringify({ observations: [{ kind: 'fact', factId: 'matchup.identity' }] }) }, finish_reason: 'stop' }],
+        choices: [{ message: { content: JSON.stringify(++modelCalls === 1 ? draft : supportedMatchupVerdicts(draft)) }, finish_reason: 'stop' }],
       }))
     })
     const memory = createMemoryStore()
@@ -596,6 +601,15 @@ describe('analytics API contracts', () => {
     assert.equal(memory.getSession()?.preset, 'matchup_preview')
     assert.equal(memory.getSession()?.messages[0].content, 'Generate a grounded pregame matchup preview.')
     assert.equal(memory.getSession()?.context.targetMatchup?.gameId, 42)
+    assert.equal(modelCalls, 2)
+    const content = memory.getSession()!.messages[1].content
+    assert.match(content, /^# Pregame Matchup Analysis/)
+    assert.match(content, /An uncited statement.*Unverified statement/)
+    assert.match(content, /An invented player is out.*Unsupported statement/)
+    assert.match(content, /1 unsupported and 1 unverified/)
+    assert.match(content, /## Overall Summary of Observations/)
+    const loaded = await request(`/api/analytics/sessions/${sessionId}`, deps)
+    assert.equal((await loaded.json() as { session: AnalysisSession }).session.messages[1].content, content)
   })
 
   it('streams follow-ups and persists only completed exchanges', async () => {

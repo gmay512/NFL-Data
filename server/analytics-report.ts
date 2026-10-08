@@ -64,7 +64,7 @@ function exactKeys(value: Record<string, unknown>, keys: string[]) {
   }
 }
 
-function markdownText(value: string) {
+export function markdownText(value: string) {
   return value.replace(/\s*\r?\n\s*/g, ' ').trim()
     .replace(/[\\`*_[\]<>|~#&]/g, '\\$&')
     .replace(/^([-+])/, '\\$1')

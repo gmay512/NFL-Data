@@ -156,6 +156,10 @@ describe('game analysis modal', () => {
     assert.match(result, /aria-modal="true"/)
     assert.match(result, /Grounding details/)
     assert.match(result, /Provider freshness/)
+    assert.match(result, /Print analysis/)
+    assert.doesNotMatch(renderModal({ isLoading: true }), /Print analysis/)
+    assert.doesNotMatch(renderModal({ error: 'Model unavailable.' }), /Print analysis/)
+    assert.doesNotMatch(renderModal({ session, preset: 'game_review' }), /Print analysis/)
   })
 
   it('renders saved Markdown as structured report elements without rewriting the session', () => {

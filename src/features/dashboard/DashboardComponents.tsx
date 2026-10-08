@@ -15,6 +15,7 @@ import type { GameOddsRow, GameRow, GameTeamStatRow, LatestGameEventRow, TeamRow
 import { GameOddsDisplay } from '../odds/GameOddsDisplay'
 import { AnalyticsGroundingDetails } from '../analytics/AnalyticsGroundingDetails'
 import { AnalyticsReportContent } from '../analytics/AnalyticsReportContent'
+import { AnalyticsPrintButton } from '../analytics/AnalyticsPrintButton'
 
 function TeamMark({ team, fallback }: { team?: TeamRow; fallback: string }) {
   return <span className="team-mark">{team?.logo_url ? <img src={team.logo_url} alt="" /> : fallback}</span>
@@ -211,7 +212,7 @@ export function GameAnalysisModal({
             <div className="game-analysis-answer">
               <AnalyticsReportContent content={answer.content} />
               <small>{session?.context.schemaVersion === 2
-                ? `Selected by ${session.model}; factual statements rendered by the application.`
+                ? `Local model: ${session.model}; source data rendered by the application. See the report for narrative checks and warnings.`
                 : `Stored legacy report by ${session?.model}; original prose was not fact-selection validated.`} Descriptive analysis only; not betting or financial advice.</small>
               {session && <AnalyticsGroundingDetails snapshot={session.context} />}
             </div>
@@ -221,6 +222,7 @@ export function GameAnalysisModal({
         {session && !isLoading && !error && (
           <footer>
             <Link to={`/analytics?session=${encodeURIComponent(session.id)}`}>Open full conversation</Link>
+            {preset === 'matchup_preview' && answer && <AnalyticsPrintButton content={answer.content} title={title} />}
             <button type="button" onClick={onClose}>Close</button>
           </footer>
         )}
