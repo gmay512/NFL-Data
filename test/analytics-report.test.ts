@@ -45,7 +45,7 @@ const source: AnalyticsSourceData = {
   },
   evidenceScope: { season: 2026, stage: 'Regular Season', excludedStage: null, beforeKickoff: 1791122400, teamIds: [26, 29] },
 }
-const snapshot = buildAnalyticsSnapshot('matchup_preview', { season: 2026, gameId: 21570 }, source, '2026-10-04T12:00:00Z')
+const snapshot = buildAnalyticsSnapshot('season_overview', { season: 2026, gameId: 21570 }, source, '2026-10-04T12:00:00Z')
 const output = (...ids: string[]) => JSON.stringify({ observations: ids.map((factId) => ({ kind: 'fact', factId })) })
 const render = (content: string, context = snapshot) => renderAnalyticsReport(content, context, 'stop')
 const fact = (id: string, context = snapshot) => buildAnalyticsFacts(context).facts.find((item) => item.id === id)!
@@ -103,7 +103,7 @@ describe('canonical analytics facts', () => {
   })
 
   it('preserves aggregate counts while disclosing truncated supporting game IDs', () => {
-    const bounded = buildAnalyticsSnapshot('matchup_preview', snapshot.filters, source, snapshot.generatedAt, {
+    const bounded = buildAnalyticsSnapshot('season_overview', snapshot.filters, source, snapshot.generatedAt, {
       games: 1, teamTrends: 32, teamStatTrends: 32, injuries: 50, playerStats: 120, standings: 32,
     })
     assert.match(fact('team.29.all.ats', bounded).statement, /4 appearances/)
@@ -168,6 +168,44 @@ describe('canonical analytics facts', () => {
 })
 
 describe('validated report selections', () => {
+  it('cleans new matchup follow-ups while preserving exact values, source limitations, and the underlying snapshot', () => {
+    const context: AnalyticsSnapshot = { ...snapshot, preset: 'matchup_preview' }
+    const before = JSON.stringify(context)
+    const reported = render(output(
+      'matchup.identity', 'game.1.score', 'game.1.lines', 'injury.0', 'stats.29.turnovers', 'stats.29.passYards',
+    ), context)
+    assert.match(reported, /Dallas \(away\) at Houston \(home\); 2026, Regular Season, Week 4/)
+    assert.match(reported, /Dallas at Houston on 2026-09-01/)
+    assert.match(reported, /Known player \(CB\)/)
+    assert.match(reported, /average turnovers committed \(not turnover differential\) 0.75 per observed game/)
+    assert.match(reported, /average passing yards 200 per observed game/)
+    assert.match(reported, /## Scope and limitations/)
+    assert.match(reported, /not confirmed game-time availability/)
+    assert.doesNotMatch(reported, /teamId|playerId|gameIds?|Game \d+|team 29|team 26|21570|Evidence:|Sources:|Model check:|sum 3|eligible games|stats\.29|Unknown matchup/)
+    assert.match(reported, /Dallas at Houston on 2026-09-01, 2026-09-01, Regular Season/)
+    assert.doesNotMatch(reported.split('## Team statistics')[1].split('## Reported injuries')[0], /observations|eligible|sum/)
+    assert.equal(JSON.stringify(context), before)
+  })
+
+  it('uses names in new matchup comparison tables without changing the calculated difference', () => {
+    const context: AnalyticsSnapshot = {
+      ...snapshot, preset: 'matchup_preview',
+      teamTrends: {
+        ...snapshot.teamTrends,
+        items: snapshot.teamTrends.items.map((trend) =>
+          trend.teamId === 26 ? { ...trend, averagePointsFor: 20 } : trend),
+      },
+    }
+    const reported = render(JSON.stringify({ observations: [{
+      kind: 'comparison', leftFactId: 'team.29.all.pointsFor', rightFactId: 'team.26.all.pointsFor',
+    }] }), context)
+    assert.match(reported, /\| Team \| Supplied value \| Unit \|/)
+    assert.match(reported, /\| Dallas \| 24 \| points \|/)
+    assert.match(reported, /\| Houston \| 20 \| points \|/)
+    assert.match(reported, /4 points higher/)
+    assert.doesNotMatch(reported, /teamId|gameIds|Evidence:/)
+  })
+
   it('groups selected facts into Markdown sections without adding unselected facts or empty sections', () => {
     const reported = render(output('team.29.all.totals', 'matchup.total', 'team.29.all.ats'))
     assert(reported.startsWith('# Validated factual report\n\n'))
@@ -271,6 +309,9 @@ describe('validated report selections', () => {
     for (const preset of ['season_overview', 'team_analysis', 'game_review', 'matchup_preview', 'trend_comparison'] as const) {
       const context = { ...snapshot, preset }
       assert.match(render(output('sample.spread'), context), /^# Validated factual report\n\n## Selected-game results/)
+      const selectedTeam = render(output('team.29.all.ats'), context)
+      if (preset === 'matchup_preview') assert.doesNotMatch(selectedTeam, /teamId|gameIds|Evidence:/)
+      else assert.match(selectedTeam, /Evidence:\*\* teamId 29; gameIds/)
       assert.throws(() => render('Unvalidated prose.', context), AnalyticsReportError)
     }
   })

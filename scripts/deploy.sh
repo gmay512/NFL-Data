@@ -52,6 +52,27 @@ rsync -az --delete \
   --exclude=supabase/.temp \
   "$ROOT/" "$DEPLOY_HOST:$DEPLOY_PATH/"
 
+ssh "$DEPLOY_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+set -euo pipefail
+helper="$DEPLOY_PATH/scripts/sync-production-nginx.sh"
+if bash "$helper" --check; then
+  exit 0
+else
+  status=$?
+fi
+if [[ "$status" != 3 ]]; then
+  echo "Cannot verify the installed nginx site; deployment stopped before rebuilding the app." >&2
+  exit "$status"
+fi
+if ! sudo -n bash "$helper"; then
+  echo "Nginx synchronization did not complete; deployment stopped before rebuilding the app." >&2
+  echo "On the production host, run: sudo bash '$helper'" >&2
+  echo "Then rerun scripts/deploy.sh. Do not bypass the nginx configuration check." >&2
+  exit 1
+fi
+bash "$helper" --check
+REMOTE
+
 {
   printf 'VITE_SUPABASE_URL=%s\n' "$PUBLIC_URL"
   printf 'VITE_SUPABASE_ANON_KEY=%s\n' "${supabase_keys[0]}"

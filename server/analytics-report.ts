@@ -1,6 +1,7 @@
 import type { AnalyticsSnapshot } from './analytics-core'
 import { buildAnalyticsFacts, type AnalyticsFact, type AnalyticsFactSection } from './analytics-facts'
 import { analyticsProvenance } from '../src/lib/analytics-provenance'
+import { createMatchupPresentation } from './matchup-presentation'
 
 export class AnalyticsReportError extends Error {
   readonly code = 'invalid_report_output'
@@ -104,6 +105,9 @@ export function renderAnalyticsReport(content: string, snapshot: AnalyticsSnapsh
     throw new AnalyticsReportError(`The model report requires 1 to ${MAX_REPORT_OBSERVATIONS} observations.`)
   }
   const catalog = buildAnalyticsFacts(snapshot)
+  const display = snapshot.preset === 'matchup_preview' ? createMatchupPresentation(snapshot, catalog.facts) : null
+  const displayFact = (fact: AnalyticsFact) => display ? markdownText(display.factText(fact)) : cite(fact)
+  const displayText = (text: string) => markdownText(display ? display.text(text) : text)
   const byId = new Map(catalog.facts.map((fact) => [fact.id, fact]))
   function fact(id: unknown) {
     if (typeof id !== 'string' || !byId.has(id)) {
@@ -122,7 +126,7 @@ export function renderAnalyticsReport(content: string, snapshot: AnalyticsSnapsh
       const selected = fact(observation.factId)
       key = selected.id
       section = selected.section
-      markdown = `- ${cite(selected)}`
+      markdown = `- ${displayFact(selected)}`
     } else if (observation.kind === 'comparison') {
       exactKeys(observation, ['kind', 'leftFactId', 'rightFactId'])
       const left = fact(observation.leftFactId)
@@ -139,15 +143,15 @@ export function renderAnalyticsReport(content: string, snapshot: AnalyticsSnapsh
       markdown = [
         '**Team comparison**',
         '',
-        '| Source | Supplied value | Unit |',
+        display ? '| Team | Supplied value | Unit |' : '| Source | Supplied value | Unit |',
         '| --- | ---: | --- |',
-        `| First: teamId ${left.teamId} | ${left.value} | ${markdownText(left.unit ?? '')} |`,
-        `| Second: teamId ${right.teamId} | ${right.value} | ${markdownText(right.unit ?? '')} |`,
+        `| ${display ? displayText(display.teamName(left.teamId)) : `First: teamId ${left.teamId}`} | ${left.value} | ${displayText(left.unit ?? '')} |`,
+        `| ${display ? displayText(display.teamName(right.teamId)) : `Second: teamId ${right.teamId}`} | ${right.value} | ${displayText(right.unit ?? '')} |`,
         '',
-        `- ${cite(left)}`,
-        `- ${cite(right)}`,
+        `- ${displayFact(left)}`,
+        `- ${displayFact(right)}`,
         '',
-        `**Difference:** The first supplied value is ${left.value === right.value ? 'equal to the second' : `${difference} ${markdownText(left.unit ?? '')} ${left.value > right.value ? 'higher' : 'lower'} than the second`}. This is descriptive, not a predictive conclusion.`,
+        `**Difference:** The first supplied value is ${left.value === right.value ? 'equal to the second' : `${difference} ${displayText(left.unit ?? '')} ${left.value > right.value ? 'higher' : 'lower'} than the second`}. This is descriptive, not a predictive conclusion.`,
       ].join('\n')
     } else {
       throw new AnalyticsReportError('The model selected an unsupported observation template.')
@@ -162,13 +166,13 @@ export function renderAnalyticsReport(content: string, snapshot: AnalyticsSnapsh
   })
   const limitations = [
     ...observations.filter((observation) => observation.section === 'limitations').map((observation) => observation.markdown),
-    ...analyticsProvenance(snapshot).map((note) => `- ${markdownText(note)}`),
+    ...analyticsProvenance(snapshot).map((note) => `- ${displayText(note)}`),
     ...(catalog.truncated ? [`- Fact catalog bounded to ${catalog.facts.length} of ${catalog.total} facts; omitted facts cannot be cited.`] : []),
   ]
   return [
     '# Validated factual report',
     ...sections,
-    '## Source scope and limitations',
+    display ? '## Scope and limitations' : '## Source scope and limitations',
     ...new Set(limitations),
     '**Interpretation:** These observations are descriptive, not predictive probabilities or betting advice.',
   ].join('\n\n')

@@ -9,6 +9,7 @@ import {
   type LlamaResponseFormat,
 } from './llama-client'
 import { analyticsProvenance, analyticsScopeLabel } from '../src/lib/analytics-provenance'
+import { createMatchupPresentation, matchupStatementLabel } from './matchup-presentation'
 
 export const MATCHUP_SECTIONS = {
   priorPerformance: 'Summary of Prior Performance',
@@ -44,8 +45,8 @@ const number = (value: number | null | undefined) =>
 const percent = (value: number | null | undefined) =>
   value == null || !Number.isFinite(value) ? 'Unavailable' : `${Number((value * 100).toFixed(2))}%`
 
-function table(headers: string[], rows: Array<Array<string | number | null | undefined>>) {
-  const cell = (value: string | number | null | undefined) => markdownText(value == null ? 'Unavailable' : String(value))
+function markdownTable(headers: string[], rows: Array<Array<string | number | null | undefined>>, text: (value: string) => string) {
+  const cell = (value: string | number | null | undefined) => markdownText(text(value == null ? 'Unavailable' : String(value)))
   return [
     `| ${headers.map(cell).join(' | ')} |`,
     `| ${headers.map(() => '---').join(' | ')} |`,
@@ -180,8 +181,8 @@ export function checkMatchupStatement(item: ReportStatement, facts: AnalyticsFac
   const cited: AnalyticsFact[] = []
   for (const id of item.factIds) {
     const fact = byId.get(id)
-    if (!fact) return { verdict: 'unsupported', reason: `Source fact ${id} is outside the supplied catalog.` }
-    if (!relevant(fact, item.section)) return { verdict: 'unsupported', reason: `Source fact ${id} does not support this section's scope.` }
+    if (!fact) return { verdict: 'unsupported', reason: 'A source reference is outside the supplied catalog.' }
+    if (!relevant(fact, item.section)) return { verdict: 'unsupported', reason: 'A source reference does not support this section\'s scope.' }
     cited.push(fact)
   }
   for (const match of item.text.matchAll(/\b(team|game|player)\s*(?:id\s*)?[:#]?\s*(\d+)/gi)) {
@@ -232,22 +233,12 @@ function parseVerdicts(completion: LlamaCompletion, ids: string[]): Map<string, 
   return result
 }
 
-function renderStatement(item: CheckedStatement, facts: AnalyticsFact[]) {
-  const references = item.factIds.map((id) => {
-    const fact = facts.find((entry) => entry.id === id)
-    if (!fact) return `${markdownText(id)} (not in supplied catalog)`
-    return [
-      markdownText(id),
-      fact.teamId == null ? '' : `teamId ${fact.teamId}`,
-      fact.playerId == null ? '' : `playerId ${fact.playerId}`,
-      fact.gameIds.length ? `gameIds ${fact.gameIds.join(', ')}` : '',
-    ].filter(Boolean).join('; ')
-  })
+function renderStatement(item: CheckedStatement, display: ReturnType<typeof createMatchupPresentation>) {
   return [
-    markdownText(item.text),
-    item.verdict === 'supported' ? '**Model check:** Supported by the local verifier (not independently proven).'
-      : `**${item.verdict === 'unsupported' ? 'Unsupported statement' : 'Unverified statement'}:** ${markdownText(item.reason)}`,
-    `**Sources:** ${references.length ? references.join(' / ') : 'None cited'}.`,
+    markdownText(display.text(item.text)) || 'Narrative text unavailable.',
+    ...(item.verdict === 'supported' ? [] : [
+      `**${item.verdict === 'unsupported' ? 'Unsupported statement' : 'Unverified statement'}:** ${markdownText(display.reason(item.reason))}`,
+    ]),
   ].join(' ')
 }
 
@@ -255,6 +246,8 @@ export function renderMatchupReport(snapshot: AnalyticsSnapshot, draft: MatchupD
   const target = snapshot.targetMatchup
   if (!target) throw new AnalyticsReportError('The pregame report requires a target matchup.')
   const catalog = buildAnalyticsFacts(snapshot)
+  const display = createMatchupPresentation(snapshot, catalog.facts)
+  const table = (headers: string[], rows: Array<Array<string | number | null | undefined>>) => markdownTable(headers, rows, display.text)
   const checked = statements(draft).map((item): CheckedStatement => ({
     ...item,
     ...(checkMatchupStatement(item, catalog.facts) ?? verdicts.get(item.id)
@@ -263,7 +256,7 @@ export function renderMatchupReport(snapshot: AnalyticsSnapshot, draft: MatchupD
   function narrative(id: SectionId) {
     return ['interpretation', 'summary'].map((kind) => {
       const item = checked.find((entry) => entry.id === `${id}.${kind}`)!
-      return `**${kind === 'interpretation' ? 'Interpretation' : 'Summary'}:** ${renderStatement(item, catalog.facts)}`
+      return `**${kind === 'interpretation' ? 'Interpretation' : 'Summary'}:** ${renderStatement(item, display)}`
     }).join('\n\n')
   }
   const teams = [target.awayTeam, target.homeTeam]
@@ -281,15 +274,12 @@ export function renderMatchupReport(snapshot: AnalyticsSnapshot, draft: MatchupD
     label,
     ...teams.map((team) => {
       const data = snapshot.teamStatTrends.items.find((entry) => entry.teamId === team.id)
-      const sample = data?.metricSamples?.[metric]
-      const eligible = trend(team.id)?.games
       const fields = {
         totalYards: data?.averageTotalYards, passYards: data?.averagePassYards,
         rushYards: data?.averageRushYards, turnovers: data?.averageTurnovers,
         sacks: data?.averageSacks, sacksAllowed: data?.averageSacksAllowed,
       }
-      return `${number(fields[metric])}; ${sample ? `${sample.count} observations${eligible == null ? '' : ` of ${eligible} eligible games`}; sum ${number(sample.sum)}; gameIds ${sample.gameIds.join(', ') || 'none'}`
-        : 'field-specific coverage unavailable'}`
+      return number(fields[metric])
     }),
   ]))
   const summary = snapshot.summary
@@ -326,7 +316,6 @@ export function renderMatchupReport(snapshot: AnalyticsSnapshot, draft: MatchupD
     ] as const).map(([label, collection]) => [
       label, `${collection.included} of ${collection.total} supplied${collection.truncated ? '; truncated' : ''}`,
     ]),
-    ['Model fact catalog', `${catalog.facts.length} of ${catalog.total} facts supplied${catalog.truncated ? '; truncated; omitted facts cannot be cited' : ''}`],
   ])
   const oddsTable = table(['Market', 'Stored current consensus'], [
     [`Home spread (${target.homeTeam.name}; negative favors home)`, number(target.currentConsensusOdds.homeSpread)],
@@ -337,11 +326,11 @@ export function renderMatchupReport(snapshot: AnalyticsSnapshot, draft: MatchupD
   const flagged = checked.filter((item) => item.verdict !== 'supported')
   return [
     '# Pregame Matchup Analysis',
-    `## Matchup Summary: ${markdownText(target.awayTeam.name)} at ${markdownText(target.homeTeam.name)}`,
+    `## Matchup Summary: ${markdownText(display.text(target.awayTeam.name))} at ${markdownText(display.text(target.homeTeam.name))}`,
     table(['Field', 'Matchup data'], [
-      ['Game ID', target.gameId], ['Season / stage / week', `${target.season} / ${target.stage ?? 'Unavailable'} / ${target.week ?? 'Unavailable'}`],
-      ['Away', `${target.awayTeam.name} (teamId ${target.awayTeam.id})`],
-      ['Home', `${target.homeTeam.name} (teamId ${target.homeTeam.id})`],
+      ['Season / stage / week', `${target.season} / ${target.stage ?? 'Unavailable'} / ${target.week ?? 'Unavailable'}`],
+      ['Away', target.awayTeam.name],
+      ['Home', target.homeTeam.name],
       ['Stored venue', `${target.venue.name ?? 'Unavailable'}, ${target.venue.city ?? 'Unavailable'}`],
       ['Kickoff (UTC)', new Date(target.kickoff.timestamp * 1000).toISOString()],
       ['Status', target.status.long ?? target.status.short],
@@ -349,17 +338,16 @@ export function renderMatchupReport(snapshot: AnalyticsSnapshot, draft: MatchupD
       ['Stored current consensus total', number(target.currentConsensusOdds.total)],
       ['Snapshot generated', snapshot.generatedAt],
     ]),
-    '**Report basis:** Tables and calculations are application-rendered from the saved source snapshot. Interpretations and summaries are local-model narratives with statement-level checks. A model verification pass is not a guarantee of correctness.',
+    '**Report basis:** Tables and summaries use the saved matchup data. Historical observations are descriptive, not predictions.',
     ...(flagged.length ? [
       `**Narrative warnings:** ${flagged.filter((item) => item.verdict === 'unsupported').length} unsupported and ${flagged.filter((item) => item.verdict === 'unverified').length} unverified statements remain below with reasons; they are not established source facts.`,
-      ...flagged.map((item) => `- ${markdownText(item.id)}: **${item.verdict === 'unsupported' ? 'Unsupported statement' : 'Unverified statement'}** - ${markdownText(item.reason)}`),
+      ...flagged.map((item) => `- ${matchupStatementLabel(item.id)}: **${item.verdict === 'unsupported' ? 'Unsupported statement' : 'Unverified statement'}** - ${markdownText(display.reason(item.reason))}`),
     ] : []),
     `## ${MATCHUP_SECTIONS.priorPerformance}`,
-    `**Evidence scope:** ${markdownText(analyticsScopeLabel(snapshot))}. This selection is not necessarily league-wide or a similar-matchup cohort.`,
+    `**History scope:** ${markdownText(display.text(analyticsScopeLabel(snapshot)))}. This selection is not necessarily league-wide or a similar-matchup cohort.`,
     '### General ATS & Totals Trends', sampleTable,
     '### Team-Specific ATS Trends', atsTable,
     '### Team Stat Trends', statsTable,
-    '**Statistics coverage:** Each average uses its own valid observations, not ATS grading counts. Turnovers mean turnovers committed, not turnover differential. Sacks allowed use only the offensive sacks/yardage field; provider sacks are not substituted.',
     '### Standings',
     table(['Team', 'W-L-T', 'Division', 'Position', 'Streak'], teams.map((team) => {
       const standing = snapshot.standings.items.find((entry) => entry.team_id === team.id)
@@ -372,7 +360,7 @@ export function renderMatchupReport(snapshot: AnalyticsSnapshot, draft: MatchupD
     ...(snapshot.currentInjuries.items.length ? [
       table(['Team', 'Player', 'Position', 'Reported status', 'Description', 'Injury date', 'First observed', 'Last observed'],
         snapshot.currentInjuries.items.map((injury) => [
-          injury.teamName, `${injury.playerName} (playerId ${injury.player_id})`, injury.position,
+          injury.teamName, injury.playerName, injury.position,
           injury.status, injury.description, injury.injury_date, injury.first_seen_at, injury.last_seen_at,
         ])),
     ] : ['No current injury records were supplied; this does not confirm that both teams are healthy.']),
@@ -390,18 +378,18 @@ export function renderMatchupReport(snapshot: AnalyticsSnapshot, draft: MatchupD
     'Rates exclude pushes and ungraded games; descriptive historical over rates are not a probability for this matchup.',
     narrative('totals'),
     `### ${MATCHUP_SECTIONS.efficiency}`, statsTable,
-    'Raw yardage and scoring averages are not efficiency rankings. Different field-specific samples cannot establish causation or predictive certainty.',
+    'Turnovers mean turnovers committed, not turnover differential. Sacks allowed use only the offensive sacks/yardage field; provider sacks are not substituted. Raw averages are not efficiency rankings, evidence of causation, or predictive certainty.',
     narrative('efficiency'),
     `### ${MATCHUP_SECTIONS.missingData}`, qualityTable,
-    ...(snapshot.dataQuality.warnings ?? []).map((warning) => `- ${markdownText(warning)}`),
+    ...(snapshot.dataQuality.warnings ?? []).map((warning) => `- ${markdownText(display.text(warning))}`),
     narrative('missingData'),
     `### ${MATCHUP_SECTIONS.oddsContext}`, oddsTable,
     'Pregame consensus is not a closing line. Historical deltas use historical closing lines; no correlation with this target matchup or provider freshness is established.',
     narrative('oddsContext'),
     '## Overall Summary of Observations',
-    ...checked.filter((item) => item.section === 'overall').map((item) => `- ${renderStatement(item, catalog.facts)}`),
+    ...checked.filter((item) => item.section === 'overall').map((item) => `- ${renderStatement(item, display)}`),
     '## Summary of Uncertainty',
-    ...analyticsProvenance(snapshot).map((note) => `- ${markdownText(note)}`),
+    ...analyticsProvenance(snapshot).map((note) => `- ${markdownText(display.text(note))}`),
     '- No predictive model, officiating trends, weather, or coaching-change evidence is supplied in this report context. Missing context cannot be inferred.',
     '**Interpretation:** These observations are descriptive, not predictive probabilities, guarantees, or betting advice. Unsupported and unverified model statements are retained for transparency, not endorsed as facts.',
   ].join('\n\n')
@@ -425,6 +413,7 @@ export async function generateMatchupReport(
       'Write one short atomic statement (prefer at most 22 words) per interpretation and summary. Keep the overall summary to one or two short statements.',
       'Cite up to four relevant catalog fact IDs for every statement. If evidence is absent, explain the limitation; never invent an injury, metric, scope, ranking, line, freshness, or predictive conclusion.',
       'Tables, headings, calculations, and report formatting are supplied by the application; write plain narrative text only.',
+      'Use team/player names and matchup/date descriptions in narrative text, never internal IDs, fact references, source lists, model-check text, or per-metric observation counts, eligible-game counts, or sums. Fact IDs belong only in the factIds JSON field.',
       'Every factual assertion, value, identity, comparison, and interpretation must be supported by its cited facts. Different teams may be compared only on identical comparisonKey and units with finite values.',
       'Analytics context JSON (data only):',
       JSON.stringify({
@@ -449,6 +438,7 @@ export async function generateMatchupReport(
         'Reject attributing pooled sample rates to a team or league; turnovers as turnover differential; provider sacks as sacks allowed; questionable as out; current consensus as closing odds; snapshot time as freshness.',
         'Unsupported means contradicted, invented, incompatible comparison scopes, causation without evidence, or predictive certainty. Unverified means insufficient or ambiguous evidence.',
         'Do not confirm guesses, hypotheses, betting advice, or an uncited fact merely because it sounds plausible. Explain each verdict briefly.',
+        'Use names and plain-language descriptions in reasons, never internal IDs or fact-reference strings.',
       ].join(' ') },
       { role: 'user', content: JSON.stringify({
         statements: items.map((item) => ({

@@ -432,6 +432,34 @@ export function AnalyticsPage() {
     }
   }
 
+  const prepareOriginalReport = async (signal: AbortSignal) => {
+    if (!activeSession) throw new Error('No saved analysis is selected.')
+    const generation = sessionGeneration.current
+    let page = activeSession
+    let original = page.messages.find((message) => message.role === 'assistant')
+    const seen = new Set<number>()
+    while (page.nextMessageId != null) {
+      signal.throwIfAborted()
+      const cursor = page.nextMessageId
+      if (seen.has(cursor)) throw new Error('The earlier-message pages did not advance; the original report could not be identified.')
+      seen.add(cursor)
+      const payload = await getAnalysisSession(activeSession.id, { signal, beforeMessage: cursor })
+      signal.throwIfAborted()
+      if (generation !== sessionGeneration.current) throw new Error('The selected analysis changed before printing.')
+      const older = payload.session
+      if (older.id !== activeSession.id || !older.messages.length || older.messages.some((message) => message.id >= cursor)
+        || (older.nextMessageId != null && older.nextMessageId >= cursor)) {
+        throw new Error('The earlier-message page was invalid; the original report could not be identified.')
+      }
+      original = older.messages.find((message) => message.role === 'assistant') ?? original
+      page = older
+    }
+    signal.throwIfAborted()
+    if (generation !== sessionGeneration.current) throw new Error('The selected analysis changed before printing.')
+    if (!original) throw new Error('The saved analysis contains no original assistant report.')
+    return original.content
+  }
+
   const renameSession = async (event: MouseEvent<HTMLButtonElement>) => {
     const session = sessions.find((item) => item.id === event.currentTarget.dataset.sessionId)
     if (!session) {
@@ -616,7 +644,13 @@ export function AnalyticsPage() {
           {conversationError && requestedSessionId && !canRetryQuestion && <button type="button" data-session-id={requestedSessionId} onClick={openSession}>Retry conversation</button>}
           {isOpeningSession && <StatusMessage title="Loading conversation" message="Loading the selected saved analysis." />}
           {activeSession ? <>
-            <header><div><p className="eyebrow">{presetLabel(activeSession.preset)}</p><h2>{activeSession.title}</h2></div><span>{activeSession.model}</span></header>
+            <header><div><p className="eyebrow">{presetLabel(activeSession.preset)}</p><h2>{activeSession.title}</h2></div>
+              <div className="analysis-header-actions">
+                <span>{activeSession.model}</span>
+                {activeSession.preset === 'matchup_preview' && <AnalyticsPrintButton key={activeSession.id}
+                  prepareContent={prepareOriginalReport} title={activeSession.title} disabled={isAnalyzing || isOpeningSession} />}
+              </div>
+            </header>
             <div className="analysis-messages">
               {activeSession.nextMessageId && <button type="button" disabled={isLoadingMessages || isAnalyzing || isStreaming} onClick={() => void loadOlderMessages()}>Load older messages</button>}
               {activeSession.messages.map((message) => <div className={`analysis-message is-${message.role}`} key={message.id}>

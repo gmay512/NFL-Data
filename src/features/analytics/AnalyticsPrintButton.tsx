@@ -2,19 +2,62 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal, flushSync } from 'react-dom'
 import { AnalyticsReportContent } from './AnalyticsReportContent'
 
-export function AnalyticsPrintButton({ content, title }: { content: string; title: string }) {
-  const [printing, setPrinting] = useState(false)
+type PrintProps = { title: string; disabled?: boolean } & (
+  | { content: string; prepareContent?: never }
+  | { content?: never; prepareContent: (signal: AbortSignal) => Promise<string> }
+)
+
+export function AnalyticsPrintButton({ content, prepareContent, title, disabled = false }: PrintProps) {
+  const [printContent, setPrintContent] = useState<string | null>(null)
+  const [preparing, setPreparing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const cleanupRef = useRef<(() => void) | null>(null)
+  const preparationRef = useRef<AbortController | null>(null)
 
-  useEffect(() => () => cleanupRef.current?.(), [])
+  useEffect(() => () => {
+    preparationRef.current?.abort()
+    preparationRef.current = null
+    cleanupRef.current?.()
+  }, [])
+  useEffect(() => {
+    if (disabled) preparationRef.current?.abort()
+  }, [disabled])
 
-  const print = () => {
+  const print = async () => {
+    if (preparationRef.current || cleanupRef.current || disabled) return
     if (document.body.hasAttribute('data-analytics-print')) {
       setError('Another report is already being printed. Close its print dialog before trying again.')
       return
     }
     setError(null)
+    let report = content
+    if (prepareContent) {
+      const controller = new AbortController()
+      preparationRef.current = controller
+      setPreparing(true)
+      try {
+        report = await prepareContent(controller.signal)
+        if (controller.signal.aborted) return
+      } catch (failure) {
+        if (!controller.signal.aborted) {
+          setError(failure instanceof Error ? `Could not prepare analysis for printing: ${failure.message}` : 'Could not load the original analysis for printing.')
+        }
+        return
+      } finally {
+        if (preparationRef.current === controller) {
+          preparationRef.current = null
+          setPreparing(false)
+        }
+      }
+    }
+    if (!report?.trim()) {
+      setError('The original analysis has no report content to print.')
+      return
+    }
+    if (document.body.hasAttribute('data-analytics-print')) {
+      setError('Another report is already being printed. Close its print dialog before trying again.')
+      return
+    }
     const previousTitle = document.title
     const media = window.matchMedia?.('print')
     const cleanup = () => {
@@ -23,7 +66,7 @@ export function AnalyticsPrintButton({ content, title }: { content: string; titl
       document.body.removeAttribute('data-analytics-print')
       document.title = previousTitle
       cleanupRef.current = null
-      setPrinting(false)
+      setPrintContent(null)
     }
     const onMediaChange = (event: MediaQueryListEvent) => {
       if (!event.matches) cleanup()
@@ -33,7 +76,7 @@ export function AnalyticsPrintButton({ content, title }: { content: string; titl
     media?.addEventListener('change', onMediaChange)
     document.body.setAttribute('data-analytics-print', '')
     document.title = title
-    flushSync(() => setPrinting(true))
+    flushSync(() => setPrintContent(report))
     try {
       window.print()
     } catch (failure) {
@@ -44,11 +87,11 @@ export function AnalyticsPrintButton({ content, title }: { content: string; titl
 
   return (
     <>
-      <button className="analytics-print-button" type="button" disabled={printing} onClick={print}>Print analysis</button>
+      <button className="analytics-print-button" type="button" disabled={disabled || preparing || printContent !== null} onClick={() => void print()}>{preparing ? 'Preparing analysis…' : 'Print analysis'}</button>
       {error && <p className="analytics-print-error" role="alert">{error}</p>}
-      {printing && createPortal(
+      {printContent !== null && createPortal(
         <article className="analytics-print-root" aria-label={`Print preview: ${title}`}>
-          <AnalyticsReportContent content={content} />
+          <AnalyticsReportContent content={printContent} />
         </article>,
         document.body,
       )}

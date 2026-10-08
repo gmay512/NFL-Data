@@ -729,7 +729,7 @@ describe('AnalyticsPage', () => {
       }
       return baseFetch({ saved: true })(input, init)
     }, '/analytics?session=session-1')
-    const buttons = [...container.querySelectorAll<HTMLButtonElement>('.analytics-print-button')]
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>('.analysis-message .analytics-print-button')]
     assert.equal(buttons.length, 2)
     let printCalls = 0
     window.print = () => {
@@ -745,5 +745,167 @@ describe('AnalyticsPage', () => {
     await React.act(() => window.dispatchEvent(new window.Event('afterprint')))
     assert.equal(document.querySelector('.analytics-print-root'), null)
     assert(!document.body.hasAttribute('data-analytics-print'))
+  })
+
+  it('has a visible title-bar print action outside the conversation that prints the original saved content unchanged', async () => {
+    const original = '# Original saved matchup\n\n| Team | Average |\n| --- | --- |\n| Dallas | 24 |\n\n**Sources:** teamId 29; gameId 21570.\n\n**Unverified statement:** Availability unknown.'
+    const preview: AnalysisSession = {
+      ...session, preset: 'matchup_preview', context: { ...snapshot, preset: 'matchup_preview' },
+      messages: [
+        { ...session.messages[0], content: original },
+        { ...session.messages[0], id: 3, role: 'user', content: 'Tell me more.' },
+        { ...session.messages[0], id: 4, content: '# Latest follow-up\n\nDo not print this with the original.' },
+      ],
+    }
+    const before = JSON.stringify(preview)
+    let reads = 0
+    const container = await renderPage(async (input, init) => {
+      if (new URL(String(input), 'http://localhost').pathname === '/api/analytics/sessions/session-1') {
+        reads++
+        return json({ session: preview })
+      }
+      return baseFetch({ saved: true })(input, init)
+    }, '/analytics?session=session-1')
+    const button = container.querySelector<HTMLButtonElement>('.analysis-chat > header .analytics-print-button')
+    assert(button)
+    assert.equal(button.closest('.analysis-messages'), null)
+    assert.equal(container.querySelectorAll('.analysis-message .analytics-print-button').length, 2)
+    let prints = 0
+    window.print = () => {
+      prints++
+      const surface = document.querySelector('.analytics-print-root')!
+      assert.match(surface.textContent ?? '', /Original saved matchup/)
+      assert.match(surface.textContent ?? '', /Sources: teamId 29; gameId 21570/)
+      assert.match(surface.textContent ?? '', /Unverified statement: Availability unknown/)
+      assert.equal(surface.querySelector('tbody td:nth-child(2)')?.textContent, '24')
+      assert.doesNotMatch(surface.textContent ?? '', /Latest follow-up|Tell me more|Grounding details/)
+    }
+    await React.act(() => button.click())
+    assert.equal(prints, 1)
+    assert.equal(reads, 1)
+    assert.equal(JSON.stringify(preview), before)
+    await React.act(() => window.dispatchEvent(new window.Event('afterprint')))
+  })
+
+  it('resolves the original report through older pages on demand instead of printing a recent follow-up', async () => {
+    const preview: AnalysisSession = {
+      ...session, preset: 'matchup_preview', context: { ...snapshot, preset: 'matchup_preview' },
+      nextMessageId: 51,
+      messages: [
+        { ...session.messages[0], id: 51, role: 'user', content: 'Newest question' },
+        { ...session.messages[0], id: 52, content: 'Newest follow-up' },
+      ],
+    }
+    const cursors: string[] = []
+    const container = await renderPage(async (input, init) => {
+      const url = new URL(String(input), 'http://localhost')
+      if (url.pathname === '/api/analytics/sessions/session-1') {
+        const cursor = url.searchParams.get('beforeMessage')
+        if (!cursor) return json({ session: preview })
+        cursors.push(cursor)
+        return json({ session: cursor === '51' ? {
+          ...preview, nextMessageId: 21,
+          messages: [{ ...session.messages[0], id: 22, content: 'Middle follow-up' }],
+        } : {
+          ...preview, nextMessageId: null, messages: [
+            { ...session.messages[0], id: 1, role: 'user', content: 'Original prompt' },
+            { ...session.messages[0], id: 2, content: '# Original full report\n\n**Summary:** Actual matchup data.' },
+          ],
+        } })
+      }
+      return baseFetch({ saved: true })(input, init)
+    }, '/analytics?session=session-1')
+    assert.deepEqual(cursors, [])
+    let prints = 0
+    window.print = () => {
+      prints++
+      const text = document.querySelector('.analytics-print-root')?.textContent ?? ''
+      assert.match(text, /Original full report/)
+      assert.doesNotMatch(text, /Newest follow-up|Middle follow-up|Original prompt/)
+    }
+    await React.act(() => container.querySelector<HTMLButtonElement>('.analysis-chat > header .analytics-print-button')!.click())
+    await settle()
+    assert.deepEqual(cursors, ['51', '21'])
+    assert.equal(prints, 1)
+    assert.equal(container.querySelectorAll('.analysis-message').length, 2)
+    assert.match(container.querySelector('.analysis-messages')?.textContent ?? '', /Newest follow-up/)
+    await React.act(() => window.dispatchEvent(new window.Event('afterprint')))
+  })
+
+  it('shows failed or nonadvancing original-report pagination rather than printing the latest reply', async () => {
+    const preview: AnalysisSession = {
+      ...session, preset: 'matchup_preview', context: { ...snapshot, preset: 'matchup_preview' },
+      nextMessageId: 51, messages: [{ ...session.messages[0], id: 52, content: 'Latest follow-up' }],
+    }
+    let failRead = true
+    const container = await renderPage(async (input, init) => {
+      const url = new URL(String(input), 'http://localhost')
+      if (url.pathname === '/api/analytics/sessions/session-1') {
+        if (!url.searchParams.has('beforeMessage')) return json({ session: preview })
+        return failRead ? json({ error: 'Earlier history unavailable' }, 500) : json({
+          session: { ...preview, messages: [{ ...session.messages[0], id: 22 }], nextMessageId: 51 },
+        })
+      }
+      return baseFetch({ saved: true })(input, init)
+    }, '/analytics?session=session-1')
+    const button = container.querySelector<HTMLButtonElement>('.analysis-chat > header .analytics-print-button')!
+    window.print = () => assert.fail('An incomplete conversation must not print a follow-up as the original')
+    await React.act(() => button.click())
+    await settle()
+    assert.match(container.querySelector('.analysis-chat > header [role="alert"]')?.textContent ?? '', /Earlier history unavailable/)
+    assert(!button.disabled)
+    failRead = false
+    await React.act(() => button.click())
+    await settle()
+    assert.match(container.querySelector('.analysis-chat > header [role="alert"]')?.textContent ?? '', /earlier-message page was invalid/)
+    assert(!button.disabled)
+    assert.equal(document.querySelector('.analytics-print-root'), null)
+  })
+
+  it('cancels original-report preparation when switching saved analyses', async () => {
+    const preview: AnalysisSession = {
+      ...session, preset: 'matchup_preview', context: { ...snapshot, preset: 'matchup_preview' },
+      nextMessageId: 51, messages: [{ ...session.messages[0], id: 52, content: 'Latest follow-up' }],
+    }
+    const second: AnalysisSession = { ...preview, id: 'session-2', title: 'Second saved matchup', nextMessageId: null }
+    let resolve!: (response: Response) => void
+    let printSignal!: AbortSignal
+    const container = await renderPage(async (input, init) => {
+      const url = new URL(String(input), 'http://localhost')
+      if (url.pathname === '/api/analytics/sessions' && init?.method !== 'POST') return json({ sessions: [preview, second], next: null })
+      if (url.pathname === '/api/analytics/sessions/session-2') return json({ session: second })
+      if (url.pathname === '/api/analytics/sessions/session-1') {
+        if (!url.searchParams.has('beforeMessage')) return json({ session: preview })
+        printSignal = init!.signal!
+        return new Promise<Response>((done) => { resolve = done })
+      }
+      return baseFetch({ saved: true })(input, init)
+    }, '/analytics?session=session-1')
+    window.print = () => assert.fail('A stale report must not print after switching sessions')
+    await React.act(() => container.querySelector<HTMLButtonElement>('.analysis-chat > header .analytics-print-button')!.click())
+    assert.equal(container.querySelector('.analysis-chat > header .analytics-print-button')?.textContent, 'Preparing analysis…')
+    await React.act(() => container.querySelector<HTMLButtonElement>('.saved-analysis-open[data-session-id="session-2"]')!.click())
+    await settle()
+    assert(printSignal.aborted)
+    await React.act(() => resolve(json({ session: {
+      ...preview, nextMessageId: null, messages: [{ ...session.messages[0], content: 'Original stale report' }],
+    } })))
+    await settle()
+    assert.equal(container.querySelector('.analysis-chat > header h2')?.textContent, 'Second saved matchup')
+    assert.equal(document.querySelector('.analytics-print-root'), null)
+  })
+
+  it('reports a missing original assistant report without opening the print dialog', async () => {
+    const preview: AnalysisSession = {
+      ...session, preset: 'matchup_preview', context: { ...snapshot, preset: 'matchup_preview' },
+      messages: [{ ...session.messages[0], role: 'user', content: 'Original prompt only' }],
+    }
+    const container = await renderPage(async (input, init) => {
+      if (new URL(String(input), 'http://localhost').pathname === '/api/analytics/sessions/session-1') return json({ session: preview })
+      return baseFetch({ saved: true })(input, init)
+    }, '/analytics?session=session-1')
+    window.print = () => assert.fail('No assistant report exists')
+    await React.act(() => container.querySelector<HTMLButtonElement>('.analysis-chat > header .analytics-print-button')!.click())
+    assert.match(container.querySelector('.analysis-chat > header [role="alert"]')?.textContent ?? '', /no original assistant report/)
   })
 })

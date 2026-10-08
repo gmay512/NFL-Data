@@ -325,8 +325,10 @@ Home Spread Performance; Totals Performance; Offensive Efficiency & Turnovers;
 Missing/Ungraded Data; and Odds Context. Every section includes an interpretation
 and summary, followed by overall observations and a summary of uncertainty.
 The application renders the tables directly from the saved source snapshot,
-including away/home splits, metric-specific samples, missing values, and
-source-scope disclosures. Completed-game reviews and weekly suggestions keep
+including away/home splits, actual statistical values, missing values, and
+history-scope disclosures. Team-stat cells contain only values or `Unavailable`,
+not observation counts, eligible-game counts, sums, or source game IDs.
+Completed-game reviews and weekly suggestions keep
 their existing formats.
 
 The local model writes short, structured interpretations and summaries citing
@@ -338,7 +340,11 @@ denominators, time/location/stage scope, and injury/market terminology.
 **Model verification is an additional check, not a guarantee of correctness.**
 
 Unsupported statements and statements that cannot be verified remain in the
-report with explicit labels, source references, and reasons. They do not
+report with explicit labels and reader-friendly reasons. Internal team, game,
+player, fact, and statement IDs, routine model-check text, and source lists are
+not displayed in new matchup reports or new matchup follow-up answers. IDs and
+metric-specific samples remain available internally for grounding and validation.
+Warnings do not
 prevent saving an otherwise well-formed analysis and are not endorsed as
 source facts. A failed or incomplete verification pass is disclosed as
 unverified rather than silently accepted. Malformed or unfinished narrative
@@ -347,10 +353,14 @@ errors. Both model passes use the configured local service and its existing
 request/context/output limits; generation and verification usage are combined
 when available.
 
-**Print analysis** in the dashboard preview or beside a saved matchup reply
-opens the browser print dialog for that selected report only. It prints
-rendered Markdown headings, tables, interpretations, summaries, evidence,
-and verification warnings, without navigation, controls, other messages, or
+**Print analysis** beside the saved matchup title prints the original full
+report, not the latest follow-up. If the original lies outside the currently
+loaded conversation page, earlier message pages are fetched on demand; loading
+failures are shown rather than printing a different reply. The dashboard preview
+and individual saved matchup replies also have print controls for their selected
+content. These actions open the browser print dialog and print rendered Markdown
+headings, tables, interpretations, summaries, and verification warnings,
+without navigation, controls, other messages, or
 raw grounding JSON. The browser's Save as PDF option can also be used.
 Printing is independent of the page's light/dark theme and does not change the
 existing Weekly Analysis print action.
@@ -652,6 +662,12 @@ Supabase Compose project at `/home/glenn/srv/supabase-project`. The app uses hos
 networking for outbound DNS but listens only on `127.0.0.1:3000`; nginx is the LAN
 entry point.
 
+Deployment checks that the enabled nginx site matches `deploy/nginx.conf`
+before rewriting the production environment or rebuilding the app. An
+unchanged site needs no reload. If the site differs, deployment attempts a
+noninteractive sudo synchronization; missing privilege or a failed update
+stops deployment with explicit recovery instructions.
+
 Apply new database migrations, then deploy or update the app:
 
 ```bash
@@ -679,10 +695,32 @@ and fails unless every public table has the same exact row count.
 
 The server's nginx site should use `deploy/nginx.conf`. It serves the web app at
 `http://192.168.4.237`, proxies Supabase API paths to Kong, and limits access to
-`192.168.4.0/24`. Installing or changing that site requires sudo:
+`192.168.4.0/24`. The application location's `900s` proxy read/send settings
+allow bounded local-model requests to finish. A healthy model can still return
+a generic HTTP 504 if the installed proxy retains its shorter default timeout:
+nginx logs an upstream response-header timeout and the app records cancellation.
+Copying repository files alone does not activate nginx settings.
+
+Updating an existing enabled site requires sudo. If deployment requests
+interactive authentication, run:
 
 ```bash
-sudo cp /home/glenn/srv/nfl-data/deploy/nginx.conf /etc/nginx/sites-available/supabase
-sudo nginx -t
-sudo systemctl reload nginx
+ssh -t glenn@192.168.4.237 \
+  "sudo bash /home/glenn/srv/nfl-data/scripts/sync-production-nginx.sh"
+```
+
+Then rerun `./scripts/deploy.sh`. The helper preserves the enabled site's
+symlink, validates the full nginx configuration, and reloads only after
+validation. A failed installation, validation, or reload restores and reloads
+the previous site; failed rollback preserves its backup path for manual
+recovery. Other nginx sites and model settings are not changed.
+
+The helper defaults to `/etc/nginx/sites-enabled/supabase`, which must already
+resolve to a readable regular file. For a first nginx setup, create and enable
+that intended site before running the helper; deployment does not replace
+unrelated default sites. `NGINX_SITE_PATH` can select another existing enabled
+site when running the helper directly. To check without installing or reloading:
+
+```bash
+bash /home/glenn/srv/nfl-data/scripts/sync-production-nginx.sh --check
 ```

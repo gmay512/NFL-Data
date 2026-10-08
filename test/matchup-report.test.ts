@@ -48,16 +48,17 @@ describe('fixed pregame matchup layout', () => {
       assert.match(section, /\*\*Summary:\*\*/)
     }
     assert.match(markdown, /## Overall Summary of Observations\n\n- These observations/)
-    assert.match(markdown, /model verification pass is not a guarantee/)
+    assert.match(markdown, /Tables and summaries use the saved matchup data/)
+    assert.doesNotMatch(markdown, /Model check|Sources:|teamId|playerId|gameIds|Game ID|stats\.29|efficiency\.summary/)
     assert.doesNotMatch(markdown, /# Validated factual report/)
   })
 
-  it('renders source-driven tables with team ordering, decisions, pushes, missing lines, metric samples, and injury details', () => {
+  it('renders real values without identifiers or metric-sample clutter while retaining grading and injury details', () => {
     const dom = new JSDOM(renderToStaticMarkup(createElement(AnalyticsReportContent, { content: render() })))
     try {
       const tables = [...dom.window.document.querySelectorAll('table')]
       assert.equal(tables.length, 11)
-      assert.deepEqual([...tables[0].querySelectorAll('tbody tr')][3].textContent?.split('teamId'), ['HomeHouston (', ' 26)'])
+      assert.equal([...tables[0].querySelectorAll('tbody tr')][2].textContent, 'HomeHouston')
       assert.match(tables[0].textContent ?? '', /Not Started/)
       assert.match(tables[1].textContent ?? '', /Decisions \(pushes excluded\)22/)
       assert.match(tables[1].textContent ?? '', /Pushes11/)
@@ -66,12 +67,18 @@ describe('fixed pregame matchup layout', () => {
       assert.match(tables[2].textContent ?? '', /Dallas \(all locations\)41-1-12150%/)
       assert.match(tables[2].textContent ?? '', /Houston \(all locations\)/)
       assert.equal(tables[3].querySelectorAll('th')[1].textContent, 'Dallas')
-      assert.match(tables[3].textContent ?? '', /0\.75; 4 observations of 4 eligible games; sum 3; gameIds 1, 2, 3, 4/)
-      assert.match(tables[3].textContent ?? '', /200; 3 observations of 4 eligible games/)
-      assert.match(tables[3].textContent ?? '', /Avg sacks allowed1; 3 observations of 4 eligible games/)
-      assert.match(tables[3].textContent ?? '', /Unavailable; field-specific coverage unavailable/)
+      assert.deepEqual([...tables[3].querySelectorAll('tbody tr')].map((row) =>
+        [...row.querySelectorAll('td')].map((cell) => cell.textContent)), [
+        ['Avg total yards', '300', 'Unavailable'],
+        ['Avg passing yards', '200', 'Unavailable'],
+        ['Avg rushing yards', '100', 'Unavailable'],
+        ['Avg turnovers committed', '0.75', 'Unavailable'],
+        ['Avg sacks allowed', '1', 'Unavailable'],
+      ])
+      assert.doesNotMatch(tables[3].textContent ?? '', /observations|eligible|sum|gameId|coverage/)
+      assert.equal(tables[3].textContent, tables[8].textContent)
       assert.match(tables[4].textContent ?? '', /Dallas1-2-0NFC East3L1/)
-      assert.match(tables[5].textContent ?? '', /Known player \(playerId 10\)CBQuestionableKnee2026-09-20/)
+      assert.match(tables[5].textContent ?? '', /Known playerCBQuestionableKnee2026-09-20/)
       assert.match(tables[5].textContent ?? '', /2026-10-02T12:00:00Z/)
       assert.match(tables[6].textContent ?? '', /Dallas \(away games\)21-0-11/)
       assert.match(tables[6].textContent ?? '', /Houston \(home games\)/)
@@ -93,7 +100,7 @@ describe('fixed pregame matchup layout', () => {
     assert.match(markdown, /No current injury records were supplied; this does not confirm/)
     assert.match(markdown, /\| Home cover \/ over rate \| Unavailable \| Unavailable \|/)
     assert.match(markdown, /\| Stored current consensus total \| Unavailable \|/)
-    assert.match(markdown, /Unavailable; field-specific coverage unavailable/)
+    assert.match(markdown, /\| Avg total yards \| Unavailable \| Unavailable \|/)
     assert.doesNotMatch(markdown, /NaN|Infinity/)
   })
 
@@ -114,7 +121,7 @@ describe('fixed pregame matchup layout', () => {
     const markdown = render(legacy)
     assert.match(markdown, /Legacy report/)
     assert.match(markdown, /effective history scope was not recorded/)
-    assert.match(markdown, /field-specific coverage unavailable/)
+    assert.match(markdown, /\| Avg sacks allowed \| Unavailable \| Unavailable \|/)
     assert.equal(JSON.stringify(legacy), before)
   })
 
@@ -138,6 +145,54 @@ describe('fixed pregame matchup layout', () => {
       dom.window.close()
     }
   })
+
+  it('removes references from narrative, reasons, and source warnings without stripping legitimate numbers', () => {
+    const draft = createMatchupDraft()
+    draft.sections.oddsContext.summary = {
+      text: 'teamId 29 plays team_id: 26 in gameId 21570 during 2026 Week 4.',
+      factIds: ['matchup.identity'],
+    }
+    draft.sections.efficiency.summary = {
+      text: 'bookmakerId 876543 and venue_id: 987654 are internal references.',
+      factIds: ['stats.29.turnovers'],
+    }
+    draft.sections.injuries.summary = { text: 'playerId 765432 is out.', factIds: ['arbitrary-private-reference'] }
+    const verdicts = new Map(supportedMatchupVerdicts(draft).verdicts.map((item) => [
+      item.statementId, { verdict: item.verdict, reason: item.reason },
+    ]))
+    verdicts.set('totals.summary', {
+      verdict: 'unverified',
+      reason: 'stats.29.turnovers, playerId 10 and gameIds [1, 2] do not verify totals.summary. ID 654321 is unknown.',
+    })
+    const before = JSON.stringify(matchupSnapshot)
+    const markdown = renderMatchupReport(matchupSnapshot, draft, verdicts)
+    assert.match(markdown, /Dallas plays Houston in Dallas at Houston on 2026-10-04 during 2026 Week 4/)
+    assert.match(markdown, /Dallas turnovers committed/)
+    assert.match(markdown, /Known player/)
+    assert.match(markdown, /Houston at Dallas on 2026-09-04, Dallas: unrecognized offensive sacks/)
+    assert.match(markdown, /Unsupported statement/)
+    assert.match(markdown, /Unverified statement/)
+    assert.match(markdown, /Offensive efficiency and turnovers \/ Summary/)
+    assert.doesNotMatch(markdown, /teamId|team_id|playerId|gameIds?|bookmakerId|venue_id|21570|876543|987654|765432|654321|arbitrary-private-reference|stats\.29|totals\.summary|Sources:|Model check:/)
+    assert.equal(JSON.stringify(matchupSnapshot), before)
+  })
+
+  it('shows unknown entities without their fallback IDs and keeps zero statistics', () => {
+    const context = buildAnalyticsSnapshot('matchup_preview', matchupSnapshot.filters, {
+      ...matchupSource, players: [],
+      targetMatchup: { ...matchupSource.targetMatchup!, awayTeam: { id: 29, name: 'San Francisco 49ers' } },
+      teamStats: matchupSource.teamStats.map((row) => ({ ...row, turnovers_total: 0, pass_yards: 29, yards_total: 21570 })),
+    }, matchupSnapshot.generatedAt)
+    const markdown = render(context)
+    assert.match(markdown, /Matchup Summary: San Francisco 49ers at Houston/)
+    assert.match(markdown, /\| Avg turnovers committed \| 0 \| Unavailable \|/)
+    assert.match(markdown, /\| Avg passing yards \| 29 \| Unavailable \|/)
+    assert.match(markdown, /\| Avg total yards \| 21570 \| Unavailable \|/)
+    assert.match(markdown, /\| San Francisco 49ers \| Unknown player \| Unavailable/)
+    assert.doesNotMatch(markdown, /Player 10|playerId|teamId|Game ID/)
+    const tableBody = markdown.split('### Team Stat Trends\n\n')[1].split('\n\n### Standings')[0]
+    assert.doesNotMatch(tableBody, /observations|eligible|sum |gameId|coverage/)
+  })
 })
 
 describe('matchup narrative checks', () => {
@@ -158,7 +213,7 @@ describe('matchup narrative checks', () => {
     assert.equal(check('The stored home spread is +3.', ['matchup.spread'], 'oddsContext')?.verdict, 'unsupported')
     const draft = createMatchupDraft()
     draft.sections.efficiency.summary = { text: 'Dallas averaged 8.5 turnovers.', factIds: ['stats.29.turnovers'] }
-    assert.match(render(matchupSnapshot, draft), /Unsupported statement.*Value 8\.5/)
+    assert.match(render(matchupSnapshot, draft), /Unsupported statement.*numeric claim is not supplied/)
     assert.match(render(matchupSnapshot, draft), /Dallas averaged 8\.5 turnovers/)
     assert.match(render(matchupSnapshot, draft), /1 unsupported and 0 unverified/)
   })
@@ -178,12 +233,13 @@ describe('matchup narrative checks', () => {
     assert.equal(check('The difference is 12.5.', ['stats.29.turnovers', 'stats.29.sacksAllowed'])?.verdict, 'unsupported')
   })
 
-  it('preserves missing verifier verdicts as unverified with visible sources', () => {
+  it('preserves missing verifier verdicts as unverified without exposing sources', () => {
     const draft = createMatchupDraft()
     draft.sections.injuries.summary = { text: 'The listed player is questionable.', factIds: ['injury.0'] }
     const markdown = renderMatchupReport(matchupSnapshot, draft, new Map())
     assert.match(markdown, /Unverified statement.*did not return a verdict/)
-    assert.match(markdown, /injury\.0; teamId 29; playerId 10/)
+    assert.doesNotMatch(markdown, /injury\.0|teamId|playerId|Sources:|injuries\.summary/)
+    assert.match(markdown, /Current injuries \/ Summary/)
     assert.match(markdown, /0 unsupported and 15 unverified/)
   })
 
@@ -194,7 +250,7 @@ describe('matchup narrative checks', () => {
     ]))
     const markdown = renderMatchupReport(matchupSnapshot, draft, verdicts)
     assert.doesNotMatch(markdown, /Invented unchecked explanation/)
-    assert.match(markdown, /Supported by the local verifier \(not independently proven\)/)
+    assert.doesNotMatch(markdown, /Model check|Supported by the local verifier/)
   })
 
   it('requires all narrative slots, exact fields, bounded text, and a completed draft', () => {

@@ -13,7 +13,7 @@ import { AnalyticsDatabaseError } from '../server/analytics-reads'
 import type { WeeklyAnalysisRun, WeeklyRunView } from '../server/weekly-analysis'
 import { readAnalysisStream, readWeeklyAnalysisStream } from '../src/api/app-api'
 import { renderAnalyticsReport } from '../server/analytics-report'
-import { createMatchupDraft, supportedMatchupVerdicts } from './matchup-report-fixtures'
+import { createMatchupDraft, matchupSnapshot, supportedMatchupVerdicts } from './matchup-report-fixtures'
 import type {
   AnalysisSession,
   AnalysisSessionSummary,
@@ -608,6 +608,7 @@ describe('analytics API contracts', () => {
     assert.match(content, /An invented player is out.*Unsupported statement/)
     assert.match(content, /1 unsupported and 1 unverified/)
     assert.match(content, /## Overall Summary of Observations/)
+    assert.doesNotMatch(content, /teamId|gameIds?|playerId|Game ID|injury\.999|injuries\.summary|Model check:|Sources:/)
     const loaded = await request(`/api/analytics/sessions/${sessionId}`, deps)
     assert.equal((await loaded.json() as { session: AnalysisSession }).session.messages[1].content, content)
   })
@@ -684,6 +685,45 @@ describe('analytics API contracts', () => {
     assert.doesNotMatch(incompleteBody, /event: content/)
     assert.doesNotMatch(incompleteBody, /event: complete/)
     assert.equal(memory.getAppendCount(), 1)
+  })
+
+  it('saves and streams clean new matchup replies without rewriting the original report or snapshot', async () => {
+    const modelUrl = await startServer(async (incoming, response) => {
+      for await (const chunk of incoming) void chunk
+      response.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      response.write(`data: ${JSON.stringify({
+        model: 'test-model',
+        choices: [{ delta: { content: JSON.stringify({ observations: [
+          { kind: 'fact', factId: 'matchup.identity' },
+          { kind: 'fact', factId: 'stats.29.turnovers' },
+          { kind: 'fact', factId: 'injury.0' },
+        ] }) }, finish_reason: 'stop' }],
+      })}\n\n`)
+      response.end('data: [DONE]\n\n')
+    })
+    const memory = createMemoryStore()
+    const oldReport = '# Saved report\n\nGame ID: 21570; teamId 29; playerId 10.\n\n**Sources:** injury.0.\n\n**Model check:** Original text.'
+    await memory.store.saveInitial({
+      title: 'Saved matchup', preset: 'matchup_preview', filters: matchupSnapshot.filters,
+      context: matchupSnapshot, model: 'test-model', prompt: 'Analyze.',
+      completion: { content: oldReport, finishReason: 'stop', model: 'test-model', usage: null, latencyMs: 1 },
+    })
+    const before = JSON.stringify(memory.getSession()?.context)
+    const deps = dependencies(llama(modelUrl), memory.store)
+    const response = await request(`/api/analytics/sessions/${sessionId}/messages`, deps, 'POST', { question: 'Compare the actual matchup data.' })
+    assert.equal(response.status, 200)
+    let displayed = ''
+    await readAnalysisStream(response.body!, (event) => {
+      if (event.type === 'content') displayed += event.content
+    })
+    assert.match(displayed, /Dallas \(away\) at Houston \(home\)/)
+    assert.match(displayed, /0.75 per observed game/)
+    assert.doesNotMatch(displayed, /21570|teamId|playerId|gameIds?|Sources:|Evidence:|Model check:|stats\.29|injury\.0|eligible games|sum 3/)
+    assert.equal(memory.getSession()?.messages.at(-1)?.content, displayed)
+    assert.equal(memory.getSession()?.messages[1].content, oldReport)
+    assert.equal(JSON.stringify(memory.getSession()?.context), before)
+    const loaded = await request(`/api/analytics/sessions/${sessionId}`, deps)
+    assert.equal((await loaded.json() as { session: AnalysisSession }).session.messages[1].content, oldReport)
   })
 
   it('rejects invalid report selections before persistence or SSE display, including legacy follow-ups', async () => {
