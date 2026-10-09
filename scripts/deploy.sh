@@ -28,7 +28,7 @@ llm_max_history_chars="${LLM_MAX_HISTORY_CHARS:-$(sed -n 's/^LLM_MAX_HISTORY_CHA
 
 llm_base_url="${llm_base_url:-http://192.168.4.46:8089}"
 llm_model="${llm_model:-qwen3-coder-next}"
-llm_timeout_ms="${llm_timeout_ms:-120000}"
+llm_timeout_ms="${llm_timeout_ms:-300000}"
 llm_max_context_chars="${llm_max_context_chars:-240000}"
 llm_max_output_tokens="${llm_max_output_tokens:-2048}"
 llm_max_history_messages="${llm_max_history_messages:-12}"

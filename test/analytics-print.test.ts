@@ -4,6 +4,8 @@ import * as React from 'react'
 import { JSDOM } from 'jsdom'
 import { createRoot, type Root } from 'react-dom/client'
 import { AnalyticsPrintButton } from '../src/features/analytics/AnalyticsPrintButton'
+import { renderMatchupReport } from '../server/matchup-report'
+import { createMatchupDraft, matchupSnapshot, supportedMatchupVerdicts } from './matchup-report-fixtures'
 
 let dom: JSDOM | undefined
 let root: Root | undefined
@@ -33,6 +35,37 @@ async function setup(print: () => void, prepareContent?: (signal: AbortSignal) =
 }
 
 describe('formatted analysis printing', () => {
+  it('prints the saved team injury bullets without restoring a detailed injury table', async () => {
+    const draft = createMatchupDraft()
+    const verdicts = new Map(supportedMatchupVerdicts(draft).verdicts.map((item) => [
+      item.statementId, { verdict: item.verdict, reason: item.reason },
+    ]))
+    const report = renderMatchupReport(matchupSnapshot, draft, verdicts)
+    let calls = 0
+    const button = await setup(() => {
+      calls++
+      const surface = document.querySelector('.analytics-print-root')!
+      const heading = [...surface.querySelectorAll('h4')].find((item) => item.textContent === 'Current Injuries')!
+      const awayHeading = heading.nextElementSibling!
+      const awayBullets = awayHeading.nextElementSibling!
+      const homeHeading = awayBullets.nextElementSibling!
+      const homeBullets = homeHeading.nextElementSibling!
+      assert.equal(awayHeading.textContent, 'Dallas')
+      assert.equal(homeHeading.textContent, 'Houston')
+      assert.equal(awayBullets.tagName, 'UL')
+      assert.equal(homeBullets.tagName, 'UL')
+      assert.equal(awayBullets.querySelectorAll('li').length, 1)
+      assert.equal(homeBullets.querySelectorAll('li').length, 1)
+      assert.match(awayBullets.textContent ?? '', /Known player.*Questionable/)
+      assert.match(homeBullets.textContent ?? '', /No current injury records.*does not confirm.*healthy/)
+      assert.doesNotMatch(`${awayBullets.textContent} ${homeBullets.textContent}`, /First observed|Last observed|Injury date/)
+    }, async () => report)
+    await React.act(() => button.click())
+    assert.equal(calls, 1)
+    assert.equal(document.querySelector('[role="alert"]'), null)
+    await React.act(() => window.dispatchEvent(new window.Event('afterprint')))
+  })
+
   it('renders only the selected Markdown report before opening print and cleans up after the dialog closes', async () => {
     let calls = 0
     const button = await setup(() => {

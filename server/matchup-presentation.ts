@@ -18,7 +18,10 @@ const sectionLabels: Record<string, string> = {
 }
 
 export function matchupStatementLabel(id: string) {
-  const [section, kind] = id.split('.')
+  const [section, kind, index] = id.split('.')
+  if (section === 'injuries' && (kind === 'away' || kind === 'home')) {
+    return `Current injuries / ${kind === 'away' ? 'Away' : 'Home'} team / Observation ${Number(index) + 1}`
+  }
   return `${sectionLabels[section] ?? 'Narrative'} / ${kind === 'interpretation' ? 'Interpretation' : kind === 'summary' ? 'Summary' : 'Observation'}`
 }
 
@@ -60,6 +63,7 @@ export function createMatchupPresentation(snapshot: AnalyticsSnapshot, facts: An
   function reference(id: string) {
     const fact = byId.get(id)
     if (!fact) return 'unrecognized source reference'
+    if (fact.metric === 'injury-summary' && fact.teamId != null) return `${teamName(fact.teamId)} supplied injury summary`
     if (fact.teamId != null && metricLabels[fact.metric]) return `${teamName(fact.teamId)} ${metricLabels[fact.metric]}`
     if (fact.playerId != null) return `${playerName(fact.playerId)} ${fact.section === 'injuries' ? 'injury record' : 'statistics'}`
     if (fact.gameIds.length === 1) return games.get(fact.gameIds[0]) ?? 'stored matchup'
@@ -69,8 +73,8 @@ export function createMatchupPresentation(snapshot: AnalyticsSnapshot, facts: An
   function text(value: string): string {
     return value
       .replace(/(?:^|\s)(?:\*\*)?(?:Sources|Model check|Evidence IDs)\s*:(?:\*\*)?[^\n]*/gim, '')
-      .replace(/\b(?:matchup|sample|team|stats|standing|injury|player-stat|game|limitation)\.[\w-]+(?:\.[\w-]+)*/g, reference)
-      .replace(/\b(?:priorPerformance|injuries|homeSpread|totals|efficiency|missingData|oddsContext|overall)\.(?:interpretation|summary|\d+)\b/g, matchupStatementLabel)
+      .replace(/\b(?:matchup|sample|team|stats|standing|injury-summary|injury|player-stat|game|limitation)\.[\w-]+(?:\.[\w-]+)*/g, reference)
+      .replace(/\b(?:priorPerformance|injuries|homeSpread|totals|efficiency|missingData|oddsContext|overall)\.(?:interpretation|summary|\d+|(?:away|home)\.\d+)\b/g, matchupStatementLabel)
       .replace(/\b(team|game|player)(?:[\s_-]*ids?)?["']?\s*(?:[:=#]\s*)?[[("']*(\d+(?:\s*,\s*\d+(?!\d|[.-]\d))*)\b(?![.-]\d)[\])"']*/gi,
         (_, kind: string, ids: string) => ids.split(',').map((id) => {
           const number = Number(id.trim())

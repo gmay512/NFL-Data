@@ -1,4 +1,4 @@
-import { buildAnalyticsSnapshot, type AnalyticsSourceData } from '../server/analytics-core'
+import { buildAnalyticsSnapshot, type AnalyticsSnapshot, type AnalyticsSourceData } from '../server/analytics-core'
 import { MATCHUP_SECTIONS, type MatchupDraft } from '../server/matchup-report'
 
 export const matchupSource: AnalyticsSourceData = {
@@ -48,11 +48,25 @@ export const matchupSnapshot = buildAnalyticsSnapshot(
   'matchup_preview', { season: 2026, gameId: 21570 }, matchupSource, '2026-10-04T12:00:00Z',
 )
 
-export function createMatchupDraft(): MatchupDraft {
+export function createMatchupDraft(snapshot: AnalyticsSnapshot = matchupSnapshot): MatchupDraft {
   const entry = () => ({ text: 'These observations are descriptive, not predictive probabilities.', factIds: ['limitation.prediction'] })
   const sections = {} as MatchupDraft['sections']
   for (const id of Object.keys(MATCHUP_SECTIONS) as Array<keyof typeof MATCHUP_SECTIONS>) {
+    if (id === 'injuries') continue
     sections[id] = { interpretation: entry(), summary: entry() }
+  }
+  const target = snapshot.targetMatchup!
+  sections.injuries = { away: [], home: [] }
+  for (const side of ['away', 'home'] as const) {
+    const team = target[`${side}Team`]
+    const records = snapshot.currentInjuries.items.filter((injury) => injury.team_id === team.id)
+    const record = records[0]
+    sections.injuries[side] = [{
+      text: record
+        ? `${team.name} has ${records.length} supplied injury records; ${record.playerName} (${record.position ?? 'unknown position'}) is reported ${record.status ?? 'unknown'}.${snapshot.currentInjuries.truncated ? ' Counts cover a truncated snapshot.' : ''}`
+        : `No current injury records were supplied for ${team.name}; this does not confirm that the team is healthy.`,
+      factIds: [`injury-summary.${team.id}`, ...(record ? [`injury.${snapshot.currentInjuries.items.indexOf(record)}`] : [])],
+    }]
   }
   return { sections, overall: [entry()] }
 }
@@ -62,8 +76,11 @@ export function supportedMatchupVerdicts(draft: MatchupDraft): {
 } {
   return {
     verdicts: [
-      ...Object.keys(draft.sections).flatMap((id) => ['interpretation', 'summary'].map((kind) => ({
+      ...Object.keys(draft.sections).filter((id) => id !== 'injuries').flatMap((id) => ['interpretation', 'summary'].map((kind) => ({
         statementId: `${id}.${kind}`, verdict: 'supported' as const, reason: 'The cited evidence supports this descriptive statement.',
+      }))),
+      ...(['away', 'home'] as const).flatMap((side) => draft.sections.injuries[side].map((_, index) => ({
+        statementId: `injuries.${side}.${index}`, verdict: 'supported' as const, reason: 'The cited team injury facts support this statement.',
       }))),
       ...draft.overall.map((_, index) => ({
         statementId: `overall.${index}`, verdict: 'supported' as const, reason: 'The cited evidence supports this descriptive statement.',

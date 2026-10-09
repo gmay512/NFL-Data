@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, symlinkSync, readl
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, it } from 'node:test'
+import { getLlamaConfig } from '../server/llama-client'
 
 const helper = readFileSync('scripts/sync-production-nginx.sh', 'utf8')
 const deployment = readFileSync('scripts/deploy.sh', 'utf8')
@@ -48,7 +49,7 @@ echo "ssh $*" >> "$TEST_LOG"
 case "$*" in
   *"sed -n"*) printf 'test-anon\\ntest-service\\n' ;;
   *"bash -s"*) bash ;;
-  *"cat >"*) cat > /dev/null ;;
+  *"cat >"*) umask 077; cat > "$DEPLOY_PATH/deploy/.env.production" ;;
   *"docker compose"*) echo "app rebuilt" >> "$TEST_LOG" ;;
 esac
 `)
@@ -155,6 +156,31 @@ describe('safe production nginx synchronization', () => {
 })
 
 describe('deployment nginx drift guard', () => {
+  it('deploys the shared five-minute model timeout by default while preserving explicit overrides', () => {
+    for (const override of ['', '120000', '600000']) {
+      fixture(({ root, invoke, target }) => {
+        writeFileSync(target, desired)
+        const result = invoke('deploy.sh', [], { LLM_TIMEOUT_MS: override })
+        assert.equal(result.status, 0, String(result.stderr))
+        const environment = readFileSync(path.join(root, 'deploy/.env.production'), 'utf8')
+        const timeout = environment.match(/^LLM_TIMEOUT_MS=(\d+)$/m)
+        assert(timeout)
+        assert.equal(Number(timeout[1]), override ? Number(override) : getLlamaConfig({}).timeoutMs)
+        assert.equal(statSync(path.join(root, 'deploy/.env.production')).mode & 0o777, 0o600)
+      })
+    }
+    fixture(({ root, invoke, target }) => {
+      writeFileSync(target, desired)
+      writeFileSync(path.join(root, '.env.local'), 'API_SPORTS_KEY=test-key\nLLM_TIMEOUT_MS=600000\n')
+      for (const override of ['', '300000']) {
+        const result = invoke('deploy.sh', [], { LLM_TIMEOUT_MS: override })
+        assert.equal(result.status, 0, String(result.stderr))
+        assert.match(readFileSync(path.join(root, 'deploy/.env.production'), 'utf8'),
+          new RegExp(`^LLM_TIMEOUT_MS=${override || '600000'}$`, 'm'))
+      }
+    })
+  })
+
   it('stops before environment changes or app rebuild if drift needs interactive sudo', () => {
     fixture(({ invoke, target, log }) => {
       const result = invoke('deploy.sh', [], { TEST_SUDO_FAILURE: '1' })

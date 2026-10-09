@@ -219,7 +219,7 @@ reads these server-only settings from `.env.local`:
 | --- | --- | --- |
 | `LLM_BASE_URL` | `http://127.0.0.1:8089` | llama.cpp OpenAI-compatible base URL |
 | `LLM_MODEL` | `qwen3-coder-next` | Model ID or llama.cpp `--alias` |
-| `LLM_TIMEOUT_MS` | `120000` | Request timeout, from 100 through 600000 ms |
+| `LLM_TIMEOUT_MS` | `300000` | Per-call timeout (5 minutes), from 100 through 600000 ms |
 | `LLM_MAX_CONTEXT_CHARS` | `240000` | Maximum serialized analytics context, from 10000 through 2000000 characters |
 | `LLM_MAX_OUTPUT_TOKENS` | `2048` | Completion limit, from 64 through 32768 tokens |
 | `LLM_MAX_HISTORY_MESSAGES` | `12` | Recent saved messages included in a follow-up, from 0 through 100 |
@@ -322,8 +322,14 @@ reconstructed or upgraded to a newly validated report by the display layer.
 New pregame matchup reports follow a fixed layout: a matchup summary,
 prior-performance tables, current injuries, and these five numbered observations:
 Home Spread Performance; Totals Performance; Offensive Efficiency & Turnovers;
-Missing/Ungraded Data; and Odds Context. Every section includes an interpretation
+Missing/Ungraded Data; and Odds Context. Narrative sections include an interpretation
 and summary, followed by overall observations and a summary of uncertainty.
+Current Injuries instead shows **one to three local-model summary bullets per team**,
+grouped under the away and home team names, replacing the detailed injury table.
+These summarize supplied-record status counts and notable listed players or position
+groups. A team with no supplied injury records gets one missing-data bullet, not a
+claim that it is healthy. Counts cover supplied records only, not necessarily unique
+players or complete team totals; truncated injury data is disclosed.
 The application renders the tables directly from the saved source snapshot,
 including away/home splits, actual statistical values, missing values, and
 history-scope disclosures. Team-stat cells contain only values or `Unavailable`,
@@ -352,6 +358,17 @@ generation, cancellation, source-read failures, and save failures still report
 errors. Both model passes use the configured local service and its existing
 request/context/output limits; generation and verification usage are combined
 when available.
+
+The existing generation and verification passes each receive their own
+`LLM_TIMEOUT_MS` deadline, now defaulting to `300000` (5 minutes per call).
+The injury summaries do not add model calls. Explicit environment overrides
+still take precedence; set `LLM_TIMEOUT_MS` to change the shared local-model
+deadline. Health checks remain capped at 5 seconds, and user cancellation still
+interrupts requests. Longer deadlines allow slower responses but do not guarantee
+completion or override a reverse proxy's timeout. The checked-in nginx application
+proxy uses 900-second read/send limits, accommodating both model deadlines;
+an older installed proxy configuration may still time out sooner. Changing code
+or examples does not update deployed environment settings or restart services.
 
 **Print analysis** beside the saved matchup title prints the original full
 report, not the latest follow-up. If the original lies outside the currently
@@ -554,6 +571,8 @@ LLM_MODEL=qwen3-coder-next
 `scripts/deploy.sh` copies `LLM_*` values from `.env.local` into the protected
 production environment. Shell variables passed to the deploy command take
 precedence, and the deployment-specific fallback is the remote endpoint above.
+The deployment timeout fallback matches the application's five-minute
+per-call default (`LLM_TIMEOUT_MS=300000`); explicit settings still win.
 
 After starting llama.cpp, verify the route from the application host and from
 inside the app container:

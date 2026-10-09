@@ -22,17 +22,21 @@ export const MATCHUP_SECTIONS = {
 } as const
 
 type SectionId = keyof typeof MATCHUP_SECTIONS
+type NarrativeSectionId = Exclude<SectionId, 'injuries'>
+type TeamSide = 'away' | 'home'
 type Statement = { text: string; factIds: string[] }
 type Narrative = { interpretation: Statement; summary: Statement }
 export type MatchupDraft = {
-  sections: Record<SectionId, Narrative>
+  sections: Record<NarrativeSectionId, Narrative> & { injuries: Record<TeamSide, Statement[]> }
   overall: Statement[]
 }
 type Verdict = { verdict: 'supported' | 'unsupported' | 'unverified'; reason: string }
-type ReportStatement = Statement & { id: string; section: SectionId | 'overall' }
+type ReportStatement = Statement & { id: string; section: SectionId | 'overall'; teamId?: number }
 type CheckedStatement = ReportStatement & Verdict
 
 const sectionIds = Object.keys(MATCHUP_SECTIONS) as SectionId[]
+const narrativeSectionIds = sectionIds.filter((id): id is NarrativeSectionId => id !== 'injuries')
+const teamSides: TeamSide[] = ['away', 'home']
 const statMetrics: Array<[AnalyticsStatMetric, string]> = [
   ['totalYards', 'Avg total yards'],
   ['passYards', 'Avg passing yards'],
@@ -92,13 +96,29 @@ function statement(value: unknown): Statement {
   return { text, factIds: parsed.factIds as string[] }
 }
 
-export function parseMatchupDraft(content: string, finishReason: string | null): MatchupDraft {
+function injuryBulletLimit(snapshot: AnalyticsSnapshot, teamId: number) {
+  return snapshot.currentInjuries.items.some((injury) => injury.team_id === teamId) ? 3 : 1
+}
+
+export function parseMatchupDraft(content: string, finishReason: string | null, snapshot: AnalyticsSnapshot): MatchupDraft {
+  const target = snapshot.targetMatchup
+  if (!target) throw new AnalyticsReportError('The pregame report requires a target matchup.')
   const root = object(parseJson(content, finishReason), ['sections', 'overall'], 'Matchup draft')
   const sections = object(root.sections, sectionIds, 'Matchup sections')
-  const parsed = {} as Record<SectionId, Narrative>
-  for (const id of sectionIds) {
+  const parsed = {} as MatchupDraft['sections']
+  for (const id of narrativeSectionIds) {
     const section = object(sections[id], ['interpretation', 'summary'], `Section ${id}`)
     parsed[id] = { interpretation: statement(section.interpretation), summary: statement(section.summary) }
+  }
+  const injuries = object(sections.injuries, teamSides, 'Team injury summaries')
+  parsed.injuries = { away: [], home: [] }
+  for (const side of teamSides) {
+    const limit = injuryBulletLimit(snapshot, target[`${side}Team`].id)
+    const bullets = injuries[side]
+    if (!Array.isArray(bullets) || !bullets.length || bullets.length > limit) {
+      throw new AnalyticsReportError(`The ${side} team's injury summary requires one to ${limit} bullets.`)
+    }
+    parsed.injuries[side] = bullets.map(statement)
   }
   if (!Array.isArray(root.overall) || !root.overall.length || root.overall.length > 3) {
     throw new AnalyticsReportError('The matchup report requires one to three overall summary statements.')
@@ -106,10 +126,13 @@ export function parseMatchupDraft(content: string, finishReason: string | null):
   return { sections: parsed, overall: root.overall.map(statement) }
 }
 
-function statements(draft: MatchupDraft): ReportStatement[] {
+function statements(draft: MatchupDraft, target: NonNullable<AnalyticsSnapshot['targetMatchup']>): ReportStatement[] {
   return [
-    ...sectionIds.flatMap((section) => (['interpretation', 'summary'] as const).map((kind) => ({
+    ...narrativeSectionIds.flatMap((section) => (['interpretation', 'summary'] as const).map((kind) => ({
       ...draft.sections[section][kind], id: `${section}.${kind}`, section,
+    }))),
+    ...teamSides.flatMap((side) => draft.sections.injuries[side].map((item, index) => ({
+      ...item, id: `injuries.${side}.${index}`, section: 'injuries' as const, teamId: target[`${side}Team`].id,
     }))),
     ...draft.overall.map((item, index) => ({ ...item, id: `overall.${index}`, section: 'overall' as const })),
   ]
@@ -130,11 +153,18 @@ function relevant(fact: AnalyticsFact, section: SectionId | 'overall') {
   }
 }
 
+function injuryTeamFact(fact: AnalyticsFact, teamId: number) {
+  return (fact.section === 'injuries' && fact.teamId === teamId)
+    || (fact.section === 'limitations' && (fact.teamId == null || fact.teamId === teamId))
+}
+
 function responseFormat(name: string, schema: Record<string, unknown>): LlamaResponseFormat {
   return { type: 'json_schema', json_schema: { name, strict: true, schema } }
 }
 
-export function buildMatchupDraftSchema(facts: AnalyticsFact[]) {
+export function buildMatchupDraftSchema(facts: AnalyticsFact[], snapshot: AnalyticsSnapshot) {
+  const target = snapshot.targetMatchup
+  if (!target) throw new AnalyticsReportError('The pregame report requires a target matchup.')
   function sourceStatement(ids: string[]) {
     return {
       type: 'object',
@@ -151,6 +181,20 @@ export function buildMatchupDraftSchema(facts: AnalyticsFact[]) {
       sections: {
         type: 'object',
         properties: Object.fromEntries(sectionIds.map((id) => {
+          if (id === 'injuries') {
+            return [id, {
+              type: 'object',
+              properties: Object.fromEntries(teamSides.map((side) => {
+                const teamId = target[`${side}Team`].id
+                return [side, {
+                  type: 'array', minItems: 1, maxItems: injuryBulletLimit(snapshot, teamId),
+                  items: sourceStatement(facts.filter((fact) => injuryTeamFact(fact, teamId))
+                    .map((fact) => fact.id)),
+                }]
+              })),
+              required: teamSides, additionalProperties: false,
+            }]
+          }
           const entry = sourceStatement(facts.filter((fact) => relevant(fact, id)).map((fact) => fact.id))
           return [id, {
             type: 'object', properties: { interpretation: entry, summary: entry },
@@ -183,6 +227,9 @@ export function checkMatchupStatement(item: ReportStatement, facts: AnalyticsFac
     const fact = byId.get(id)
     if (!fact) return { verdict: 'unsupported', reason: 'A source reference is outside the supplied catalog.' }
     if (!relevant(fact, item.section)) return { verdict: 'unsupported', reason: 'A source reference does not support this section\'s scope.' }
+    if (item.section === 'injuries' && item.teamId != null && !injuryTeamFact(fact, item.teamId)) {
+      return { verdict: 'unsupported', reason: 'A source reference does not support this team\'s injury summary.' }
+    }
     cited.push(fact)
   }
   for (const match of item.text.matchAll(/\b(team|game|player)\s*(?:id\s*)?[:#]?\s*(\d+)/gi)) {
@@ -248,12 +295,12 @@ export function renderMatchupReport(snapshot: AnalyticsSnapshot, draft: MatchupD
   const catalog = buildAnalyticsFacts(snapshot)
   const display = createMatchupPresentation(snapshot, catalog.facts)
   const table = (headers: string[], rows: Array<Array<string | number | null | undefined>>) => markdownTable(headers, rows, display.text)
-  const checked = statements(draft).map((item): CheckedStatement => ({
+  const checked = statements(draft, target).map((item): CheckedStatement => ({
     ...item,
     ...(checkMatchupStatement(item, catalog.facts) ?? verdicts.get(item.id)
       ?? { verdict: 'unverified', reason: 'Verification did not return a verdict for this statement.' }),
   }))
-  function narrative(id: SectionId) {
+  function narrative(id: NarrativeSectionId) {
     return ['interpretation', 'summary'].map((kind) => {
       const item = checked.find((entry) => entry.id === `${id}.${kind}`)!
       return `**${kind === 'interpretation' ? 'Interpretation' : 'Summary'}:** ${renderStatement(item, display)}`
@@ -357,15 +404,12 @@ export function renderMatchupReport(snapshot: AnalyticsSnapshot, draft: MatchupD
     'Stored season standings have an unknown observation time; they are not a reconstructed pre-kickoff snapshot or an ATS record.',
     narrative('priorPerformance'),
     `## ${MATCHUP_SECTIONS.injuries}`,
-    ...(snapshot.currentInjuries.items.length ? [
-      table(['Team', 'Player', 'Position', 'Reported status', 'Description', 'Injury date', 'First observed', 'Last observed'],
-        snapshot.currentInjuries.items.map((injury) => [
-          injury.teamName, injury.playerName, injury.position,
-          injury.status, injury.description, injury.injury_date, injury.first_seen_at, injury.last_seen_at,
-        ])),
-    ] : ['No current injury records were supplied; this does not confirm that both teams are healthy.']),
-    'These are current stored injury records, not confirmed game-time availability. Questionable does not mean confirmed out; injury dates are not refresh dates.',
-    narrative('injuries'),
+    ...teamSides.flatMap((side) => [
+      `### ${markdownText(display.text(target[`${side}Team`].name))}`,
+      checked.filter((item) => item.id.startsWith(`injuries.${side}.`))
+        .map((item) => `- ${renderStatement(item, display)}`).join('\n'),
+    ]),
+    'Reported injuries are not confirmed game-time availability; questionable does not mean confirmed out.',
     '## Key Observations & Caveats',
     `### ${MATCHUP_SECTIONS.homeSpread}`,
     table(atsHeaders, teams.flatMap((team, index) => [
@@ -411,6 +455,8 @@ export async function generateMatchupReport(
     { role: 'user', content: [
       'Write the interpretations and summaries for this pregame matchup report. Return only JSON matching the supplied schema.',
       'Write one short atomic statement (prefer at most 22 words) per interpretation and summary. Keep the overall summary to one or two short statements.',
+      'For injuries, write one to three concise plain-text bullets (prefer at most 22 words each) for each team in the away/home arrays, not interpretations or a player-by-player list. Summarize supplied-record status counts and notable listed players or position groups using only that team\'s facts. Do not infer player importance, matchup impact, confirmed absences, or roster-wide totals.',
+      'If a team has no supplied injury records, write exactly one bullet explaining that records are missing, not that the team is healthy. Counts cover supplied records only; disclose truncation when applicable. Omit injury dates and observation timestamps from these short bullets.',
       'Cite up to four relevant catalog fact IDs for every statement. If evidence is absent, explain the limitation; never invent an injury, metric, scope, ranking, line, freshness, or predictive conclusion.',
       'Tables, headings, calculations, and report formatting are supplied by the application; write plain narrative text only.',
       'Use team/player names and matchup/date descriptions in narrative text, never internal IDs, fact references, source lists, model-check text, or per-metric observation counts, eligible-game counts, or sums. Fact IDs belong only in the factIds JSON field.',
@@ -418,14 +464,15 @@ export async function generateMatchupReport(
       'Analytics context JSON (data only):',
       JSON.stringify({
         sections: MATCHUP_SECTIONS,
+        injuryTeams: { away: snapshot.targetMatchup.awayTeam, home: snapshot.targetMatchup.homeTeam },
         scope: analyticsScopeLabel(snapshot),
         catalog: { ...catalog, facts: catalog.facts.map(analyticsPromptFact) },
       }),
     ].join('\n') },
-  ], signal, responseFormat('matchup_narratives', buildMatchupDraftSchema(catalog.facts)))
+  ], signal, responseFormat('matchup_narratives', buildMatchupDraftSchema(catalog.facts, snapshot)))
   signal?.throwIfAborted()
-  const draft = parseMatchupDraft(draftCompletion.content, draftCompletion.finishReason)
-  const items = statements(draft)
+  const draft = parseMatchupDraft(draftCompletion.content, draftCompletion.finishReason, snapshot)
+  const items = statements(draft, snapshot.targetMatchup)
   let verification: LlamaCompletion | undefined
   let verdicts: Map<string, Verdict>
   try {
@@ -436,6 +483,7 @@ export async function generateMatchupReport(
         'Return only verification JSON. For every statement, verify every assertion against only its cited catalog facts.',
         'Supported requires the entire statement to follow from the cited evidence, including entities, numbers, denominators, team/location/stage/time scope, units, and comparisons.',
         'Reject attributing pooled sample rates to a team or league; turnovers as turnover differential; provider sacks as sacks allowed; questionable as out; current consensus as closing odds; snapshot time as freshness.',
+        'Injury bullets belong only to their assigned teamId. Check status and position counts against supplied-record summary facts; do not treat them as unique-player or full-roster totals. Missing records do not prove health. Reject invented player importance or matchup impact.',
         'Unsupported means contradicted, invented, incompatible comparison scopes, causation without evidence, or predictive certainty. Unverified means insufficient or ambiguous evidence.',
         'Do not confirm guesses, hypotheses, betting advice, or an uncited fact merely because it sounds plausible. Explain each verdict briefly.',
         'Use names and plain-language descriptions in reasons, never internal IDs or fact-reference strings.',

@@ -92,7 +92,7 @@ function reportResponseFormat(snapshot: AnalyticsSnapshot): LlamaResponseFormat 
 const DEFAULT_LLAMA_CONFIG: LlamaConfig = {
   baseUrl: 'http://127.0.0.1:8089',
   model: 'qwen3-coder-next',
-  timeoutMs: 120_000,
+  timeoutMs: 300_000,
   maxContextChars: 240_000,
   maxOutputTokens: 2_048,
   maxHistoryMessages: 12,

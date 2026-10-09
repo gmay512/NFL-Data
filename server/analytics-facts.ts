@@ -129,6 +129,25 @@ export function buildAnalyticsFacts(snapshot: AnalyticsSnapshot): AnalyticsFactC
       `${standing.teamName}: stored season standings ${standing.won}-${standing.lost}-${standing.ties}; ${standing.division ?? 'division unknown'}, position ${standing.position ?? 'unknown'}, streak ${standing.streak ?? 'unknown'}; points for ${formatNumber(standing.points_for)}, points against ${formatNumber(standing.points_against)}. Standings observation time unknown; not an ATS record.`,
       { teamId: standing.team_id })
   }
+  if (snapshot.preset === 'matchup_preview' && target) {
+    const breakdown = (values: Array<string | null | undefined>) => {
+      const counts = new Map<string, number>()
+      for (const value of values) {
+        const label = value?.trim() || 'unknown'
+        counts.set(label, (counts.get(label) ?? 0) + 1)
+      }
+      return [...counts].sort(([left], [right]) => left.localeCompare(right))
+        .map(([label, count]) => `${label}: ${count}`).join(', ')
+    }
+    for (const team of [target.awayTeam, target.homeTeam]) {
+      const records = snapshot.currentInjuries.items.filter((injury) => injury.team_id === team.id)
+      add(`injury-summary.${team.id}`, 'injuries', 'injury-summary',
+        records.length
+          ? `${team.name}: ${records.length} supplied injury records; reported statuses (${breakdown(records.map((injury) => injury.status))}); positions (${breakdown(records.map((injury) => injury.position))}). Counts describe supplied records, not unique injured players or confirmed game-time availability.${snapshot.currentInjuries.truncated ? ' The injury snapshot is truncated; these are not complete team totals.' : ''}`
+          : `${team.name}: no current injury records were supplied for this team; this does not confirm that the team is healthy.${snapshot.currentInjuries.truncated ? ' The injury snapshot is truncated; omitted records may include this team.' : ''}`,
+        { teamId: team.id, value: records.length, unit: 'supplied injury records' })
+    }
+  }
   snapshot.currentInjuries.items.forEach((injury, index) => {
     add(`injury.${index}`, 'injuries', 'injury',
       `${injury.playerName}${injury.position ? ` (${injury.position})` : ''}, ${injury.teamName ?? 'team unknown'}: reported status ${injury.status ?? 'unknown'}, ${injury.description ?? 'description unavailable'}; injury date ${injury.injury_date ?? 'unknown'}, first observed ${injury.first_seen_at ?? 'unknown'}, last observed ${injury.last_seen_at ?? 'unknown'}. This is a current stored injury record, not confirmed game-time availability.`,
@@ -153,6 +172,7 @@ export function buildAnalyticsFacts(snapshot: AnalyticsSnapshot): AnalyticsFactC
   }
   const rank = (fact: AnalyticsFact) => {
     if (fact.id.startsWith('sample.')) return 1
+    if (fact.metric === 'injury-summary') return 2
     if (/^team\.\d+\.all\.(ats|totals)$/.test(fact.id)) return 2
     if (/^stats\.\d+\.(turnovers|sacksAllowed)$/.test(fact.id)) return 3
     if (/^team\.\d+\.(home|away)\./.test(fact.id)) return 10

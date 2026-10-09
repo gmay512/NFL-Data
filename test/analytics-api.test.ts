@@ -556,8 +556,8 @@ describe('analytics API contracts', () => {
 
   it('registers matchup previews and persists their preset-specific initial prompt', async () => {
     const draft = createMatchupDraft()
-    draft.sections.injuries.summary = { text: 'An uncited statement about an unavailable injury.', factIds: [] }
-    draft.sections.injuries.interpretation = { text: 'An invented player is out.', factIds: ['injury.999'] }
+    draft.sections.injuries.away[0] = { text: 'An uncited statement about an unavailable injury.', factIds: [] }
+    draft.sections.injuries.home[0] = { text: 'An invented player is out.', factIds: ['injury.999'] }
     let modelCalls = 0
     const modelUrl = await startServer(async (incoming, response) => {
       await new Promise<void>((resolve) => {
@@ -608,6 +608,10 @@ describe('analytics API contracts', () => {
     assert.match(content, /An uncited statement.*Unverified statement/)
     assert.match(content, /An invented player is out.*Unsupported statement/)
     assert.match(content, /1 unsupported and 1 unverified/)
+    assert.match(content, /### Buffalo\n\n- An uncited statement/)
+    assert.match(content, /### Arizona\n\n- An invented player/)
+    const injurySection = content.split('## Current Injuries\n\n')[1].split('## Key Observations & Caveats')[0]
+    assert.doesNotMatch(injurySection, /First observed|Last observed|\| Team \| Player \|/)
     assert.match(content, /## Overall Summary of Observations/)
     assert.doesNotMatch(content, /teamId|gameIds?|playerId|Game ID|injury\.999|injuries\.summary|Model check:|Sources:/)
     const loaded = await request(`/api/analytics/sessions/${sessionId}`, deps)

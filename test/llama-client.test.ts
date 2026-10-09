@@ -62,7 +62,7 @@ describe('llama.cpp configuration and grounding', () => {
     assert.deepEqual(getLlamaConfig({}), {
       baseUrl: 'http://127.0.0.1:8089',
       model: 'qwen3-coder-next',
-      timeoutMs: 120_000,
+      timeoutMs: 300_000,
       maxContextChars: 240_000,
       maxOutputTokens: 2_048,
       maxHistoryMessages: 12,
@@ -76,6 +76,12 @@ describe('llama.cpp configuration and grounding', () => {
       () => getLlamaConfig({ LLM_MAX_OUTPUT_TOKENS: '0' }),
       hasLlamaCode('configuration'),
     )
+    for (const timeoutMs of [100, 120_000, 300_000, 600_000]) {
+      assert.equal(getLlamaConfig({ LLM_TIMEOUT_MS: String(timeoutMs) }).timeoutMs, timeoutMs)
+    }
+    for (const value of ['99', '600001', '-1', '300000.5', 'not-a-number']) {
+      assert.throws(() => getLlamaConfig({ LLM_TIMEOUT_MS: value }), hasLlamaCode('configuration'))
+    }
   })
 
   it('builds a grounded prompt with bounded recent history', () => {
@@ -191,6 +197,22 @@ describe('llama.cpp health checks', () => {
       hasLlamaCode('cancelled'),
     )
   })
+
+  it('keeps health checks capped at five seconds despite the longer completion default', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    let signal: AbortSignal | undefined
+    t.mock.method(globalThis, 'fetch', (_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_, reject) => {
+      assert(init?.signal)
+      signal = init.signal
+      signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
+    }))
+    const pending = assert.rejects(new LlamaClient(getLlamaConfig({})).checkHealth(), hasLlamaCode('timeout'))
+    t.mock.timers.tick(4_999)
+    assert.equal(signal?.aborted, false)
+    t.mock.timers.tick(1)
+    await pending
+    assert.equal(signal?.aborted, true)
+  })
 })
 
 describe('llama.cpp grounded completions', () => {
@@ -237,6 +259,33 @@ describe('llama.cpp grounded completions', () => {
       new LlamaClient(config(baseUrl)).complete(snapshot),
       hasLlamaCode('malformed_response'),
     )
+  })
+
+  it('times out stalled completion bodies and preserves immediate external cancellation', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    let requestSignal: AbortSignal | undefined
+    t.mock.method(globalThis, 'fetch', async (_input: string | URL | Request, init?: RequestInit) => {
+      assert(init?.signal)
+      const signal = init.signal
+      requestSignal = signal
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          signal.addEventListener('abort', () => controller.error(new DOMException('Aborted', 'AbortError')), { once: true })
+        },
+      }), { headers: { 'Content-Type': 'application/json' } })
+    })
+    const client = new LlamaClient(config('http://localhost', { timeoutMs: 100 }))
+    const timedOut = assert.rejects(client.completeMessages([{ role: 'user', content: 'Analyze.' }]), hasLlamaCode('timeout'))
+    await Promise.resolve()
+    t.mock.timers.tick(100)
+    await timedOut
+    assert.equal(requestSignal?.aborted, true)
+    const controller = new AbortController()
+    const cancelled = assert.rejects(client.completeMessages([{ role: 'user', content: 'Analyze.' }], controller.signal), hasLlamaCode('cancelled'))
+    await Promise.resolve()
+    controller.abort()
+    await cancelled
+    assert.equal(requestSignal?.aborted, true)
   })
 
   it('streams content and emits completion only after the SSE terminator', async () => {

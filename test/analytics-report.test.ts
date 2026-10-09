@@ -93,6 +93,58 @@ describe('canonical analytics facts', () => {
     assert.match(reported, /not confirmed game-time availability/)
   })
 
+  it('derives team injury counts from supplied records without conflating statuses or unique players', () => {
+    const context = buildAnalyticsSnapshot('matchup_preview', snapshot.filters, {
+      ...source,
+      injuries: [
+        ...source.injuries,
+        { ...source.injuries[0], status: 'Out' },
+        { ...source.injuries[0], player_id: 12, status: null },
+        { ...source.injuries[0], team_id: null },
+        { ...source.injuries[0], team_id: 999 },
+      ],
+    })
+    const before = JSON.stringify(context)
+    const away = fact('injury-summary.29', context)
+    const home = fact('injury-summary.26', context)
+    assert.equal(away.teamId, 29)
+    assert.equal(away.value, 3)
+    assert.equal(away.unit, 'supplied injury records')
+    assert.match(away.statement, /Dallas: 3 supplied injury records/)
+    assert.match(away.statement, /Out: 1, Questionable: 1, unknown: 1/)
+    assert.match(away.statement, /positions \(CB: 2, unknown: 1\)/)
+    assert.match(away.statement, /not unique injured players or confirmed game-time availability/)
+    assert.equal(home.value, 1)
+    assert.match(home.statement, /Houston: 1 supplied injury records; reported statuses \(Out: 1\)/)
+    assert(!buildAnalyticsFacts(context).facts.some((entry) => entry.id === 'injury-summary.999'))
+    assert.equal(JSON.stringify(context), before)
+    assert(!buildAnalyticsFacts(snapshot).facts.some((entry) => entry.metric === 'injury-summary'))
+  })
+
+  it('grounds missing and truncated injury summaries and prioritizes both teams within the catalog budget', () => {
+    const context = buildAnalyticsSnapshot('matchup_preview', snapshot.filters, source, snapshot.generatedAt, {
+      games: 100, teamTrends: 32, teamStatTrends: 32, injuries: 1, playerStats: 120, standings: 32,
+    })
+    assert.match(fact('injury-summary.29', context).statement, /1 supplied injury records.*not complete team totals/)
+    assert.equal(fact('injury-summary.26', context).value, 0)
+    assert.match(fact('injury-summary.26', context).statement, /no current injury records were supplied.*does not confirm.*healthy/)
+    assert.match(fact('injury-summary.26', context).statement, /omitted records may include this team/)
+    const empty = { ...context, currentInjuries: { total: 0, included: 0, truncated: false, items: [] } }
+    for (const id of [29, 26]) assert.match(fact(`injury-summary.${id}`, empty).statement, /no current injury records/)
+    const oversized = {
+      ...context,
+      currentInjuries: {
+        ...context.currentInjuries,
+        items: context.currentInjuries.items.map((injury) => ({ ...injury, description: 'x'.repeat(60_000) })),
+      },
+    }
+    const catalog = buildAnalyticsFacts(oversized)
+    assert(catalog.truncated)
+    assert(catalog.facts.some((entry) => entry.id === 'injury-summary.29'))
+    assert(catalog.facts.some((entry) => entry.id === 'injury-summary.26'))
+    assert(JSON.stringify(catalog.facts.map(analyticsPromptFact)).length <= MAX_REPORT_FACT_CONTEXT_CHARS)
+  })
+
   it('keeps current consensus distinct from historical closing lines and external market claims', () => {
     const reported = render(output('matchup.spread', 'matchup.total', 'game.1.lines', 'limitation.market-history'))
     assert.match(reported, /current consensus home spread for Houston: -3/)
