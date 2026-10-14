@@ -571,6 +571,28 @@
 .analytics-subnav { display: flex; gap: 6px; padding: 5px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); box-shadow: var(--shadow); }
 .analytics-subnav a { padding: 9px 13px; border-radius: 8px; color: var(--muted-text); font-size: .84rem; font-weight: 800; text-decoration: none; }
 .analytics-subnav a.active { color: var(--accent-dark); background: var(--accent-soft); }
+.pickem-page { display: grid; gap: 16px; }
+.pickem-header { display: flex; justify-content: space-between; align-items: start; gap: 16px; }
+.pickem-header h1 { margin: 0; }
+.pickem-toolbar { grid-template-columns: minmax(100px, .4fr) minmax(180px, .8fr) 1fr; }
+.pickem-record-panel { display: grid; gap: 12px; padding: 18px; }
+.pickem-record-panel h2 { margin: 0; font-size: 1rem; }
+.pickem-games { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.pickem-game { padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); min-width: 0; }
+.pickem-game.has-changes { border-color: var(--accent-hover-border); }
+.pickem-game header { display: flex; justify-content: space-between; align-items: start; gap: 10px; }
+.pickem-game h3, .pickem-game h4 { margin: 0; }
+.pickem-game p, .pickem-game li { font-size: .85rem; line-height: 1.5; }
+.pickem-game ul { padding-left: 20px; }
+.pickem-game small { color: var(--muted-text); }
+.pickem-change { margin-top: 12px; padding: 10px; background: var(--accent-soft); border-radius: 7px; font-size: .82rem; }
+.pickem-change summary { cursor: pointer; font-weight: 700; }
+.pickem-change pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; font-size: .75rem; }
+@media (max-width: 800px) {
+  .pickem-toolbar, .pickem-games { grid-template-columns: 1fr; }
+  .pickem-header { flex-wrap: wrap; }
+  .analytics-subnav { flex-wrap: wrap; }
+}
 .analytics-hero { display: flex; align-items: start; justify-content: space-between; gap: 24px; padding: 28px; }
 .analytics-hero > div { flex: 1; min-width: 0; }
 .analytics-hero h1 { margin: 0 0 8px; font-size: clamp(1.8rem, 4vw, 3rem); letter-spacing: -.05em; }

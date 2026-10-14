@@ -5,6 +5,7 @@ export function AnalyticsNav() {
     <nav className="analytics-subnav" aria-label="Analytics sections">
       <NavLink to="/analytics" end>Historical</NavLink>
       <NavLink to="/analytics/weekly">Weekly Analysis</NavLink>
+      <NavLink to="/analytics/pickem">Pickem</NavLink>
     </nav>
   )
 }

@@ -451,6 +451,85 @@ grading, the server refreshes only the distinct games referenced by pending
 picks whose kickoff has passed, then reports how many games were checked and
 how many suggestions were graded.
 
+### Pickem: outright winners
+
+**Analytics → Pickem** (`/analytics/pickem`) predicts the outright winner of
+every eligible game in a selected regular-season or playoff week. It defaults
+to the week containing the nearest future scheduled game; other scheduled
+weeks and saved historical weeks remain selectable. Preseason is excluded.
+Apply `202610140001_pickem_analyses.sql` before running the updated application:
+
+```bash
+npm run db:push
+```
+
+Generation requires the existing server-side API-Sports credentials and a
+healthy configured local llama.cpp model. Before analyzing, Pickem refreshes
+the schedule/results, current injuries, standings, player season statistics,
+relevant completed-game team statistics, and available odds. Required refresh
+failures, including partially failed collectors, stop generation without
+replacing a saved analysis. Successfully refreshed but unavailable statistics,
+injuries, early-season history, or odds are disclosed rather than invented.
+Source-table updates from ingestion are not rolled back if generation fails.
+
+The application computes recent and season-to-date outright records, home/away
+scoring, offensive output, defensive points and observed yards allowed,
+turnovers, sacks allowed, and approximate rest intervals. The local model uses
+these facts plus supplied injury/venue/player context and the current spread
+to return a winner, model confidence, concise supporting factors, and risks.
+The spread is context only: a team can win a Pickem prediction without covering
+the spread. Injury status is not confirmed game-day availability, a designated
+home team is not proof of home-field advantage at a neutral venue, and absent
+injury reports do not establish that a team is healthy. Weather and confirmed
+starters are not added from outside sources.
+
+Confidence is an **uncalibrated model judgment**, not a verified win
+probability. Explanations must reference that matchup's supplied facts, but
+valid references do not guarantee the interpretation is correct. Predictions
+remain uncertain; review numeric comparisons and explanations before relying on
+them. Spread favorites are computed by the application, and unknown neutral-site
+status is not treated as confirmation of a neutral venue. Generation runs bounded
+per-matchup requests through the
+application server, with progress and cancellation; the browser never contacts
+the model directly. Malformed, unfinished, cancelled, or failed model output
+does not save a partial slate.
+
+Pickem uses separate private `pickem_analyses` and `pickem_predictions` tables.
+There is **one canonical analysis per season/stage/week**. **Update analysis**
+replaces future-game predictions atomically, keeping the same analysis ID and
+highlighting changes from the immediately previous successful analysis:
+winner, confidence, explanations, risks, and material evidence changes.
+An unchanged rerun clears old highlights and reports no changes. This is not a
+cumulative archive of every rerun. Concurrent updates and games crossing
+kickoff during generation produce a conflict instead of overwriting newer or
+started predictions.
+
+Started-game predictions retain their original winner, evidence, model, and
+generation timestamp. A partially started week can still update its remaining
+games. Historical games without a saved pre-kickoff pick show **Not predicted
+before kickoff**; they never receive a retrospective prediction or count as
+losses. Cancelled/removed future games are visibly reconciled on an update.
+Saved Pickem analyses remain readable while the local model is offline.
+
+Opening Pickem or selecting a week automatically grades stored final results
+for that week and other saved weeks in the selected season, so the season
+record does not depend on revisiting every past week. It refreshes only due
+games referenced by pending predictions.
+**Refresh results** refreshes the selected week manually. Final `FT`/`AOT` scores,
+including overtime, determine a win or loss. Ties are shown separately and
+excluded from accuracy; cancelled games are void. Non-final or missing-score
+games remain pending. Grading is idempotent and does not revise predictions or
+analysis-change highlights. If provider result refresh fails, stored valid
+finals can still be graded and the refresh error is displayed explicitly.
+Weekly and season accuracy count each canonical prediction once, excluding
+ties, voids, pending games, and unpredicted games.
+
+Existing **Weekly Analysis** still creates immutable timestamped runs and
+grades spread/total bets. Pickem does not rewrite or merge that history.
+No database reset or persistent analysis/grading scheduler is required.
+Applying migrations and deploying the application remain separate rollout
+operations.
+
 ### Availability and failure behavior
 
 The historical tables and filters continue to work when llama.cpp is stopped,

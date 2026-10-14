@@ -12,6 +12,11 @@ import type {
 import type { WeeklyAnalysisRun, WeeklyRunSummaries, WeeklyRunView } from '../../server/weekly-analysis'
 import type { AnalysisSessionPage } from '../../server/analysis-store'
 import type { WeeklyLossAnalysis } from '../../server/weekly-loss-analysis'
+export type {
+  PickemAnalysis, PickemChange, PickemComparison, PickemGame, PickemGradeResponse,
+  PickemPoint, PickemPrediction, PickemRecord, PickemResult, PickemStreamEvent,
+  PickemWeek, PickemWeeksResponse, PickemWeekView,
+} from './pickem-contracts'
 
 export type ApiErrorResponse = {
   error: string

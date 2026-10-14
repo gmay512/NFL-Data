@@ -11,7 +11,9 @@ import {
 import { LlamaClient } from '../server/llama-client'
 import { AnalyticsDatabaseError } from '../server/analytics-reads'
 import type { WeeklyAnalysisRun, WeeklyRunView } from '../server/weekly-analysis'
-import { readAnalysisStream, readWeeklyAnalysisStream } from '../src/api/app-api'
+import { isPickemAnalysis, readAnalysisStream, readPickemStream, readWeeklyAnalysisStream } from '../src/api/app-api'
+import { PickemError } from '../server/pickem-analysis'
+import { pickemAnalysis, pickemView, pickemWeek, pickemWeeks } from './pickem-fixtures'
 import { renderAnalyticsReport } from '../server/analytics-report'
 import { createMatchupDraft, matchupSnapshot, supportedMatchupVerdicts } from './matchup-report-fixtures'
 import type {
@@ -177,6 +179,64 @@ function llama(baseUrl: string) {
 }
 
 describe('analytics API contracts', () => {
+  it('exposes Pickem weeks/details and scoped outright grading', async () => {
+    const deps = dependencies(llama('http://127.0.0.1:1'), createMemoryStore().store)
+    const graded: unknown[] = []
+    deps.pickem = {
+      async weeks() { return pickemWeeks },
+      async week(week) { assert.deepEqual(week, pickemWeek); return pickemView },
+      async analyze() { return pickemAnalysis },
+      async grade(week) { graded.push(week); return { graded: 1, requestedGames: 1, refreshedGames: 1, refreshError: null } },
+    }
+    assert.equal((await request('/api/analytics/pickem/weeks?season=2026', deps)).status, 200)
+    const detail = await request('/api/analytics/pickem/week?season=2026&stage=Regular%20Season&week=Week%204', deps)
+    assert.deepEqual(await detail.json(), pickemView)
+    const grade = await request('/api/analytics/pickem/grade', deps, 'POST', pickemWeek)
+    assert.equal(grade.status, 200)
+    assert.deepEqual(graded, [pickemWeek])
+  })
+  it('validates Pickem requests before generation', async () => {
+    const deps = dependencies(llama('http://127.0.0.1:1'), createMemoryStore().store)
+    deps.pickem = {
+      async weeks() { return pickemWeeks }, async week() { return pickemView },
+      async analyze() { throw new Error('Must not generate') },
+      async grade() { return { graded: 0, requestedGames: 0, refreshedGames: 0, refreshError: null } },
+    }
+    for (const body of [{ ...pickemWeek, revision: -1 }, { ...pickemWeek, revision: '1' }, { ...pickemWeek, stage: 'Pre Season', revision: 0 }]) {
+      assert.equal((await request('/api/analytics/pickem/analyze-stream', deps, 'POST', body)).status, 400)
+    }
+  })
+  it('streams Pickem progress and only completes with a persisted canonical analysis', async () => {
+    const deps = dependencies(llama('http://127.0.0.1:1'), createMemoryStore().store)
+    deps.pickem = {
+      async weeks() { return pickemWeeks }, async week() { return pickemView },
+      async analyze(week, revision, progress) {
+        assert.deepEqual(week, pickemWeek); assert.equal(revision, 1)
+        progress('Refreshing injuries'); return pickemAnalysis
+      },
+      async grade() { return { graded: 0, requestedGames: 0, refreshedGames: 0, refreshError: null } },
+    }
+    const response = await request('/api/analytics/pickem/analyze-stream', deps, 'POST', { ...pickemWeek, revision: 1 })
+    const events: string[] = []
+    await readPickemStream(response.body!, (event) => { events.push(event.type) })
+    assert.deepEqual(events, ['progress', 'complete'])
+  })
+  it('streams failures without a Pickem completion and rejects malformed/incomplete streams', async () => {
+    const deps = dependencies(llama('http://127.0.0.1:1'), createMemoryStore().store)
+    deps.pickem = {
+      async weeks() { return pickemWeeks }, async week() { return pickemView },
+      async analyze() { throw new PickemError('pickem_conflict', 'Kickoff passed') },
+      async grade() { return { graded: 0, requestedGames: 0, refreshedGames: 0, refreshError: null } },
+    }
+    const response = await request('/api/analytics/pickem/analyze-stream', deps, 'POST', { ...pickemWeek, revision: 1 })
+    const events: string[] = []
+    await readPickemStream(response.body!, (event) => { events.push(event.type) })
+    assert.deepEqual(events, ['error'])
+    assert.equal(isPickemAnalysis({ ...pickemAnalysis, predictions: [{ ...pickemAnalysis.predictions[0], winnerTeamId: 99 }] }), false)
+    for (const text of ['event: complete\ndata: {"analysis":{}}\n\n', 'event: progress\ndata: {"message":"Waiting"}\n\n']) {
+      await assert.rejects(readPickemStream(new Response(text).body!, () => {}))
+    }
+  })
   it('preserves citation omission warnings and only saved suggestions in direct and streamed Weekly results', async () => {
     for (const picksRemain of [true, false]) {
       const deps = dependencies(llama('http://127.0.0.1:1'), createMemoryStore().store)

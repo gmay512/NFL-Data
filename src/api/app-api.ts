@@ -28,6 +28,10 @@ import type {
   AnalysisSessionPage,
 } from './contracts'
 import { analyticsKey, invalidateAnalyticsReads } from '../data/analytics-repository'
+import type {
+  PickemAnalysis, PickemGradeResponse, PickemPoint, PickemStreamEvent, PickemWeek,
+  PickemWeeksResponse, PickemWeekView,
+} from './pickem-contracts'
 
 export class AppApiError extends Error {
   readonly code: string
@@ -78,7 +82,8 @@ async function postJson<T>(path: string, body?: unknown, options?: { signal?: Ab
   if (!['/api/analytics/query', '/api/analytics/overview'].includes(path)) {
     const prefix = path === '/api/analytics/analyze' ? 'sessions'
       : path.endsWith('/analyze-loss') ? 'weekly-detail'
-        : path === '/api/analytics/weekly/analyze' ? 'weekly' : ''
+        : path === '/api/analytics/weekly/analyze' ? 'weekly'
+          : path.startsWith('/api/analytics/pickem/') ? 'pickem' : ''
     invalidateAnalyticsReads(prefix, { preserveData: true })
   }
   return result
@@ -118,6 +123,112 @@ function isWeeklyRunView(value: unknown): value is WeeklyRunView {
 function readOptions(options?: { signal?: AbortSignal }, timeout = 15_000) {
   const deadline = AbortSignal.timeout(timeout)
   return { signal: options?.signal ? AbortSignal.any([options.signal, deadline]) : deadline }
+}
+
+function isPickemPoint(value: unknown): value is PickemPoint {
+  return isObject(value) && typeof value.text === 'string' && value.text.trim().length > 0
+    && value.text.length <= 300 && !/[\r\n]/.test(value.text)
+    && Array.isArray(value.evidenceIds) && value.evidenceIds.length >= 1 && value.evidenceIds.length <= 4
+    && value.evidenceIds.every((id) => typeof id === 'string' && id.length > 0)
+}
+function isPickemWeek(value: unknown) {
+  return isObject(value) && Number.isInteger(value.season) && Number(value.season) >= 1900 && Number(value.season) <= 2100
+    && typeof value.stage === 'string' && value.stage.trim().length > 0 && typeof value.week === 'string' && value.week.trim().length > 0
+}
+function isPickemTimestamp(value: unknown) { return typeof value === 'string' && Number.isFinite(Date.parse(value)) }
+function isPickemScore(value: unknown) { return value === null || (Number.isInteger(value) && Number(value) >= 0) }
+function isPickemRecord(value: unknown) {
+  return isObject(value) && ['wins', 'losses', 'ties', 'pending', 'void'].every((field) =>
+    Number.isInteger(value[field]) && Number(value[field]) >= 0)
+}
+export function isPickemAnalysis(value: unknown): value is PickemAnalysis {
+  const points = (items: unknown) => Array.isArray(items) && items.length >= 1 && items.length <= 4 && items.every(isPickemPoint)
+  const comparison = (item: unknown) => item === null || (isObject(item) && Number.isInteger(item.winnerTeamId)
+    && typeof item.winnerTeamName === 'string' && Number.isInteger(item.confidence)
+    && points(item.supportingPoints) && points(item.risks) && isObject(item.evidence))
+  return isObject(value) && isPickemWeek(value) && typeof value.id === 'string' && Number.isInteger(value.revision)
+    && Number(value.revision) > 0 && isPickemTimestamp(value.createdAt) && isPickemTimestamp(value.updatedAt)
+    && typeof value.summary === 'string'
+    && Array.isArray(value.changes) && value.changes.every((change) => isObject(change) && Number.isInteger(change.gameId)
+      && ['added', 'updated', 'removed'].includes(String(change.kind)) && comparison(change.before) && comparison(change.after))
+    && Array.isArray(value.predictions) && new Set(value.predictions.map((pick) => isObject(pick) ? pick.gameId : null)).size === value.predictions.length
+    && value.predictions.every((pick) => isObject(pick) && Number.isInteger(pick.gameId) && Number.isInteger(pick.awayTeamId)
+      && Number.isInteger(pick.homeTeamId) && Number.isInteger(pick.winnerTeamId)
+      && (pick.winnerTeamId === pick.awayTeamId || pick.winnerTeamId === pick.homeTeamId)
+      && typeof pick.awayTeamName === 'string' && typeof pick.homeTeamName === 'string'
+      && isPickemTimestamp(pick.kickoffAt) && isPickemTimestamp(pick.analyzedAt) && typeof pick.model === 'string'
+      && isPickemTimestamp(pick.sourceRefreshedAt) && Array.isArray(pick.dataWarnings) && pick.dataWarnings.every((warning) => typeof warning === 'string')
+      && Number.isInteger(pick.confidence) && Number(pick.confidence) >= 1 && Number(pick.confidence) <= 100
+      && points(pick.supportingPoints) && points(pick.risks)
+      && ['pending', 'win', 'loss', 'tie', 'void'].includes(String(pick.result))
+      && isPickemScore(pick.finalAwayScore) && isPickemScore(pick.finalHomeScore)
+      && (pick.gradedAt === null || isPickemTimestamp(pick.gradedAt)))
+}
+
+function pickemQuery(week: PickemWeek) {
+  return new URLSearchParams({ season: String(week.season), stage: week.stage ?? '', week: week.week })
+}
+export async function getPickemWeeks(season: number, options?: { signal?: AbortSignal }) {
+  const result = await requestJson<PickemWeeksResponse>(`/api/analytics/pickem/weeks?season=${season}`, readOptions(options))
+  return validateRead(result, Array.isArray(result.weeks) && result.weeks.every((week) => isPickemWeek(week) && week.season === season
+    && Number.isInteger(week.revision) && (week.analysisId === null || typeof week.analysisId === 'string')
+    && (week.firstKickoff === null || isPickemTimestamp(week.firstKickoff)))
+    && (result.defaultWeek === null || (isPickemWeek(result.defaultWeek) && result.defaultWeek.season === season))
+    && isPickemRecord(result.record))
+}
+export async function getPickemWeek(week: PickemWeek, options?: { signal?: AbortSignal }) {
+  const result = await requestJson<PickemWeekView>(`/api/analytics/pickem/week?${pickemQuery(week)}`, readOptions(options))
+  return validateRead(result, isPickemWeek(result) && result.season === week.season && result.stage === week.stage && result.week === week.week
+    && Array.isArray(result.games) && result.games.every((game) => isObject(game)
+    && Number.isInteger(game.gameId) && typeof game.awayTeamName === 'string' && typeof game.homeTeamName === 'string'
+    && (game.awayTeamId === null || Number.isInteger(game.awayTeamId)) && (game.homeTeamId === null || Number.isInteger(game.homeTeamId))
+    && (game.kickoffAt === null || isPickemTimestamp(game.kickoffAt)) && (game.status === null || typeof game.status === 'string')
+    && (game.homeSpread === null || (typeof game.homeSpread === 'number' && Number.isFinite(game.homeSpread)))
+    && isPickemScore(game.awayScore) && isPickemScore(game.homeScore)
+    && typeof game.eligible === 'boolean' && typeof game.locked === 'boolean' && !(game.eligible && game.locked))
+    && (result.analysis === null || (isPickemAnalysis(result.analysis)
+      && result.analysis.season === week.season && result.analysis.stage === week.stage && result.analysis.week === week.week))
+    && isPickemRecord(result.record))
+}
+export async function gradePickemWeek(week: PickemWeek, options?: { signal?: AbortSignal }) {
+  const result = await postJson<PickemGradeResponse>('/api/analytics/pickem/grade', week, options)
+  return validateRead(result, ['graded', 'requestedGames', 'refreshedGames'].every((field) =>
+    Number.isInteger(Reflect.get(result, field)) && Number(Reflect.get(result, field)) >= 0)
+    && (result.refreshError === null || typeof result.refreshError === 'string'))
+}
+export async function postPickemStream(week: PickemWeek, revision: number, signal?: AbortSignal) {
+  const response = await fetch('/api/analytics/pickem/analyze-stream', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...week, revision }), signal,
+  })
+  if (!response.ok) {
+    const payload = await response.json() as ApiErrorResponse
+    throw new AppApiError(payload.error || `Pickem request failed (${response.status}).`, payload.code ?? 'request_failed', response.status)
+  }
+  if (!response.body || !response.headers.get('content-type')?.includes('text/event-stream')) {
+    throw new AppApiError('Pickem did not provide an event stream.', 'malformed_response', 502)
+  }
+  return response.body
+}
+export async function readPickemStream(
+  stream: ReadableStream<Uint8Array>, onEvent: (event: PickemStreamEvent) => void, signal?: AbortSignal,
+) {
+  for await (const { event, payload } of readSse(stream, signal)) {
+    if (event === 'progress') {
+      if (typeof payload.message !== 'string') throw new AppApiError('Malformed Pickem progress.', 'malformed_response', 502)
+      onEvent({ type: 'progress', message: payload.message })
+    } else if (event === 'complete') {
+      if (!isPickemAnalysis(payload.analysis)) throw new AppApiError('Malformed Pickem completion.', 'malformed_response', 502)
+      invalidateAnalyticsReads('pickem', { preserveData: true })
+      onEvent({ type: 'complete', analysis: payload.analysis })
+      return
+    } else if (event === 'error') {
+      onEvent({ type: 'error', error: typeof payload.error === 'string' ? payload.error : 'Pickem analysis failed.',
+        code: typeof payload.code === 'string' ? payload.code : 'stream_error' })
+      return
+    }
+  }
+  throw new AppApiError('Pickem stream ended before a saved analysis was received.', 'incomplete_stream', 502)
 }
 export function getAvailableSeasons(options?: { signal?: AbortSignal }) {
   return requestJson<AvailableSeasonsResponse>('/api/seasons', options)

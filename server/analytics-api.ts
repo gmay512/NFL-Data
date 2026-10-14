@@ -34,6 +34,9 @@ import { statusForWeeklyLossAnalysisError } from './weekly-loss-analysis'
 import { AnalyticsDatabaseError } from './analytics-reads'
 import { AnalyticsReportError, renderAnalyticsReport } from './analytics-report'
 import { generateMatchupReport } from './matchup-report'
+import { PickemError, PickemService, parsePickemWeek, refreshPickemSources } from './pickem-analysis'
+import { createPickemStore } from './pickem-store'
+import type { PickemWeek } from '../src/api/pickem-contracts'
 
 export type AnalyticsFilterMetadata = {
   seasons: number[]
@@ -48,6 +51,7 @@ export type AnalyticsApiDependencies = {
   llama: LlamaClient
   store: AnalysisStore
   loadMetadata: (season?: number, options?: { signal?: AbortSignal }) => Promise<AnalyticsFilterMetadata>
+  pickem?: Pick<PickemService, 'weeks' | 'week' | 'analyze' | 'grade'>
   weekly?: Pick<
     WeeklyAnalysisService,
     'analyze' | 'analyzeLoss' | 'delete' | 'deleteLossAnalysis' | 'grade' | 'list'
@@ -137,6 +141,13 @@ function llamaStatus(error: LlamaClientError) {
 }
 
 export function statusForApiError(error: unknown) {
+  if (error instanceof PickemError) {
+    return {
+      statusCode: error.code === 'invalid_pickem' ? 400 : error.code === 'pickem_conflict' ? 409
+        : error.code === 'pickem_refresh_failed' ? 503 : 502,
+      code: error.code, message: error.message,
+    }
+  }
   if (error instanceof AnalyticsReportError) {
     return { statusCode: 502, code: error.code, message: error.message }
   }
@@ -234,6 +245,13 @@ function createDependencies(env: AppEnv) {
     llama,
     store: createAnalysisStore(client),
     loadMetadata: (season?: number, options?: { signal?: AbortSignal }) => loadAnalyticsMetadata(client, season, options),
+    pickem: new PickemService(
+      client, dataSource, llama, createPickemStore(client),
+      (week, progress, signal) => refreshPickemSources(client, getIngestConfig(env), week, progress, signal),
+      (ids, signal) => refreshGamesByIds({
+        ...getIngestConfig(env), beforeApiRequest: () => signal?.throwIfAborted(),
+      }, ids),
+    ),
     weekly: new WeeklyAnalysisService(
       client,
       dataSource,
@@ -258,6 +276,43 @@ function getDependencies(env: AppEnv, injected?: AnalyticsApiDependencies) {
 
 function writeSse(response: ServerResponse, event: string, payload: unknown) {
   response.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`)
+}
+
+async function streamPickemAnalysis(
+  request: IncomingMessage, response: ServerResponse,
+  service: NonNullable<AnalyticsApiDependencies['pickem']>, week: PickemWeek, revision: number,
+) {
+  const controller = new AbortController()
+  const abort = () => { if (!response.writableEnded) controller.abort() }
+  request.once('aborted', abort)
+  response.once('close', abort)
+  response.writeHead(200, {
+    'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive', 'X-Accel-Buffering': 'no',
+  })
+  response.flushHeaders()
+  const heartbeat = setInterval(() => {
+    if (!response.destroyed && !response.writableEnded) response.write(': heartbeat\n\n')
+  }, 10_000)
+  try {
+    const analysis = await service.analyze(week, revision, (message) => {
+      if (!controller.signal.aborted) writeSse(response, 'progress', { message })
+    }, controller.signal)
+    if (!controller.signal.aborted) writeSse(response, 'complete', { analysis })
+  } catch (error) {
+    if (!controller.signal.aborted && !response.destroyed) {
+      const mapped = statusForApiError(error)
+      writeSse(response, 'error', {
+        error: mapped?.message ?? (error instanceof Error ? error.message : String(error)),
+        code: mapped?.code ?? 'internal_error',
+      })
+    }
+  } finally {
+    clearInterval(heartbeat)
+    request.removeListener('aborted', abort)
+    response.removeListener('close', abort)
+    if (!response.writableEnded && !response.destroyed) response.end()
+  }
 }
 
 async function streamFollowUp(
@@ -401,6 +456,38 @@ export async function handleAnalyticsApiRequest(
   const sendRead = (payload: unknown, count: number) => {
     console.info(`[Analytics] request=${requestId} stage=${requestUrl.pathname} rows=${count} payloadBytes=${Buffer.byteLength(JSON.stringify(payload))} durationMs=${Date.now() - startedAt}`)
     sendJson(response, 200, payload)
+  }
+
+  if (requestUrl.pathname.startsWith('/api/analytics/pickem/')) {
+    if (!dependencies.pickem) throw new AnalyticsApiError(503, 'pickem_unavailable', 'Pickem is unavailable.')
+    const service = dependencies.pickem
+    if (request.method === 'GET' && requestUrl.pathname === '/api/analytics/pickem/weeks') {
+      const result = await service.weeks(parseRequiredSeason(requestUrl.searchParams.get('season')), signal)
+      sendRead(result, result.weeks.length)
+      return true
+    }
+    if (request.method === 'GET' && requestUrl.pathname === '/api/analytics/pickem/week') {
+      const week = parsePickemWeek({
+        season: parseRequiredSeason(requestUrl.searchParams.get('season')),
+        stage: requestUrl.searchParams.get('stage'), week: requestUrl.searchParams.get('week'),
+      })
+      const result = await service.week(week, signal)
+      sendRead(result, result.games.length)
+      return true
+    }
+    if (request.method === 'POST' && requestUrl.pathname === '/api/analytics/pickem/grade') {
+      sendJson(response, 200, await service.grade(parsePickemWeek(await readJsonBody(request)), signal))
+      return true
+    }
+    if (request.method === 'POST' && requestUrl.pathname === '/api/analytics/pickem/analyze-stream') {
+      const body = await readJsonBody(request)
+      const week = parsePickemWeek(body)
+      if (!Number.isInteger(body.revision) || Number(body.revision) < 0 || Number(body.revision) > 2147483646) {
+        throw new PickemError('invalid_pickem', 'A nonnegative expected analysis revision is required.')
+      }
+      await streamPickemAnalysis(request, response, service, week, Number(body.revision))
+      return true
+    }
   }
 
   const parseCursor = (field: 'createdAt' | 'updatedAt') => {

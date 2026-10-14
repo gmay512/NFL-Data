@@ -6,6 +6,7 @@ const GameDetailPage = lazy(() => import('./pages/GameDetailPage').then((module)
 const GameTeamDetailPage = lazy(() => import('./pages/GameTeamDetailPage').then((module) => ({ default: module.GameTeamDetailPage })))
 const AnalyticsPage = lazy(() => import('./pages/AnalyticsPage').then((module) => ({ default: module.AnalyticsPage })))
 const WeeklyAnalysisPage = lazy(() => import('./pages/WeeklyAnalysisPage').then((module) => ({ default: module.WeeklyAnalysisPage })))
+const PickemPage = lazy(() => import('./pages/PickemPage').then((module) => ({ default: module.PickemPage })))
 
 function App() {
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -49,6 +50,7 @@ function App() {
         <Route path="/games/:gameId/teams/:teamId" element={<GameTeamDetailPage />} />
         <Route path="/analytics" element={<AnalyticsPage />} />
         <Route path="/analytics/weekly" element={<WeeklyAnalysisPage />} />
+        <Route path="/analytics/pickem" element={<PickemPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
