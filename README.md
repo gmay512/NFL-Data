@@ -526,10 +526,11 @@ ties, voids, pending games, and unpredicted games.
 
 **Print results** opens the browser's print/Save as PDF dialog for the selected
 week's saved picks, confidence, supporting factors, risks, source limitations,
-grades, and weekly record. It prints the results already displayed without
-refreshing grades or calling the model, and remains available when the model is
-offline. Previous-analysis comparisons and page controls are excluded. Printing
-is disabled until predictions are saved and while analysis or grading is active.
+grades, and weekly record in a two-column layout. It prints the displayed results
+without refreshing grades or calling the model, and remains available when the
+model is offline. Previous-analysis comparisons and page controls are excluded.
+Printing is disabled until predictions are saved and while analysis or grading
+is active.
 
 Existing **Weekly Analysis** still creates immutable timestamped runs and
 grades spread/total bets. Pickem does not rewrite or merge that history.

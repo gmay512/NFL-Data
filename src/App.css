@@ -830,9 +830,8 @@
   .pickem-print-area .pickem-screen-only { display: none !important; }
   .pickem-print-only { display: inline; }
   .pickem-print-area { --accent: #111; --border: #bbb; font-size: 10pt; }
-  .pickem-print-area .pickem-games { display: block; }
+  .pickem-print-area .pickem-games { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12pt; align-items: start; }
   .pickem-print-area .pickem-game {
-    margin-bottom: 12pt;
     padding: 10pt;
     border: 1px solid #bbb;
     border-radius: 0;
