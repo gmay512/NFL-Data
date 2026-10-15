@@ -244,6 +244,10 @@ describe('PickemPage', () => {
       assert.match(report.textContent!, /Original prediction retained/)
       assert.match(report.textContent!, /Sources refreshed/)
       assert.match(report.textContent!, /test-model/)
+      const provenance = report.querySelector('.pickem-provenance')!
+      assert.match(provenance.querySelector('small')!.textContent!, /Generated.*test-model/)
+      assert.match(provenance.querySelector('.weekly-disclaimer')!.textContent!, /Sources refreshed/)
+      assert.match(provenance.textContent!, /Final: Dallas 24.*Houston 21/)
       assert.equal(report.querySelector('[aria-label="Supporting factors"] li')?.textContent, selectedPick.supportingPoints[0].text)
       assert.equal(report.querySelector('[aria-label="Risks and data gaps"] li')?.textContent, selectedPick.risks[0].text)
       assert.equal(report.querySelector('[aria-label="Source limitations"] li')?.textContent, selectedPick.dataWarnings[0])

@@ -274,10 +274,12 @@ export function PickemPage() {
               {pick.dataWarnings.length > 0 && <div className="pickem-data-warnings"><h4>Source limitations</h4>
                 <ul aria-label="Source limitations">{pick.dataWarnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul>
               </div>}
-              <small>Generated {date(pick.analyzedAt)} · {pick.model}{game.locked ? ' · Original prediction retained' : ''}</small>
-              <p className="weekly-disclaimer">Sources refreshed {date(pick.sourceRefreshedAt)}. Provider observation times are not known for all sources.</p>
-              {pick.finalAwayScore != null && pick.finalHomeScore != null && <p>Final: {pick.awayTeamName} {pick.finalAwayScore} — {pick.homeTeamName} {pick.finalHomeScore}</p>}
-              {pick.result === 'pending' && game.status === null && <p>Source game unavailable; result cannot be graded.</p>}
+              <div className="pickem-provenance">
+                <small>Generated {date(pick.analyzedAt)} · {pick.model}{game.locked ? ' · Original prediction retained' : ''}</small>
+                <p className="weekly-disclaimer">Sources refreshed {date(pick.sourceRefreshedAt)}. Provider observation times are not known for all sources.</p>
+                {pick.finalAwayScore != null && pick.finalHomeScore != null && <p>Final: {pick.awayTeamName} {pick.finalAwayScore} — {pick.homeTeamName} {pick.finalHomeScore}</p>}
+                {pick.result === 'pending' && game.status === null && <p>Source game unavailable; result cannot be graded.</p>}
+              </div>
             </>}
             {change && saved!.revision > 1 && <ChangeDisplay change={change} />}
           </article>

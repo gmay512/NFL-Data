@@ -532,6 +532,11 @@ model is offline. Previous-analysis comparisons and page controls are excluded.
 Printing is disabled until predictions are saved and while analysis or grading
 is active.
 
+Long game cards can continue across pages instead of leaving unused space before
+the results. Print-specific spacing and text sizes keep all details readable,
+with model/source timestamps and final scores grouped together. Paper size,
+margins, and browser-added headers and footers are controlled in the print dialog.
+
 Existing **Weekly Analysis** still creates immutable timestamped runs and
 grades spread/total bets. Pickem does not rewrite or merge that history.
 No database reset or persistent analysis/grading scheduler is required.
