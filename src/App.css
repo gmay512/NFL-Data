@@ -572,6 +572,7 @@
 .analytics-subnav a { padding: 9px 13px; border-radius: 8px; color: var(--muted-text); font-size: .84rem; font-weight: 800; text-decoration: none; }
 .analytics-subnav a.active { color: var(--accent-dark); background: var(--accent-soft); }
 .pickem-page { display: grid; gap: 16px; }
+.pickem-print-only { display: none; }
 .pickem-header { display: flex; justify-content: space-between; align-items: start; gap: 16px; }
 .pickem-header h1 { margin: 0; }
 .pickem-toolbar { grid-template-columns: minmax(100px, .4fr) minmax(180px, .8fr) 1fr; }
@@ -823,6 +824,27 @@
   .weekly-picks { grid-template-columns: 1fr 1fr; }
   .weekly-pick { break-inside: avoid; border-color: #bbb; background: white; }
   .weekly-disclaimer { margin-top: 16px; padding-top: 10px; border-top: 1px solid #bbb; }
+  html:has(.pickem-page) { --canvas: #fff; background: white; color-scheme: light; }
+  .pickem-page > :not(.pickem-print-area),
+  .pickem-print-area .pickem-change,
+  .pickem-print-area .pickem-screen-only { display: none !important; }
+  .pickem-print-only { display: inline; }
+  .pickem-print-area { --accent: #111; --border: #bbb; font-size: 10pt; }
+  .pickem-print-area .pickem-games { display: block; }
+  .pickem-print-area .pickem-game {
+    margin-bottom: 12pt;
+    padding: 10pt;
+    border: 1px solid #bbb;
+    border-radius: 0;
+    background: white;
+    break-inside: avoid;
+  }
+  .pickem-print-area .pickem-game header,
+  .pickem-print-area h3, .pickem-print-area h4 { break-after: avoid; }
+  .pickem-print-area .pickem-game p, .pickem-print-area .pickem-game li { font-size: inherit; }
+  .pickem-print-area .pickem-game li { break-inside: avoid; }
+  .pickem-print-area .result-pill { border: 1px solid #bbb; background: white; color: #111; }
+  .pickem-print-area .weekly-disclaimer { margin-top: 8pt; padding-top: 6pt; }
   body[data-analytics-print] > :not(.analytics-print-root) { display: none !important; }
   body[data-analytics-print] { overflow: visible !important; }
   body[data-analytics-print] .analytics-print-root {

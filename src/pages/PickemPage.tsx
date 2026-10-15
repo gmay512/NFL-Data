@@ -54,6 +54,7 @@ export function PickemPage() {
   const [analyzing, setAnalyzing] = useState(false)
   const [gradingKey, setGradingKey] = useState<string | null>(null)
   const [status, setStatus] = useState<{ key: string; message: string; error: boolean } | null>(null)
+  const [printError, setPrintError] = useState<{ key: string; message: string } | null>(null)
   const [progress, setProgress] = useState('')
   const analysisController = useRef<AbortController | null>(null)
   const gradeController = useRef<AbortController | null>(null)
@@ -82,6 +83,7 @@ export function PickemPage() {
   const saved = detail.data?.analysis
   const grading = detailKey != null && gradingKey === detailKey
   const busy = analyzing || grading
+  const canPrint = Boolean(saved?.predictions.length) && !detail.isLoading && !busy
   const activeStatus = status?.key === detailKey ? status : null
 
   const selectWeek = (next: PickemWeek) => setParams({
@@ -182,6 +184,19 @@ export function PickemPage() {
     }
   }
 
+  const printResults = () => {
+    if (!canPrint || !detailKey) return
+    setPrintError(null)
+    try {
+      window.print()
+    } catch (error) {
+      setPrintError({
+        key: detailKey,
+        message: error instanceof Error ? `Could not print Pickem results: ${error.message}` : 'Could not open the print dialog.',
+      })
+    }
+  }
+
   return <main className="analytics-page pickem-page">
     <section className="pickem-header">
       <div><p className="eyebrow">Analytics</p><h1>Pickem</h1><p>Local-model predictions for outright NFL winners, not against the spread.</p></div>
@@ -216,6 +231,8 @@ export function PickemPage() {
           gradeController.current = controller
           void refreshResults([week], detailKey, controller.signal)
         }}>{grading ? 'Refreshing results...' : 'Refresh results'}</button>
+        <button type="button" disabled={!canPrint} onClick={printResults}>Print results</button>
+        {printError?.key === detailKey && <p className="analytics-print-error" role="alert">{printError.message}</p>}
       </div>
     </section>
     <section className="panel pickem-record-panel"><h2>Season record</h2>
@@ -231,14 +248,14 @@ export function PickemPage() {
     {activeStatus && <p className={`status-message ${activeStatus.error ? 'is-error' : ''}`} role={activeStatus.error ? 'alert' : 'status'}>{activeStatus.message}</p>}
     {(weeks.isLoading || detail.isLoading) && <p role="status">Loading Pickem...</p>}
     {!weeks.isLoading && !week && <p className="empty-state">No matching regular-season or playoff week is available. Select a stored season/week or refresh its schedule from the dashboard.</p>}
-    {detail.data && <section className="panel weekly-run-detail">
-      <header><p className="eyebrow">{week?.stage}</p><h2>{week?.season} {week?.week}</h2>
+    {detail.data && <section className="panel weekly-run-detail pickem-print-area">
+      <header><p className="eyebrow">{week?.stage}</p><h2><span className="pickem-print-only">Pickem - </span>{week?.season} {week?.week}</h2>
         {saved ? <p>Created {date(saved.createdAt)} · Updated {date(saved.updatedAt)} · Revision {saved.revision}</p>
           : <p>No analysis saved for this week.</p>}
       </header>
       <RecordDisplay record={detail.data.record} label="Pickem weekly record" />
       <p className="weekly-disclaimer">Spreads inform the analysis only. Model confidence is uncalibrated, not a verified probability. Predictions and interpretations are uncertain. Ties and void games are excluded from accuracy.</p>
-      {saved && <p className="weekly-summary">{saved.summary}</p>}
+      {saved && <p className="weekly-summary pickem-screen-only">{saved.summary}</p>}
       <p className="weekly-disclaimer">Started-game picks are locked. Games without a saved pre-kickoff prediction are not scored as losses.</p>
       <div className="pickem-games">
         {detail.data.games.map((game) => {

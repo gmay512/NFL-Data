@@ -84,6 +84,7 @@ describe('PickemPage', () => {
     const container = await render(baseFetch(() => pickemView, { offline: true }))
     assert.match(container.textContent!, /Outright winner: Dallas/)
     assert.equal(button(container, 'Update analysis').disabled, true)
+    assert.equal(button(container, 'Print results').disabled, false)
     assert.match(container.textContent!, /Local LLM offline/)
   })
   it('automatically reconciles other saved weeks for the season without repeat requests', async () => {
@@ -112,6 +113,7 @@ describe('PickemPage', () => {
     }, '/analytics/pickem?season=2026&stage=Regular%20Season&week=Week%2010')
     assert(requested.every((week) => week === 'Week 10'))
     assert.equal(button(container, 'Generate analysis').disabled, false)
+    assert.equal(button(container, 'Print results').disabled, true)
     assert.match(container.textContent!, /No analysis saved/)
   })
   it('keeps locked historical picks and unpredicted started games distinct from losses', async () => {
@@ -130,6 +132,7 @@ describe('PickemPage', () => {
     assert.match(container.textContent!, /Not predicted before kickoff/)
     assert.match(container.textContent!, /1 ties/)
     assert.equal(button(container, 'Update analysis').disabled, true)
+    assert.equal(button(container, 'Print results').disabled, false)
   })
   it('updates the canonical analysis and displays accessible before/after winner and confidence changes', async () => {
     const nextPick = { ...pickemAnalysis.predictions[0], winnerTeamId: 26, confidence: 72 }
@@ -186,5 +189,152 @@ describe('PickemPage', () => {
     assert.match(container.querySelector('[role="alert"]')?.textContent ?? '', /injury refresh failed/)
     assert.equal(container.querySelector('ul b'), null)
     assert.match(container.textContent!, /<b>Uncertain model prose<\/b>/)
+  })
+  it('prints only the selected saved report without new requests or changes to saved data', async () => {
+    const selectedWeek = { ...pickemWeek, week: 'Week 5' }
+    const selectedPick = {
+      ...pickemAnalysis.predictions[0], result: 'win' as const,
+      finalAwayScore: 24, finalHomeScore: 21, gradedAt: '2026-10-11T21:00:00Z',
+    }
+    const before = {
+      winnerTeamId: 26, winnerTeamName: 'Houston', confidence: 50,
+      supportingPoints: [{ text: 'Earlier supporting factor.', evidenceIds: ['limitations'] }],
+      risks: selectedPick.risks, evidence: {},
+    }
+    const selected: PickemWeekView = {
+      ...pickemView, ...selectedWeek,
+      games: [{ ...pickemView.games[0], status: 'FT', eligible: false, locked: true }],
+      record: { wins: 1, losses: 0, ties: 0, pending: 0, void: 0 },
+      analysis: {
+        ...pickemAnalysis, ...selectedWeek, revision: 2, predictions: [selectedPick],
+        summary: '1 game predictions changed versus the previous analysis.',
+        changes: [{ gameId: selectedPick.gameId, kind: 'updated', before,
+          after: { ...before, winnerTeamId: 29, winnerTeamName: 'Dallas', confidence: 61, supportingPoints: selectedPick.supportingPoints } }],
+      },
+    }
+    const weeks = { ...pickemWeeks, weeks: [
+      ...pickemWeeks.weeks, { ...selectedWeek, firstKickoff: selectedPick.kickoffAt, analysisId: pickemAnalysis.id, revision: 2 },
+    ] }
+    const fetcher = baseFetch(() => selected, { weeks, offline: true })
+    let requests = 0
+    const container = await render(async (input, init) => {
+      requests++
+      if (new URL(String(input), 'http://localhost').pathname === '/api/analytics/pickem/week'
+        && new URL(String(input), 'http://localhost').searchParams.get('week') === pickemWeek.week) return json(pickemView)
+      return fetcher(input, init)
+    })
+    const select = container.querySelector<HTMLSelectElement>('select[aria-label="Week"]')!
+    await React.act(async () => {
+      select.value = JSON.stringify([selectedWeek.stage, selectedWeek.week])
+      select.dispatchEvent(new window.Event('change', { bubbles: true }))
+    })
+    await settle()
+    const report = container.querySelector('.pickem-print-area')!
+    const original = report.innerHTML
+    const requestCount = requests
+    let printed = 0
+    window.print = () => {
+      printed++
+      assert.match(report.querySelector('h2')!.textContent!, /Pickem - 2026 Week 5/)
+      assert.match(report.textContent!, /Regular Season/)
+      assert.match(report.textContent!, /Revision 2/)
+      assert.match(report.textContent!, /Outright winner: Dallas/)
+      assert.match(report.textContent!, /61% model confidence/)
+      assert.match(report.textContent!, /Final: Dallas 24.*Houston 21/)
+      assert.match(report.textContent!, /Original prediction retained/)
+      assert.match(report.textContent!, /Sources refreshed/)
+      assert.match(report.textContent!, /test-model/)
+      assert.equal(report.querySelector('[aria-label="Supporting factors"] li')?.textContent, selectedPick.supportingPoints[0].text)
+      assert.equal(report.querySelector('[aria-label="Risks and data gaps"] li')?.textContent, selectedPick.risks[0].text)
+      assert.equal(report.querySelector('[aria-label="Source limitations"] li')?.textContent, selectedPick.dataWarnings[0])
+      assert.match(report.querySelector('[aria-label="Pickem weekly record"]')!.textContent!, /1 wins.*100.0%/)
+      assert.equal(report.querySelector('button, select, [role="status"], [role="alert"]'), null)
+      assert.equal(report.querySelector('.weekly-summary')?.classList.contains('pickem-screen-only'), true)
+      assert(report.querySelector('.pickem-change'))
+    }
+    assert.equal(button(container, 'Print results').disabled, false)
+    await React.act(() => button(container, 'Print results').click())
+    await React.act(() => window.dispatchEvent(new window.Event('afterprint')))
+    assert.equal(printed, 1)
+    assert.equal(requests, requestCount)
+    assert.equal(report.innerHTML, original)
+    assert.equal(button(container, 'Print results').disabled, false)
+  })
+  it('keeps printing disabled while loading or when saved predictions are empty', async () => {
+    let resolveDetail!: (response: Response) => void
+    const fetcher = baseFetch(() => pickemView)
+    const container = await render((input, init) =>
+      new URL(String(input), 'http://localhost').pathname === '/api/analytics/pickem/week'
+        ? new Promise<Response>((resolve) => { resolveDetail = resolve })
+        : fetcher(input, init))
+    assert.equal(button(container, 'Print results').disabled, true)
+    await React.act(() => resolveDetail(json({
+      ...pickemView, analysis: { ...pickemAnalysis, predictions: [] },
+      record: { wins: 0, losses: 0, ties: 0, pending: 0, void: 0 },
+    })))
+    await settle()
+    assert.equal(button(container, 'Print results').disabled, true)
+  })
+  it('disables printing during grading or analysis and restores it without replacing saved results', async () => {
+    let grades = 0
+    let resolveGrade!: (response: Response) => void
+    let resolveAnalysis!: (response: Response) => void
+    const fetcher = baseFetch(() => pickemView)
+    const container = await render((input, init) => {
+      const path = new URL(String(input), 'http://localhost').pathname
+      if (path === '/api/analytics/pickem/grade' && ++grades > 1) {
+        return new Promise<Response>((resolve) => { resolveGrade = resolve })
+      }
+      if (path === '/api/analytics/pickem/analyze-stream') {
+        return new Promise<Response>((resolve) => { resolveAnalysis = resolve })
+      }
+      return fetcher(input, init)
+    })
+    let prints = 0
+    window.print = () => { prints++ }
+    assert.equal(button(container, 'Print results').disabled, false)
+    await React.act(() => button(container, 'Refresh results').click())
+    assert.equal(button(container, 'Print results').disabled, true)
+    await React.act(() => button(container, 'Print results').click())
+    await React.act(() => resolveGrade(json({ graded: 0, requestedGames: 0, refreshedGames: 0, refreshError: null })))
+    await settle()
+    assert.equal(button(container, 'Print results').disabled, false)
+    await React.act(() => button(container, 'Update analysis').click())
+    assert.equal(button(container, 'Print results').disabled, true)
+    await React.act(() => button(container, 'Print results').click())
+    await React.act(() => resolveAnalysis(new Response(
+      'event: error\ndata: {"error":"Test update stopped","code":"invalid_model_output"}\n\n',
+      { headers: { 'Content-Type': 'text/event-stream' } },
+    )))
+    await settle()
+    assert.equal(button(container, 'Print results').disabled, false)
+    assert.match(container.querySelector('.pickem-print-area')!.textContent!, /Outright winner: Dallas/)
+    assert.equal(prints, 0)
+  })
+  it('surfaces print-dialog failures without modifying saved results and allows retry', async () => {
+    const container = await render(baseFetch(() => pickemView))
+    const report = container.querySelector('.pickem-print-area')!
+    const original = report.innerHTML
+    window.print = () => { throw new Error('Printer unavailable') }
+    await React.act(() => button(container, 'Print results').click())
+    assert.match(container.querySelector('[role="alert"]')!.textContent!, /Could not print Pickem results: Printer unavailable/)
+    assert.equal(report.innerHTML, original)
+    assert.equal(button(container, 'Print results').disabled, false)
+    let printed = 0
+    window.print = () => { printed++ }
+    await React.act(() => button(container, 'Print results').click())
+    assert.equal(printed, 1)
+    assert.equal(container.querySelector('[role="alert"]'), null)
+  })
+  it('preserves existing result-refresh warnings when printing or cancelling the dialog', async () => {
+    const fetcher = baseFetch(() => pickemView)
+    const container = await render((input, init) =>
+      new URL(String(input), 'http://localhost').pathname === '/api/analytics/pickem/grade'
+        ? Promise.resolve(json({ graded: 0, requestedGames: 0, refreshedGames: 0, refreshError: 'Saved grades may be stale.' }))
+        : fetcher(input, init))
+    window.print = () => {}
+    await React.act(() => button(container, 'Print results').click())
+    await React.act(() => window.dispatchEvent(new window.Event('afterprint')))
+    assert.match(container.querySelector('[role="alert"]')!.textContent!, /Saved grades may be stale/)
   })
 })
