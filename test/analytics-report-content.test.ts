@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 import React, { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -22,6 +23,32 @@ function withReport(content: string, check: (report: HTMLElement) => void) {
 }
 
 describe('formatted Analytics report content', () => {
+  it('gives prediction tables word-based intrinsic sizing instead of shrinking headers to single characters', () => {
+    const content = [
+      '## Predictions',
+      '',
+      '| Market | Prediction | Consensus line | Reason |',
+      '| --- | --- | --- | --- |',
+      '| ATS | Chicago Bears to cover | -1.5 | Chicago has a 60% ATS record overall and covered both away games this season, while Atlanta is 0-2 ATS at home. Note: Required fact citations are missing or incomplete. |',
+      '| O/U | Over | 51.5 | The total aligns with both teams averaging 23.8 points scored and recent high-scoring games. |',
+    ].join('\n')
+    const css = readFileSync(new URL('../src/App.css', import.meta.url), 'utf8')
+    const dom = new JSDOM(`<style>${css}</style>${renderToStaticMarkup(createElement(AnalyticsReportContent, { content }))}`)
+    try {
+      const table = dom.window.document.querySelector('table')!
+      assert.equal(dom.window.getComputedStyle(table).overflowWrap, 'break-word')
+      assert.equal(dom.window.getComputedStyle(table).minWidth, '360px')
+      assert.deepEqual([...table.querySelectorAll('thead th')].map((cell) => cell.textContent),
+        ['Market', 'Prediction', 'Consensus line', 'Reason'])
+      assert.equal(table.querySelector('tbody td:nth-child(2)')?.textContent, 'Chicago Bears to cover')
+      assert.match(table.querySelector('tbody td:nth-child(4)')?.textContent ?? '', /Required fact citations are missing or incomplete/)
+      assert.equal(dom.window.getComputedStyle(table.parentElement!).overflowX, 'auto')
+      assert.equal(table.parentElement?.getAttribute('tabindex'), '0')
+    } finally {
+      dom.window.close()
+    }
+  })
+
   it('renders headings, inline emphasis, lists, and accessible scrollable GFM tables', () => {
     withReport(formattedReportMarkdown, (report) => {
       assert.equal(report.querySelector('h3')?.textContent, 'Validated factual report')

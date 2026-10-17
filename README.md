@@ -407,6 +407,11 @@ proxy uses 900-second read/send limits, accommodating both model deadlines;
 an older installed proxy configuration may still time out sooner. Changing code
 or examples does not update deployed environment settings or restart services.
 
+On-screen report tables size columns around whole words so long prediction reasons
+do not squeeze headers and team names into character-by-character stacks. Narrow
+layouts retain keyboard-accessible horizontal scrolling. This display fix also
+applies to existing saved reports without regenerating their analysis.
+
 **Print analysis** beside the saved matchup title prints the original full
 report, not the latest follow-up. If the original lies outside the currently
 loaded conversation page, earlier message pages are fetched on demand; loading
