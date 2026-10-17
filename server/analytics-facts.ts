@@ -125,8 +125,11 @@ export function buildAnalyticsFacts(snapshot: AnalyticsSnapshot): AnalyticsFactC
     }
   }
   for (const standing of snapshot.standings.items) {
+    const basis = standing.recordBasis
     add(`standing.${standing.team_id}`, 'standings', 'standing',
-      `${standing.teamName}: stored season standings ${standing.won}-${standing.lost}-${standing.ties}; ${standing.division ?? 'division unknown'}, position ${standing.position ?? 'unknown'}, streak ${standing.streak ?? 'unknown'}; points for ${formatNumber(standing.points_for)}, points against ${formatNumber(standing.points_against)}. Standings observation time unknown; not an ATS record.`,
+      basis
+        ? `${standing.teamName}: regular-season record ${standing.won}-${standing.lost}-${standing.ties} (wins-losses-ties), calculated from completed results before ${new Date(basis.beforeKickoff * 1000).toISOString()}; latest included kickoff ${basis.latestGameTimestamp == null ? 'none' : new Date(basis.latestGameTimestamp * 1000).toISOString()}; points for ${formatNumber(standing.points_for)}, points against ${formatNumber(standing.points_against)}. Not an ATS record or provider ranking.`
+        : `${standing.teamName}: stored season standings ${standing.won}-${standing.lost}-${standing.ties}; ${standing.division ?? 'division unknown'}, position ${standing.position ?? 'unknown'}, streak ${standing.streak ?? 'unknown'}; points for ${formatNumber(standing.points_for)}, points against ${formatNumber(standing.points_against)}. Standings observation time unknown; not an ATS record.`,
       { teamId: standing.team_id })
   }
   if (snapshot.preset === 'matchup_preview' && target) {

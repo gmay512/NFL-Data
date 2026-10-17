@@ -19,8 +19,11 @@ const sectionLabels: Record<string, string> = {
 
 export function matchupStatementLabel(id: string) {
   const [section, kind, index] = id.split('.')
+  if (section === 'summary') return 'Matchup summary'
+  if (section === 'notes') return `Key performance notes / Observation ${Number(kind) + 1}`
+  if (section === 'predictions') return `${kind === 'spread' ? 'ATS' : 'O/U'} prediction`
   if (section === 'injuries' && (kind === 'away' || kind === 'home')) {
-    return `Current injuries / ${kind === 'away' ? 'Away' : 'Home'} team / Observation ${Number(index) + 1}`
+    return `Current injuries / ${kind === 'away' ? 'Away' : 'Home'} team${index == null ? '' : ` / Observation ${Number(index) + 1}`}`
   }
   return `${sectionLabels[section] ?? 'Narrative'} / ${kind === 'interpretation' ? 'Interpretation' : kind === 'summary' ? 'Summary' : 'Observation'}`
 }
@@ -75,6 +78,7 @@ export function createMatchupPresentation(snapshot: AnalyticsSnapshot, facts: An
       .replace(/(?:^|\s)(?:\*\*)?(?:Sources|Model check|Evidence IDs)\s*:(?:\*\*)?[^\n]*/gim, '')
       .replace(/\b(?:matchup|sample|team|stats|standing|injury-summary|injury|player-stat|game|limitation)\.[\w-]+(?:\.[\w-]+)*/g, reference)
       .replace(/\b(?:priorPerformance|injuries|homeSpread|totals|efficiency|missingData|oddsContext|overall)\.(?:interpretation|summary|\d+|(?:away|home)\.\d+)\b/g, matchupStatementLabel)
+      .replace(/\b(?:notes\.\d+|predictions\.(?:spread|total)|injuries\.(?:away|home))\b/g, matchupStatementLabel)
       .replace(/\b(team|game|player)(?:[\s_-]*ids?)?["']?\s*(?:[:=#]\s*)?[[("']*(\d+(?:\s*,\s*\d+(?!\d|[.-]\d))*)\b(?![.-]\d)[\])"']*/gi,
         (_, kind: string, ids: string) => ids.split(',').map((id) => {
           const number = Number(id.trim())

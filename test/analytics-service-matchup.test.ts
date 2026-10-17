@@ -5,10 +5,11 @@ import {
   AnalyticsTargetError,
   createSupabaseAnalyticsDataSource,
 } from '../server/analytics-service'
-import type { BettingGameRow } from '../server/analytics-core'
+import { buildAnalyticsSnapshot, type BettingGameRow } from '../server/analytics-core'
 
 type Operation = { method: string; args: unknown[] }
 type QueryLog = { table: string; operations: Operation[] }
+type QueryResult = { data: unknown[] | unknown | null; error: { message: string; code?: string } | null; count?: number }
 
 const completedGame: BettingGameRow = {
   game_id: 10,
@@ -44,6 +45,13 @@ function fakeClient(
 ) {
   const logs: QueryLog[] = []
   const rpcCalls: Array<{ name: string; gameIds: number[] }> = []
+  const recordGames = completedGames.map((game) => ({
+    id: game.game_id, season: game.season, stage: game.stage, status_short: 'FT',
+    game_timestamp: game.game_timestamp,
+    away_team_id: game.away_team_id, home_team_id: game.home_team_id,
+    away_total: game.away_score as number | null, home_total: game.home_score as number | null,
+  }))
+  const recordFailure: { error: { message: string; code?: string } | null } = { error: null }
   const rows: Record<string, unknown[]> = {
     games: [{
       id: 42,
@@ -68,7 +76,7 @@ function fakeClient(
     players: [{ id: 11, name: 'Quarterback', position: 'QB' }],
   }
 
-  class Query implements PromiseLike<{ data: unknown[] | unknown | null; error: null; count?: number }> {
+  class Query implements PromiseLike<QueryResult> {
     readonly log: QueryLog
 
     constructor(table: string) {
@@ -99,10 +107,26 @@ function fakeClient(
       return Promise.resolve({ data: rows[this.log.table]?.[0] ?? null, error: null })
     }
 
-    then<TResult1 = { data: unknown[]; error: null; count?: number }, TResult2 = never>(
-      onfulfilled?: ((value: { data: unknown[]; error: null; count?: number }) => TResult1 | PromiseLike<TResult1>) | null,
+    then<TResult1 = QueryResult, TResult2 = never>(
+      onfulfilled?: ((value: QueryResult) => TResult1 | PromiseLike<TResult1>) | null,
       onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
     ): PromiseLike<TResult1 | TResult2> {
+      const selectedColumns = String(operation(this.log, 'select', 'id,game_timestamp,away_team_id,home_team_id,away_total,home_total')?.args[0] ?? '')
+      if (this.log.table === 'games' && selectedColumns.includes('away_total')) {
+        const season = operation(this.log, 'eq', 'season')?.args[1]
+        const cutoff = operation(this.log, 'lt', 'game_timestamp')?.args[1]
+        const teams = String(this.log.operations.find((entry) => entry.method === 'or')?.args[0] ?? '')
+          .match(/home_team_id\.in\.\(([\d,]+)\)/)?.[1].split(',').map(Number) ?? []
+        const range = this.log.operations.find((entry) => entry.method === 'range')?.args as number[]
+        const selected = recordGames.filter((game) =>
+          game.season === season && game.stage === 'Regular Season'
+          && ['FT', 'AOT'].includes(game.status_short)
+          && game.game_timestamp != null && game.game_timestamp < Number(cutoff)
+          && (teams.includes(game.home_team_id) || teams.includes(game.away_team_id)))
+          .slice(range[0], range[1] + 1)
+        return Promise.resolve({ data: selected, error: recordFailure.error })
+          .then(onfulfilled, onrejected)
+      }
       const stage = operation(this.log, 'eq', 'stage')?.args[1]
       const excludedStages = this.log.operations.filter((entry) => entry.method === 'neq' && entry.args[0] === 'stage')
         .map((entry) => entry.args[1])
@@ -148,7 +172,7 @@ function fakeClient(
       return Object.assign(result, { abortSignal: () => result })
     },
   } as unknown as SupabaseClient
-  return { client, logs, rpcCalls }
+  return { client, logs, rpcCalls, recordGames, recordFailure, rows }
 }
 
 function operation(log: QueryLog, method: string, firstArg: unknown) {
@@ -156,6 +180,100 @@ function operation(log: QueryLog, method: string, firstArg: unknown) {
 }
 
 describe('matchup preview data loading', () => {
+  it('replaces lagging standings with all completed results including the latest game, regardless of odds', async () => {
+    const latest = {
+      ...completedGame, game_id: 11, game_timestamp: completedGame.game_timestamp! + 7 * 86400,
+      away_team_id: 1, home_team_id: 2, away_score: 21, home_score: 21,
+      closing_home_spread: null, closing_total: null, spread_result: 'ungraded' as const, total_result: 'ungraded' as const,
+    }
+    const fake = fakeClient('NS', [completedGame, latest])
+    fake.recordGames[1].status_short = 'AOT'
+    fake.rows.standings = [{
+      team_id: 2, conference: 'AFC', division: 'AFC East', position: 1,
+      won: 0, lost: 0, ties: 0, points_for: 0, points_against: 0, streak: 'W1',
+    }]
+    const source = await createSupabaseAnalyticsDataSource(fake.client).load(
+      { season: 2025, gameId: 42, week: 'Week 5' }, 'matchup_preview',
+    )
+    const buffalo = source.standings.find((row) => row.team_id === 2)!
+    assert.deepEqual([buffalo.won, buffalo.lost, buffalo.ties], [1, 0, 1])
+    const arizona = source.standings.find((row) => row.team_id === 1)!
+    assert.deepEqual([arizona.won, arizona.lost, arizona.ties], [0, 0, 1])
+    assert.equal(buffalo.position, null)
+    assert.equal(buffalo.streak, null)
+    assert.equal(buffalo.points_for, 45)
+    assert.equal(buffalo.recordBasis?.latestGameTimestamp, latest.game_timestamp)
+    assert(!fake.logs.some((log) => log.table === 'standings'))
+    const recordQuery = fake.logs.find((log) =>
+      operation(log, 'select', 'id,game_timestamp,away_team_id,home_team_id,away_total,home_total'))!
+    assert.deepEqual(operation(recordQuery, 'in', 'status_short')?.args, ['status_short', ['FT', 'AOT']])
+    assert.equal(operation(recordQuery, 'eq', 'week'), undefined)
+    assert(!recordQuery.operations.some((op) => op.method === 'not'))
+  })
+
+  it('keeps regular-season records complete despite postseason history filters, byes and truncated details', async () => {
+    const regular = { ...completedGame, game_id: 9, home_team_id: 1 }
+    const postseason = { ...regular, game_id: 11, stage: 'Post Season' }
+    const fake = fakeClient('NS', [regular, postseason], null, null, 'Post Season')
+    const source = await createSupabaseAnalyticsDataSource(fake.client).load(
+      { season: 2025, gameId: 42, stage: 'Post Season' }, 'matchup_preview',
+    )
+    assert.deepEqual(source.games.map((game) => game.game_id), [11])
+    const snapshot = buildAnalyticsSnapshot('matchup_preview', { season: 2025, gameId: 42 }, source,
+      undefined, { games: 0, standings: 2, teamTrends: 2, teamStatTrends: 2, injuries: 2, playerStats: 2 })
+    assert.equal(snapshot.games.items.length, 0)
+    assert.deepEqual(snapshot.standings.items.map((row) => [row.team_id, row.won, row.lost, row.ties]), [
+      [1, 0, 1, 0], [2, 1, 0, 0],
+    ])
+    assert.equal(snapshot.standings.items[1].recordBasis?.source, 'completed_regular_season_results')
+  })
+
+  it('excludes non-regular-season, incomplete, other-season, unrelated and at/after-target results', async () => {
+    const fake = fakeClient()
+    const base = fake.recordGames[0]
+    fake.recordGames.push(
+      { ...base, id: 20, stage: 'Pre Season' },
+      { ...base, id: 21, stage: 'Post Season' },
+      { ...base, id: 22, season: 2024 },
+      { ...base, id: 23, status_short: 'Q4' },
+      { ...base, id: 24, status_short: 'NS' },
+      { ...base, id: 25, status_short: 'CANC' },
+      { ...base, id: 26, game_timestamp: 1_759_680_000 },
+      { ...base, id: 27, game_timestamp: 1_759_680_001 },
+      { ...base, id: 28, home_team_id: 50, away_team_id: 51 },
+    )
+    const source = await createSupabaseAnalyticsDataSource(fake.client).load({ season: 2025, gameId: 42 }, 'matchup_preview')
+    assert.deepEqual(source.standings.map((row) => [row.team_id, row.won, row.lost, row.ties]), [
+      [1, 0, 0, 0], [2, 1, 0, 0],
+    ])
+    assert.equal(source.standings[0].recordBasis?.latestGameTimestamp, null)
+  })
+
+  it('paginates record results independently of bounded history', async () => {
+    const fake = fakeClient('NS', [])
+    fake.recordGames.push(...Array.from({ length: 1001 }, (_, index) => ({
+      id: index + 1, season: 2025, stage: 'Regular Season', status_short: 'FT',
+      game_timestamp: 1_750_000_000 + index, away_team_id: 2, home_team_id: 1,
+      away_total: 24, home_total: 20,
+    })))
+    const source = await createSupabaseAnalyticsDataSource(fake.client).load({ season: 2025, gameId: 42 }, 'matchup_preview')
+    assert.equal(source.standings.find((row) => row.team_id === 2)?.won, 1001)
+    assert.equal(fake.logs.filter((log) =>
+      operation(log, 'select', 'id,game_timestamp,away_team_id,home_team_id,away_total,home_total')).length, 2)
+  })
+
+  it('fails explicitly on incomplete scores, duplicate results and record read errors instead of showing zero records', async () => {
+    for (const failure of ['score', 'duplicate', 'database'] as const) {
+      const fake = fakeClient()
+      if (failure === 'score') fake.recordGames[0].away_total = null
+      if (failure === 'duplicate') fake.recordGames.push({ ...fake.recordGames[0] })
+      if (failure === 'database') fake.recordFailure.error = { message: 'record read failed', code: '57014' }
+      await assert.rejects(createSupabaseAnalyticsDataSource(fake.client).load(
+        { season: 2025, gameId: 42 }, 'matchup_preview',
+      ), failure === 'database' ? /record read failed/ : /duplicate or invalid result data/)
+    }
+  })
+
   it('defaults Week 4 to three regular-season appearances per team even with graded preseason games', async () => {
     const regular = [1, 2].flatMap((teamId) => Array.from({ length: 3 }, (_, index) => ({
       ...completedGame, game_id: teamId * 100 + index,

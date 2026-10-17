@@ -1,5 +1,5 @@
 import { buildAnalyticsSnapshot, type AnalyticsSnapshot, type AnalyticsSourceData } from '../server/analytics-core'
-import { MATCHUP_SECTIONS, type MatchupDraft } from '../server/matchup-report'
+import { matchupStatements, type MatchupDraft } from '../server/matchup-report'
 
 export const matchupSource: AnalyticsSourceData = {
   games: Array.from({ length: 4 }, (_, index) => ({
@@ -49,42 +49,50 @@ export const matchupSnapshot = buildAnalyticsSnapshot(
 )
 
 export function createMatchupDraft(snapshot: AnalyticsSnapshot = matchupSnapshot): MatchupDraft {
-  const entry = () => ({ text: 'These observations are descriptive, not predictive probabilities.', factIds: ['limitation.prediction'] })
-  const sections = {} as MatchupDraft['sections']
-  for (const id of Object.keys(MATCHUP_SECTIONS) as Array<keyof typeof MATCHUP_SECTIONS>) {
-    if (id === 'injuries') continue
-    sections[id] = { interpretation: entry(), summary: entry() }
-  }
+  const entry = () => ({ text: 'The supplied history describes prior performance, not certain future outcomes.', factIds: ['limitation.prediction'] })
   const target = snapshot.targetMatchup!
-  sections.injuries = { away: [], home: [] }
+  const injuries = {} as MatchupDraft['injuries']
   for (const side of ['away', 'home'] as const) {
     const team = target[`${side}Team`]
     const records = snapshot.currentInjuries.items.filter((injury) => injury.team_id === team.id)
     const record = records[0]
-    sections.injuries[side] = [{
+    injuries[side] = {
       text: record
         ? `${team.name} has ${records.length} supplied injury records; ${record.playerName} (${record.position ?? 'unknown position'}) is reported ${record.status ?? 'unknown'}.${snapshot.currentInjuries.truncated ? ' Counts cover a truncated snapshot.' : ''}`
         : `No current injury records were supplied for ${team.name}; this does not confirm that the team is healthy.`,
       factIds: [`injury-summary.${team.id}`, ...(record ? [`injury.${snapshot.currentInjuries.items.indexOf(record)}`] : [])],
-    }]
+    }
   }
-  return { sections, overall: [entry()] }
+  const hasHistory = snapshot.teamTrends.items.some((team) => team.games > 0)
+  const spreadAvailable = target.currentConsensusOdds.homeSpread != null && hasHistory
+  const totalAvailable = target.currentConsensusOdds.total != null && hasHistory
+  return {
+    summary: entry(), notes: [entry()], injuries,
+    predictions: {
+      spread: {
+        selection: spreadAvailable ? 'away' : 'unavailable',
+        reason: spreadAvailable ? {
+          text: 'The away team may cover based on its prior ATS results.',
+          factIds: ['matchup.spread', `team.${target.awayTeam.id}.all.ats`],
+        } : entry(),
+      },
+      total: {
+        selection: totalAvailable ? 'under' : 'unavailable',
+        reason: totalAvailable ? {
+          text: 'Prior scoring patterns suggest a possible under.',
+          factIds: ['matchup.total', `team.${target.awayTeam.id}.all.totals`],
+        } : entry(),
+      },
+    },
+  }
 }
 
 export function supportedMatchupVerdicts(draft: MatchupDraft): {
   verdicts: Array<{ statementId: string; verdict: 'supported' | 'unsupported' | 'unverified'; reason: string }>
 } {
   return {
-    verdicts: [
-      ...Object.keys(draft.sections).filter((id) => id !== 'injuries').flatMap((id) => ['interpretation', 'summary'].map((kind) => ({
-        statementId: `${id}.${kind}`, verdict: 'supported' as const, reason: 'The cited evidence supports this descriptive statement.',
-      }))),
-      ...(['away', 'home'] as const).flatMap((side) => draft.sections.injuries[side].map((_, index) => ({
-        statementId: `injuries.${side}.${index}`, verdict: 'supported' as const, reason: 'The cited team injury facts support this statement.',
-      }))),
-      ...draft.overall.map((_, index) => ({
-        statementId: `overall.${index}`, verdict: 'supported' as const, reason: 'The cited evidence supports this descriptive statement.',
-      })),
-    ],
+    verdicts: matchupStatements(draft, matchupSnapshot).map((item) => ({
+      statementId: item.id, verdict: 'supported', reason: 'The cited evidence supports this statement.',
+    })),
   }
 }

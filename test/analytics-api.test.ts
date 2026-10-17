@@ -10,6 +10,7 @@ import {
 } from '../server/analytics-api'
 import { LlamaClient } from '../server/llama-client'
 import { AnalyticsDatabaseError } from '../server/analytics-reads'
+import { AnalyticsTargetError } from '../server/analytics-service'
 import type { WeeklyAnalysisRun, WeeklyRunView } from '../server/weekly-analysis'
 import { isPickemAnalysis, readAnalysisStream, readPickemStream, readWeeklyAnalysisStream } from '../src/api/app-api'
 import { PickemError } from '../server/pickem-analysis'
@@ -152,6 +153,7 @@ function createMemoryStore() {
 function dependencies(llama: LlamaClient, store: AnalysisStore): AnalyticsApiDependencies {
   return {
     dataSource: { async load() { return emptySource } },
+    async refreshMatchupResults() { return { teams: 32, games: 272 } },
     llama,
     store,
     async loadMetadata(season) {
@@ -616,15 +618,19 @@ describe('analytics API contracts', () => {
 
   it('registers matchup previews and persists their preset-specific initial prompt', async () => {
     const draft = createMatchupDraft()
-    draft.sections.injuries.away[0] = { text: 'An uncited statement about an unavailable injury.', factIds: [] }
-    draft.sections.injuries.home[0] = { text: 'An invented player is out.', factIds: ['injury.999'] }
+    draft.injuries.away = { text: 'An uncited statement about an unavailable injury.', factIds: [] }
+    draft.injuries.home = { text: 'An invented player is out.', factIds: ['injury.999'] }
+    draft.predictions.spread.selection = 'unavailable'
+    draft.predictions.total.selection = 'unavailable'
     let modelCalls = 0
+    const order: string[] = []
     const modelUrl = await startServer(async (incoming, response) => {
       await new Promise<void>((resolve) => {
         incoming.on('data', () => {})
         incoming.on('end', resolve)
       })
       response.setHeader('Content-Type', 'application/json')
+      order.push('model')
       response.end(JSON.stringify({
         model: 'test-model',
         choices: [{ message: { content: JSON.stringify(++modelCalls === 1 ? draft : supportedMatchupVerdicts(draft)) }, finish_reason: 'stop' }],
@@ -632,8 +638,14 @@ describe('analytics API contracts', () => {
     })
     const memory = createMemoryStore()
     const deps = dependencies(llama(modelUrl), memory.store)
+    deps.refreshMatchupResults = async () => { order.push('refresh'); return { teams: 32, games: 272 } }
+    deps.store = {
+      ...memory.store,
+      async saveInitial(input) { order.push('save'); return memory.store.saveInitial(input) },
+    }
     deps.dataSource = {
       async load() {
+        order.push('snapshot')
         return {
           ...emptySource,
           targetMatchup: {
@@ -663,19 +675,63 @@ describe('analytics API contracts', () => {
     assert.equal(memory.getSession()?.messages[0].content, 'Generate a grounded pregame matchup preview.')
     assert.equal(memory.getSession()?.context.targetMatchup?.gameId, 42)
     assert.equal(modelCalls, 2)
+    assert.deepEqual(order, ['refresh', 'snapshot', 'model', 'model', 'save'])
     const content = memory.getSession()!.messages[1].content
-    assert.match(content, /^# Pregame Matchup Analysis/)
-    assert.match(content, /An uncited statement.*Unverified statement/)
-    assert.match(content, /An invented player is out.*Unsupported statement/)
-    assert.match(content, /1 unsupported and 1 unverified/)
+    assert.match(content, /^# Matchup Summary/)
+    assert.match(content, /An uncited statement/)
+    assert.match(content, /An invented player is out/)
+    assert.match(content, /local LLM may provide unsupported or incorrect facts/)
+    assert.doesNotMatch(content, /Unverified statement|Unsupported statement|Narrative warnings|Report basis|Summary of Uncertainty/)
     assert.match(content, /### Buffalo\n\n- An uncited statement/)
     assert.match(content, /### Arizona\n\n- An invented player/)
-    const injurySection = content.split('## Current Injuries\n\n')[1].split('## Key Observations & Caveats')[0]
+    const injurySection = content.split('## Current Injuries\n\n')[1]
     assert.doesNotMatch(injurySection, /First observed|Last observed|\| Team \| Player \|/)
-    assert.match(content, /## Overall Summary of Observations/)
+    assert.match(content, /## Predictions/)
     assert.doesNotMatch(content, /teamId|gameIds?|playerId|Game ID|injury\.999|injuries\.summary|Model check:|Sources:/)
     const loaded = await request(`/api/analytics/sessions/${sessionId}`, deps)
     assert.equal((await loaded.json() as { session: AnalysisSession }).session.messages[1].content, content)
+  })
+
+  it('does not read context, call the model or save after an unusable/failed matchup refresh', async (t) => {
+    for (const failure of ['error', 'empty', 'unconfigured'] as const) {
+      const memory = createMemoryStore()
+      const deps = dependencies(llama('http://unused.invalid'), memory.store)
+      let reads = 0
+      let calls = 0
+      deps.dataSource = { async load() { reads++; return emptySource } }
+      t.mock.method(deps.llama, 'completeMessages', async () => { calls++; throw new Error('Must not call model') })
+      deps.refreshMatchupResults = failure === 'unconfigured' ? undefined : async () => {
+        if (failure === 'error') throw new Error('Provider unavailable')
+        return { teams: 32, games: 0 }
+      }
+      const response = await request('/api/analytics/analyze', deps, 'POST', {
+        title: 'Preview', preset: 'matchup_preview', filters: { season: 2025, gameId: 42 },
+      })
+      assert.equal(response.status, 503)
+      assert.match(JSON.stringify(await response.json()), /matchup_refresh_failed/)
+      assert.equal(reads, 0)
+      assert.equal(calls, 0)
+      assert.equal(memory.getSession(), null)
+    }
+  })
+
+  it('validates before refreshing and rejects targets that became ineligible after refresh', async () => {
+    const memory = createMemoryStore()
+    const deps = dependencies(llama('http://unused.invalid'), memory.store)
+    let refreshed = 0
+    deps.refreshMatchupResults = async () => { refreshed++; return { teams: 32, games: 272 } }
+    const invalid = await request('/api/analytics/analyze', deps, 'POST', {
+      title: 'Preview', preset: 'matchup_preview', filters: { season: 2025 },
+    })
+    assert.equal(invalid.status, 400)
+    assert.equal(refreshed, 0)
+    deps.dataSource = { async load() { throw new AnalyticsTargetError('target_game_ineligible', 'Game is now completed.') } }
+    const completed = await request('/api/analytics/analyze', deps, 'POST', {
+      title: 'Preview', preset: 'matchup_preview', filters: { season: 2025, gameId: 42 },
+    })
+    assert.equal(completed.status, 409)
+    assert.equal(refreshed, 1)
+    assert.equal(memory.getSession(), null)
   })
 
   it('streams follow-ups and persists only completed exchanges', async () => {

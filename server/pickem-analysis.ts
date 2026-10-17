@@ -230,7 +230,9 @@ export function buildPickemEvidence(
       facts[`injuries.${team.id}.${index}`] = `${team.name}: ${injury.playerName}, ${injury.position ?? 'position unknown'}; reported ${injury.status ?? 'status unknown'}, ${injury.description ?? 'description unavailable'}; injury date ${injury.injury_date ?? 'unknown'}, last observed ${injury.last_seen_at ?? 'unknown'}. Not confirmed game-time availability.`
     })
     const standing = snapshot.standings.items.find((item) => item.team_id === team.id)
-    if (standing) facts[`standings.${team.id}`] = `${team.name}: current stored standings ${standing.won}-${standing.lost}-${standing.ties}, streak ${standing.streak ?? 'unknown'}. Not necessarily the same history scope as the completed-game sample.`
+    if (standing) facts[`standings.${team.id}`] = standing.recordBasis
+      ? `${team.name}: regular-season W-L-T ${standing.won}-${standing.lost}-${standing.ties}, calculated from completed results before target kickoff. Not necessarily the same history scope as the completed-game sample.`
+      : `${team.name}: current stored standings ${standing.won}-${standing.lost}-${standing.ties}, streak ${standing.streak ?? 'unknown'}. Not necessarily the same history scope as the completed-game sample.`
     snapshot.playerStats.items.filter((item) => item.team_id === team.id).slice(0, 12).forEach((stat, index) => {
       facts[`players.${team.id}.${index}`] = `${team.name}: ${stat.playerName} (${stat.position ?? 'position unknown'}), current season ${stat.stat_group}/${stat.stat_name}: ${stat.stat_value ?? 'unavailable'}.`
     })

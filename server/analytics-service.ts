@@ -335,6 +335,68 @@ async function loadStandings(client: SupabaseClient, season: number, teamIds: nu
   return (data ?? []) as AnalyticsStandingRow[]
 }
 
+type StandingGame = {
+  id: number
+  game_timestamp: number
+  away_team_id: number
+  home_team_id: number
+  away_total: number | null
+  home_total: number | null
+}
+
+async function loadMatchupStandings(
+  client: SupabaseClient, target: AnalyticsTargetMatchup, teamIds: number[], signal: AbortSignal,
+): Promise<AnalyticsStandingRow[]> {
+  const games = await fetchAllPages<StandingGame>(async (from, to) => {
+    const { data, error } = await client.from('games')
+      .select('id,game_timestamp,away_team_id,home_team_id,away_total,home_total')
+      .eq('season', target.season)
+      .eq('stage', 'Regular Season')
+      .in('status_short', ['FT', 'AOT'])
+      .lt('game_timestamp', target.kickoff.timestamp)
+      .or(`home_team_id.in.(${teamIds.join(',')}),away_team_id.in.(${teamIds.join(',')})`)
+      .order('game_timestamp')
+      .order('id')
+      .range(from, to)
+      .abortSignal(signal)
+    throwQueryError(error, 'Could not load completed regular-season results for team records')
+    return (data ?? []) as StandingGame[]
+  })
+  const seen = new Set<number>()
+  for (const game of games) {
+    if (seen.has(game.id) || game.away_team_id === game.home_team_id
+      || !Number.isFinite(game.game_timestamp)
+      || game.game_timestamp >= target.kickoff.timestamp
+      || ![game.away_total, game.home_total].every((score) =>
+        typeof score === 'number' && Number.isInteger(score) && score >= 0)) {
+      throw new AnalyticsDatabaseError('Could not calculate team records', {
+        message: `Completed game ${game.id} has duplicate or invalid result data.`,
+      })
+    }
+    seen.add(game.id)
+  }
+  return teamIds.map((teamId) => {
+    const results = games.filter((game) => game.away_team_id === teamId || game.home_team_id === teamId)
+    const margins = results.map((game) => game.home_team_id === teamId
+      ? game.home_total! - game.away_total! : game.away_total! - game.home_total!)
+    return {
+      team_id: teamId, conference: null, division: null, position: null, streak: null,
+      won: margins.filter((margin) => margin > 0).length,
+      lost: margins.filter((margin) => margin < 0).length,
+      ties: margins.filter((margin) => margin === 0).length,
+      points_for: results.reduce((sum, game) =>
+        sum + (game.home_team_id === teamId ? game.home_total! : game.away_total!), 0),
+      points_against: results.reduce((sum, game) =>
+        sum + (game.home_team_id === teamId ? game.away_total! : game.home_total!), 0),
+      recordBasis: {
+        source: 'completed_regular_season_results',
+        beforeKickoff: target.kickoff.timestamp,
+        latestGameTimestamp: results.length ? Math.max(...results.map((game) => game.game_timestamp)) : null,
+      },
+    }
+  })
+}
+
 async function loadInjuries(client: SupabaseClient, teamIds: number[], signal: AbortSignal) {
   if (!teamIds.length) return []
   return fetchAllPages<AnalyticsInjuryRow>(async (from, to) => {
@@ -451,7 +513,10 @@ export function createSupabaseAnalyticsDataSource(client: SupabaseClient): Analy
       const teamIds = targetTeamIds ?? selectedTeamIds(filters, games)
       const [teamStats, standings, injuries, playerStats] = await Promise.all([
         scope.read(`stats:${gameIds.join(',')}:${teamIds.join(',')}`, () => loadTeamStats(client, gameIds, teamIds, scope.signal)),
-        scope.read(`standings:${filters.season}:${teamIds.join(',')}`, () => loadStandings(client, filters.season, teamIds, scope.signal)),
+        targetMatchup
+          ? scope.read(`records:${filters.season}:${targetMatchup.kickoff.timestamp}:${teamIds.join(',')}`,
+              () => loadMatchupStandings(client, targetMatchup, teamIds, scope.signal))
+          : scope.read(`standings:${filters.season}:${teamIds.join(',')}`, () => loadStandings(client, filters.season, teamIds, scope.signal)),
         scope.read(`injuries:${teamIds.join(',')}`, () => loadInjuries(client, teamIds, scope.signal)),
         scope.read(`players-stats:${preset}:${filters.season}:${gameIds.join(',')}:${teamIds.join(',')}`, () => loadPlayerStats(client, preset, filters, gameIds, teamIds, scope.signal)),
       ])

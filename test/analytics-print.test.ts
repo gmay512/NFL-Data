@@ -45,6 +45,12 @@ describe('formatted analysis printing', () => {
     const button = await setup(() => {
       calls++
       const surface = document.querySelector('.analytics-print-root')!
+      assert.equal(surface.querySelector('h3')?.textContent, 'Matchup Summary: Dallas at Houston')
+      assert.equal(surface.querySelectorAll('table').length, 2)
+      assert.match(surface.querySelector('table')?.textContent ?? '', /ATSDallas to cover\+3/)
+      assert.match(surface.querySelector('table')?.textContent ?? '', /O\/UUnder48/)
+      assert.match(surface.textContent ?? '', /local LLM may provide unsupported or incorrect facts/)
+      assert.doesNotMatch(surface.textContent ?? '', /Report basis|Narrative warnings|Summary of Uncertainty|Overall Summary/)
       const heading = [...surface.querySelectorAll('h4')].find((item) => item.textContent === 'Current Injuries')!
       const awayHeading = heading.nextElementSibling!
       const awayBullets = awayHeading.nextElementSibling!

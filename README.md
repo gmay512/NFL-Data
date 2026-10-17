@@ -54,8 +54,9 @@ Then set:
 - `API_SPORTS_KEY`
 
 The analytics API requires `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
-It does not require API-Sports credentials when it is only reading data that
-has already been ingested.
+New matchup reports also require `API_SPORTS_KEY`: schedule/results are refreshed
+before generating their snapshot. Saved reports and other database-only analytics
+can still be read without API-Sports credentials.
 
 Optional ingest controls:
 
@@ -183,7 +184,7 @@ saved analysis sessions, and grounded model conversations. Calculations are
 performed by the app before a prompt is sent to the model. llama.cpp receives a
 bounded JSON fact catalog. Most reports select supported observations, which the
 application validates and renders. Pregame reports also include model-written
-narratives with explicit statement-level checks and warnings. It does not receive database credentials,
+narratives with internal statement-level checks and a local-LLM disclaimer. It does not receive database credentials,
 SQL access, or a tool that can change application data.
 
 Apply the analytics migrations before opening the page:
@@ -282,7 +283,9 @@ mean confirmed out. Injury dates, first/last observation dates, and report
 generation time are distinct; none confirms final game-day availability.
 Target odds are **stored current consensus**, distinct from historical closing
 lines. Reading them for a new report does not establish provider freshness or
-opening-line movement. Standings and player season totals are stored current
+opening-line movement. Matchup regular-season records are calculated from completed
+results before target kickoff; they are independent of the trend-history filters.
+Other presets' provider standings and player season totals remain stored current
 records, not reconstructed historical observations.
 
 Other Analytics presets and focused conversational follow-ups require structured model output
@@ -319,41 +322,54 @@ reconstructed or upgraded to a newly validated report by the display layer.
 
 ### Pregame matchup reports and printing
 
-New pregame matchup reports follow a fixed layout: a matchup summary,
-prior-performance tables, current injuries, and these five numbered observations:
-Home Spread Performance; Totals Performance; Offensive Efficiency & Turnovers;
-Missing/Ungraded Data; and Odds Context. Narrative sections include an interpretation
-and summary, followed by overall observations and a summary of uncertainty.
-Current Injuries instead shows **one to three local-model summary bullets per team**,
-grouped under the away and home team names, replacing the detailed injury table.
-These summarize supplied-record status counts and notable listed players or position
-groups. A team with no supplied injury records gets one missing-data bullet, not a
-claim that it is healthy. Counts cover supplied records only, not necessarily unique
-players or complete team totals; truncated injury data is disclosed.
-The application renders the tables directly from the saved source snapshot,
-including away/home splits, actual statistical values, missing values, and
-history-scope disclosures. Team-stat cells contain only values or `Unavailable`,
-not observation counts, eligible-game counts, sums, or source game IDs.
-Completed-game reviews and weekly suggestions keep
-their existing formats.
+New pregame matchup reports keep **Matchup Summary at the top**, followed by
+ATS/O-U predictions, a short local-LLM disclaimer, Team Standings, up to three key
+performance notes, and one brief injury bullet per team. Narrative fields are
+limited to 250 words in total, with smaller per-field limits. Repeated performance
+tables, interpretation/summary pairs, Report basis, Narrative warnings, and Summary
+of Uncertainty are no longer included. Detailed evidence remains in Grounding details.
 
-The local model writes short, structured interpretations and summaries citing
-catalog facts. Application checks flag unknown or out-of-section references,
+Each market uses the stored current consensus line, locked by the application,
+not a model-supplied line. Away ATS selections use the opposite of the home spread;
+zero is a pick'em. Missing spread and total lines are handled independently.
+A prediction is unavailable when its line or supporting history is missing, or
+the model finds the evidence insufficient. Predictions are uncertain model
+hypotheses, not verified outcomes or calibrated probabilities; these report
+predictions are not tracked Weekly Analysis bets.
+
+Before each new matchup report, the server refreshes schedule/results through
+API-Sports. Failed, empty, or unconfigured refreshes return an error without
+generating or saving a report. Team Standings are calculated from **all completed
+regular-season results before target kickoff**, including overtime and ties,
+independent of week/stage trend filters, missing odds, box scores, and truncated
+detail lists. Missing final scores cause an explicit error rather than a false
+zero record. Stale provider ranks and streaks are not displayed. Results-through
+kickoff timestamps describe included games, not proof of live provider freshness;
+API-Sports may itself publish a result late.
+
+Injuries summarize supplied statuses and notable listed players. A team without
+records gets a missing-data statement, not a claim that it is healthy. Counts cover
+supplied records only, not complete rosters, and truncation must be disclosed.
+Completed-game reviews, Weekly Analysis, and Pickem keep their existing formats.
+
+The local model writes short, structured summaries and prediction reasons citing
+catalog facts. Internal application checks identify unknown or out-of-section references,
 unsupported numeric values and identities, and permit calculated differences
 only for compatible finite metrics. A separate, batched local-model pass
 checks each entire statement against its cited evidence, including units,
 denominators, time/location/stage scope, and injury/market terminology.
 **Model verification is an additional check, not a guarantee of correctness.**
 
-Unsupported statements and statements that cannot be verified remain in the
-report with explicit labels and reader-friendly reasons. Internal team, game,
+The report displays one disclaimer: **The local LLM may provide unsupported or
+incorrect facts. Predictions are uncertain and are not guarantees.** Unsupported
+or unverified prose may remain, but verification labels and reasons are kept in
+server diagnostics rather than repeated in the report. Internal team, game,
 player, fact, and statement IDs, routine model-check text, and source lists are
 not displayed in new matchup reports or new matchup follow-up answers. IDs and
 metric-specific samples remain available internally for grounding and validation.
-Warnings do not
-prevent saving an otherwise well-formed analysis and are not endorsed as
-source facts. A failed or incomplete verification pass is disclosed as
-unverified rather than silently accepted. Malformed or unfinished narrative
+Internal check failures do not prevent saving an otherwise well-formed analysis
+and are not endorsed as source facts. A failed or incomplete verification pass
+is explicitly logged on the server. Malformed or unfinished narrative
 generation, cancellation, source-read failures, and save failures still report
 errors. Both model passes use the configured local service and its existing
 request/context/output limits; generation and verification usage are combined
@@ -361,7 +377,7 @@ when available.
 
 The existing generation and verification passes each receive their own
 `LLM_TIMEOUT_MS` deadline, now defaulting to `300000` (5 minutes per call).
-The injury summaries do not add model calls. Explicit environment overrides
+Compact summaries and predictions do not add model calls. Explicit environment overrides
 still take precedence; set `LLM_TIMEOUT_MS` to change the shared local-model
 deadline. Health checks remain capped at 5 seconds, and user cancellation still
 interrupts requests. Longer deadlines allow slower responses but do not guarantee
@@ -376,7 +392,7 @@ loaded conversation page, earlier message pages are fetched on demand; loading
 failures are shown rather than printing a different reply. The dashboard preview
 and individual saved matchup replies also have print controls for their selected
 content. These actions open the browser print dialog and print rendered Markdown
-headings, tables, interpretations, summaries, and verification warnings,
+headings, tables, summary notes, predictions, and the local-LLM disclaimer,
 without navigation, controls, other messages, or
 raw grounding JSON. The browser's Save as PDF option can also be used.
 Printing is independent of the page's light/dark theme and does not change the

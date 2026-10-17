@@ -3,9 +3,10 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { selectCurrentSeason } from '../src/lib/season'
 import { readJsonBody, sendJson } from './api/request'
 import { getIngestConfig, getRequiredEnv, type AppEnv } from './config'
-import { refreshGamesByIds, refreshGameTeamStatsByGameId } from './ingest-core'
+import { refreshGamesByIds, refreshGameTeamStatsByGameId, refreshSeasonSchedule } from './ingest-core'
 import {
   AnalyticsValidationError,
+  validateAnalyticsFilters,
   type AnalyticsPreset,
 } from './analytics-core'
 import {
@@ -51,6 +52,7 @@ export type AnalyticsApiDependencies = {
   llama: LlamaClient
   store: AnalysisStore
   loadMetadata: (season?: number, options?: { signal?: AbortSignal }) => Promise<AnalyticsFilterMetadata>
+  refreshMatchupResults?: (season: number, signal: AbortSignal) => Promise<{ teams: number; games: number }>
   pickem?: Pick<PickemService, 'weeks' | 'week' | 'analyze' | 'grade'>
   weekly?: Pick<
     WeeklyAnalysisService,
@@ -245,6 +247,9 @@ function createDependencies(env: AppEnv) {
     llama,
     store: createAnalysisStore(client),
     loadMetadata: (season?: number, options?: { signal?: AbortSignal }) => loadAnalyticsMetadata(client, season, options),
+    refreshMatchupResults: (season: number, signal: AbortSignal) => refreshSeasonSchedule({
+      ...getIngestConfig(env), beforeApiRequest: () => signal.throwIfAborted(),
+    }, season),
     pickem: new PickemService(
       client, dataSource, llama, createPickemStore(client),
       (week, progress, signal) => refreshPickemSources(client, getIngestConfig(env), week, progress, signal),
@@ -625,7 +630,22 @@ export async function handleAnalyticsApiRequest(
     const body = await readJsonBody(request)
     const preset = parsePreset(body.preset)
     const title = parseTitle(body.title)
-    const snapshot = await generateAnalyticsSnapshot(dependencies.dataSource, preset, body.filters, { signal })
+    const filters = validateAnalyticsFilters(preset, body.filters)
+    if (preset === 'matchup_preview') {
+      try {
+        if (!dependencies.refreshMatchupResults) throw new Error('Matchup result refresh is not configured.')
+        const refreshed = await dependencies.refreshMatchupResults(filters.season, signal)
+        if (![refreshed.teams, refreshed.games].every((count) => Number.isInteger(count) && count > 0)) {
+          throw new Error('Schedule/results refresh returned no usable teams or games.')
+        }
+      } catch (error) {
+        signal.throwIfAborted()
+        throw new AnalyticsApiError(503, 'matchup_refresh_failed',
+          `Could not refresh matchup results: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      signal.throwIfAborted()
+    }
+    const snapshot = await generateAnalyticsSnapshot(dependencies.dataSource, preset, filters, { signal })
     const completion = preset === 'matchup_preview'
       ? await generateMatchupReport(dependencies.llama, snapshot, signal)
       : await dependencies.llama.complete(snapshot, {}, signal)

@@ -62,6 +62,11 @@ export type AnalyticsStandingRow = {
   points_for: number | null
   points_against: number | null
   streak: string | null
+  recordBasis?: {
+    source: 'completed_regular_season_results'
+    beforeKickoff: number
+    latestGameTimestamp: number | null
+  }
 }
 
 export type AnalyticsInjuryRow = {
