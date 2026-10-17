@@ -156,6 +156,25 @@ describe('safe production nginx synchronization', () => {
 })
 
 describe('deployment nginx drift guard', () => {
+  it('deploys the reserved model endpoint by default while preserving local and shell overrides', () => {
+    const cases = [
+      { local: '', override: '', expected: 'http://192.168.4.39:8089' },
+      { local: 'http://llm.lan:8089', override: '', expected: 'http://llm.lan:8089' },
+      { local: '', override: 'http://override.lan:8090', expected: 'http://override.lan:8090' },
+      { local: 'http://llm.lan:8089', override: 'http://override.lan:8090', expected: 'http://override.lan:8090' },
+    ]
+    for (const { local, override, expected } of cases) {
+      fixture(({ root, invoke, target }) => {
+        writeFileSync(target, desired)
+        writeFileSync(path.join(root, '.env.local'), `API_SPORTS_KEY=test-key\nLLM_BASE_URL=${local}\n`)
+        const result = invoke('deploy.sh', [], { LLM_BASE_URL: override })
+        assert.equal(result.status, 0, String(result.stderr))
+        const environment = readFileSync(path.join(root, 'deploy/.env.production'), 'utf8')
+        assert.equal(environment.match(/^LLM_BASE_URL=(.*)$/m)?.[1], expected)
+      })
+    }
+  })
+
   it('deploys the shared five-minute model timeout by default while preserving explicit overrides', () => {
     for (const override of ['', '120000', '600000']) {
       fixture(({ root, invoke, target }) => {

@@ -613,16 +613,16 @@ and structured failure codes, without recording model context or messages.
 The production topology uses:
 
 - application host: `192.168.4.237`;
-- llama.cpp host: `192.168.4.46`;
-- private model endpoint: `http://192.168.4.46:8089`.
+- llama.cpp host: `192.168.4.39`;
+- private model endpoint: `http://192.168.4.39:8089`.
 
-Reserve `192.168.4.46` for the LLM workstation's network interface in the
-router/DHCP server, or use a stable LAN hostname. The current address works, but
-this application configuration does not create a DHCP reservation. If the
-address changes, update `LLM_BASE_URL` and redeploy; a running model on a new
-address cannot be reached through an old configured endpoint.
+The router now reserves `192.168.4.39` for the LLM workstation's network
+interface. This application configuration does not create a DHCP reservation.
+If the address changes, update `LLM_BASE_URL` and recreate the app container;
+a running model on a new address cannot be reached through an old configured
+endpoint.
 
-On `192.168.4.46`, llama.cpp needs one IPv4 listener for both loopback and LAN
+On `192.168.4.39`, llama.cpp needs one IPv4 listener for both loopback and LAN
 requests. An equivalent manual launch is:
 
 ```bash
@@ -637,13 +637,13 @@ llama-server \
 Binding to `127.0.0.1` would make the model unreachable from production.
 Binding to `0.0.0.0` lets local clients continue using
 `http://127.0.0.1:8089` while production uses
-`http://192.168.4.46:8089`. Because it listens on every IPv4 interface, keep
+`http://192.168.4.39:8089`. Because it listens on every IPv4 interface, keep
 UFW enabled and permit only the application host:
 
 ```bash
 sudo ufw allow proto tcp \
   from 192.168.4.237 \
-  to 192.168.4.46 port 8089 \
+  to 192.168.4.39 port 8089 \
   comment 'NFL analytics llama.cpp'
 sudo ufw status numbered
 ```
@@ -656,7 +656,7 @@ not the browser, is the LLM client.
 Set the endpoint in `.env.local` before deploying:
 
 ```text
-LLM_BASE_URL=http://192.168.4.46:8089
+LLM_BASE_URL=http://192.168.4.39:8089
 LLM_MODEL=qwen3-coder-next
 ```
 
@@ -666,13 +666,26 @@ precedence, and the deployment-specific fallback is the remote endpoint above.
 The deployment timeout fallback matches the application's five-minute
 per-call default (`LLM_TIMEOUT_MS=300000`); explicit settings still win.
 
+For an endpoint-only production update, change only `LLM_BASE_URL` in
+`/home/glenn/srv/nfl-data/deploy/.env.production` on the application host,
+preserving its other settings and mode `0600`. From `/home/glenn/srv/nfl-data`,
+apply it without rebuilding or pulling an image:
+
+```bash
+docker compose --env-file deploy/.env.production -f deploy/docker-compose.yml \
+  up -d --no-build --pull never --no-deps --force-recreate app
+```
+
+A plain container restart does not reload the environment file. Keep the local
+deployment setting aligned so the next full deployment preserves the endpoint.
+
 After starting llama.cpp, verify the route from the application host and from
 inside the app container:
 
 ```bash
-curl --fail http://192.168.4.46:8089/v1/models
+curl --fail http://192.168.4.39:8089/v1/models
 docker exec nfl-data-app node -e \
-  "fetch('http://192.168.4.46:8089/v1/models').then(r=>{if(!r.ok)process.exit(1);return r.text()}).then(console.log).catch(()=>process.exit(1))"
+  "fetch('http://192.168.4.39:8089/v1/models').then(r=>{if(!r.ok)process.exit(1);return r.text()}).then(console.log).catch(()=>process.exit(1))"
 curl --fail http://127.0.0.1:3000/api/analytics/llm-health
 ```
 
