@@ -15,10 +15,10 @@ export const MATCHUP_SECTIONS = {
   injuries: 'Current Injuries',
 } as const
 export const MATCHUP_DISCLAIMER = 'The local LLM may provide unsupported or incorrect facts. Predictions are uncertain and are not guarantees.'
-export const MAX_MATCHUP_NARRATIVE_WORDS = 250
+export const MATCHUP_CITATION_NOTE = 'Required fact citations are missing or incomplete.'
 
 type TeamSide = 'away' | 'home'
-type Statement = { text: string; factIds: string[] }
+type Statement = { text: string; factIds: string[]; citationIssue?: true; unavailable?: true }
 export type MatchupDraft = {
   summary: Statement
   notes: Statement[]
@@ -33,7 +33,6 @@ type Verdict = { verdict: 'supported' | 'unsupported' | 'unverified'; reason: st
 type ReportStatement = Statement & { id: string; section: SectionId; teamId?: number }
 const teamSides: TeamSide[] = ['away', 'home']
 const markets = ['spread', 'total'] as const
-const wordCount = (text: string) => text.trim().split(/\s+/).length
 
 function object(value: unknown, keys: string[], label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -62,16 +61,46 @@ function boundedText(value: unknown, limit: number, label: string) {
   return value.trim()
 }
 
-function statement(value: unknown, maxWords: number): Statement {
-  const parsed = object(value, ['text', 'factIds'], 'Narrative statement')
-  const text = boundedText(parsed.text, 350, 'Narrative text')
-  if (wordCount(text) > maxWords) throw new AnalyticsReportError(`Narrative text exceeds ${maxWords} words.`)
-  if (!Array.isArray(parsed.factIds) || parsed.factIds.length > 4
-    || parsed.factIds.some((id) => typeof id !== 'string' || !id.length || id.length > 100)
-    || new Set(parsed.factIds).size !== parsed.factIds.length) {
-    throw new AnalyticsReportError('Narrative statements require up to four distinct source fact IDs.')
+function recovery(field: string, reason: string) {
+  console.warn('[Matchup report] Recovered model output:', { field, reason })
+}
+
+function modelObject(value: unknown, keys: string[], field: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    recovery(field, 'The expected object was missing or malformed.')
+    return {}
   }
-  return { text, factIds: parsed.factIds as string[] }
+  const parsed = value as Record<string, unknown>
+  if (Object.keys(parsed).some((key) => !keys.includes(key))) {
+    recovery(field, 'Ignored unexpected fields; only application-recognized fields are used.')
+  }
+  return parsed
+}
+
+function unavailableStatement(field: string, text: string): Statement {
+  recovery(field, text)
+  return { text, factIds: [], unavailable: true }
+}
+
+function statement(value: unknown, field: string, unavailableText: string): Statement {
+  if (typeof value === 'string') {
+    recovery(field, 'Accepted plain narrative text without citation metadata.')
+  }
+  const parsed: Record<string, unknown> = typeof value === 'string'
+    ? { text: value } : modelObject(value, ['text', 'factIds'], field)
+  if (typeof parsed.text !== 'string' || !parsed.text.trim()) {
+    return unavailableStatement(field, unavailableText)
+  }
+  const suppliedIds = Array.isArray(parsed.factIds) ? parsed.factIds
+    : typeof parsed.factIds === 'string' && parsed.factIds.trim() ? [parsed.factIds] : []
+  const validIds = suppliedIds.filter((id): id is string => typeof id === 'string' && !!id.trim())
+    .map((id) => id.trim())
+  const citationIssue = !Array.isArray(parsed.factIds) || validIds.length !== suppliedIds.length
+  const factIds = [...new Set(validIds)]
+  if (citationIssue) recovery(field, 'Citation metadata was missing or malformed; retained usable references only.')
+  if (factIds.length !== validIds.length) recovery(field, 'Deduplicated citation references.')
+  if (factIds.length > 4) recovery(field, 'Retained additional supplied citations beyond the requested four.')
+  return { text: parsed.text.trim(), factIds, ...(citationIssue ? { citationIssue: true } : {}) }
 }
 
 function hasHistory(snapshot: AnalyticsSnapshot) {
@@ -89,7 +118,7 @@ function marketLine(snapshot: AnalyticsSnapshot, market: typeof markets[number])
 
 export function matchupStatements(draft: MatchupDraft, snapshot: AnalyticsSnapshot): ReportStatement[] {
   const target = snapshot.targetMatchup!
-  return [
+  const items: ReportStatement[] = [
     { ...draft.summary, id: 'summary', section: 'summary' },
     ...draft.notes.map((item, index) => ({ ...item, id: `notes.${index}`, section: 'notes' as const })),
     ...teamSides.map((side) => ({
@@ -99,50 +128,59 @@ export function matchupStatements(draft: MatchupDraft, snapshot: AnalyticsSnapsh
       ...draft.predictions[market].reason, id: `predictions.${market}`, section: market,
     })),
   ]
+  return items.filter((item) => !item.unavailable)
 }
 
 export function parseMatchupDraft(content: string, finishReason: string | null, snapshot: AnalyticsSnapshot): MatchupDraft {
   if (!snapshot.targetMatchup) throw new AnalyticsReportError('The pregame report requires a target matchup.')
-  const root = object(parseJson(content, finishReason), ['summary', 'notes', 'injuries', 'predictions'], 'Matchup draft')
-  if (!Array.isArray(root.notes) || !root.notes.length || root.notes.length > 3) {
-    throw new AnalyticsReportError('The matchup requires one to three key performance notes.')
+  const value = parseJson(content, finishReason)
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new AnalyticsReportError('The matchup draft must be a structured JSON object.')
   }
-  const injuries = object(root.injuries, teamSides, 'Team injury summaries')
-  const predictions = object(root.predictions, [...markets], 'Matchup predictions')
+  const root = modelObject(value, ['summary', 'notes', 'injuries', 'predictions'], 'matchup')
+  const injuries = modelObject(root.injuries, teamSides, 'injuries')
+  const predictions = modelObject(root.predictions, [...markets], 'predictions')
+  const readStatement = (value: unknown, field: string, label: string) =>
+    statement(value, field, `${label} unavailable: the model did not provide usable text.`)
   const parsePrediction = <T extends string>(market: typeof markets[number], selections: readonly T[]) => {
-    const prediction = object(predictions[market], ['selection', 'reason'], `${market} prediction`)
+    const field = `predictions.${market}`
+    const prediction = modelObject(predictions[market], ['selection', 'reason'], field)
     const line = marketLine(snapshot, market)
-    if (typeof prediction.selection !== 'string'
-      || ![...selections, 'unavailable'].includes(prediction.selection)) {
-      throw new AnalyticsReportError(`Invalid ${market} prediction selection.`)
+    const rawSelection = typeof prediction.selection === 'string' ? prediction.selection.trim().toLowerCase() : null
+    const selected = selections.find((selection) => selection === rawSelection)
+    let reason = readStatement(prediction.reason, `${field}.reason`, 'Prediction reason')
+    if (selected == null && rawSelection !== 'unavailable') {
+      reason = unavailableStatement(field, 'Prediction unavailable: the model returned an invalid or missing selection.')
+    } else if (selected != null && (line == null || !hasHistory(snapshot))) {
+      recovery(field, 'The selection cannot be used without a consensus line and supporting history.')
     }
-    const selection = prediction.selection as T | 'unavailable'
-    const reason = statement(prediction.reason, 25)
-    if (selection !== 'unavailable') {
-      if (line == null || !hasHistory(snapshot)) {
-        throw new AnalyticsReportError(`The ${market} prediction requires a consensus line and supporting history.`)
-      }
-      const facts = buildAnalyticsFacts(snapshot).facts
-      if (!reason.factIds.includes(`matchup.${market}`)
-        || reason.factIds.some((id) => !facts.some((fact) => fact.id === id && relevant(fact, market)))
-        || !reason.factIds.some((id) => facts.some((fact) => fact.id === id
-          && ['team', 'statistics', 'standings'].includes(fact.section)))) {
-        throw new AnalyticsReportError(`The ${market} prediction requires its market fact and supporting performance facts.`)
-      }
+    if (typeof prediction.selection === 'string' && rawSelection !== prediction.selection) {
+      recovery(field, 'Normalized selection capitalization or surrounding whitespace.')
     }
+    const selection: T | 'unavailable' = selected != null && !reason.unavailable && line != null && hasHistory(snapshot)
+      ? selected : 'unavailable'
     return { selection, reason }
   }
+  const notes = Array.isArray(root.notes)
+    ? root.notes.map((note, index) => readStatement(note, `notes.${index}`, 'Performance note'))
+      .filter((note) => !note.unavailable)
+    : []
+  if (notes.length > 3) recovery('notes', 'Retained additional usable performance notes beyond the requested three.')
+  if (!notes.length) notes.push(unavailableStatement('notes', 'Key performance notes unavailable: the model did not provide usable notes.'))
   const draft: MatchupDraft = {
-    summary: statement(root.summary, 50),
-    notes: root.notes.map((note) => statement(note, 25)),
-    injuries: { away: statement(injuries.away, 30), home: statement(injuries.home, 30) },
+    summary: readStatement(root.summary, 'summary', 'Matchup summary'),
+    notes,
+    injuries: {
+      away: readStatement(injuries.away, 'injuries.away', 'Injury summary'),
+      home: readStatement(injuries.home, 'injuries.home', 'Injury summary'),
+    },
     predictions: {
       spread: parsePrediction('spread', teamSides),
       total: parsePrediction('total', ['over', 'under'] as const),
     },
   }
-  if (matchupStatements(draft, snapshot).reduce((sum, item) => sum + wordCount(item.text), 0) > MAX_MATCHUP_NARRATIVE_WORDS) {
-    throw new AnalyticsReportError('The matchup narrative exceeds the report word limit.')
+  if (draft.summary.unavailable && markets.every((market) => draft.predictions[market].reason.unavailable)) {
+    throw new AnalyticsReportError('The model did not provide a usable matchup summary or prediction.')
   }
   return draft
 }
@@ -159,6 +197,22 @@ function injuryTeamFact(fact: AnalyticsFact, teamId: number) {
     || (fact.section === 'limitations' && (fact.teamId == null || fact.teamId === teamId))
 }
 
+function predictionCitationIssues(reason: Statement, market: typeof markets[number], facts: AnalyticsFact[]) {
+  const byId = new Map(facts.map((fact) => [fact.id, fact]))
+  const issues: string[] = []
+  if (reason.citationIssue) issues.push('Citation metadata was missing or malformed.')
+  if (!reason.factIds.includes(`matchup.${market}`)) issues.push('The required market fact was not cited.')
+  if (!reason.factIds.some((id) => {
+    const fact = byId.get(id)
+    return fact != null && relevant(fact, market) && ['team', 'statistics', 'standings'].includes(fact.section)
+  })) issues.push('Relevant supporting performance facts were not cited.')
+  if (reason.factIds.some((id) => {
+    const fact = byId.get(id)
+    return !fact || !relevant(fact, market)
+  })) issues.push('Some citations are unknown or outside the prediction scope.')
+  return issues
+}
+
 function responseFormat(name: string, schema: Record<string, unknown>): LlamaResponseFormat {
   return { type: 'json_schema', json_schema: { name, strict: true, schema } }
 }
@@ -169,7 +223,7 @@ export function buildMatchupDraftSchema(facts: AnalyticsFact[], snapshot: Analyt
   const sourceStatement = (ids: string[]) => ({
     type: 'object',
     properties: {
-      text: { type: 'string', minLength: 1, maxLength: 350 },
+      text: { type: 'string', minLength: 1 },
       factIds: { type: 'array', maxItems: 4, uniqueItems: true, items: { type: 'string', enum: ids } },
     },
     required: ['text', 'factIds'], additionalProperties: false,
@@ -215,6 +269,7 @@ function numericTokens(text: string) {
 }
 
 export function checkMatchupStatement(item: ReportStatement, facts: AnalyticsFact[]): Verdict | null {
+  if (item.citationIssue) return { verdict: 'unverified', reason: 'Citation metadata was missing or malformed.' }
   if (!item.factIds.length) return { verdict: 'unverified', reason: 'No source facts were cited.' }
   const byId = new Map(facts.map((fact) => [fact.id, fact]))
   const cited: AnalyticsFact[] = []
@@ -306,8 +361,15 @@ export function renderMatchupReport(snapshot: AnalyticsSnapshot, draft: MatchupD
     } else if (available) {
       selection = prediction.selection === 'over' ? 'Over' : 'Under'
     }
-    const reason = line == null ? 'No current consensus line is available.'
+    let reason = line == null ? 'No current consensus line is available.'
       : !hasHistory(snapshot) ? 'No supporting completed-game history is available.' : prediction.reason.text
+    if (available) {
+      const citationIssues = predictionCitationIssues(prediction.reason, market, facts)
+      if (citationIssues.length) {
+        console.warn('[Matchup report] Incomplete prediction citations:', { field: `predictions.${market}`, issues: citationIssues })
+        reason = `${reason} Note: ${MATCHUP_CITATION_NOTE}`
+      }
+    }
     return [market === 'spread' ? 'ATS' : 'O/U', selection, shownLine, reason]
   })
   const standings = teamSides.map((side) => {
@@ -354,15 +416,15 @@ export async function generateMatchupReport(
     { role: 'system', content: ANALYTICS_SOURCE_GROUNDING_PROMPT },
     { role: 'user', content: [
       'Write a compact pregame matchup summary with ATS and O/U predictions. Return only JSON matching the supplied schema.',
-      'Summary: at most two short sentences and 50 words. Notes: one to three distinct performance notes, at most 25 words each.',
-      'Injuries: exactly one plain-text bullet per away/home team, at most 30 words each. Summarize supplied statuses and notable listed players, not a player-by-player list.',
+      'Prefer a concise summary of a few sentences and one to three distinct, brief performance notes. Avoid repetition; editorial length is guidance, not an acceptance requirement.',
+      'Injuries: exactly one brief plain-text bullet per away/home team. Summarize supplied statuses and notable listed players, not a player-by-player list.',
       'When injury records are missing, say records were not supplied, not that the team is healthy. Questionable is not confirmed out. Counts cover supplied records only; disclose truncation. Do not infer player importance or matchup impact.',
-      'Predictions: select home/away ATS and over/under O/U separately, with a reason of at most 25 words each. Predictions are uncertain hypotheses, not established facts or calibrated probabilities.',
+      'Predictions: select home/away ATS and over/under O/U separately, with a concise reason each. Predictions are uncertain hypotheses, not established facts or calibrated probabilities.',
       'Use unavailable when the market line is missing, there is no supporting history, or evidence is insufficient. Never invent a line, score projection, confidence percentage, or guarantee.',
       'For an available prediction, cite its matchup.spread or matchup.total fact AND at least one supporting team/statistics/standings fact in reason.factIds.',
       'All factual assertions in prediction reasons and other prose must follow from cited facts. Do not treat the prediction itself as a fact.',
       'Cite up to four relevant catalog fact IDs per statement. Use names, not internal IDs or references in text. Do not add warnings, headings, formatting, or repeated conclusions.',
-      'The application supplies market lines, team records, formatting, and a local-LLM disclaimer. Use at most 250 words across all narrative fields.',
+      'The application supplies market lines, team records, formatting, and a local-LLM disclaimer.',
       'Compare teams only using identical comparisonKey and units with finite values. Do not invent scope, rankings, line movement, freshness, injuries, or metrics.',
       JSON.stringify({
         injuryTeams: { away: snapshot.targetMatchup.awayTeam, home: snapshot.targetMatchup.homeTeam },

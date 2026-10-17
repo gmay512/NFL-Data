@@ -323,9 +323,11 @@ reconstructed or upgraded to a newly validated report by the display layer.
 ### Pregame matchup reports and printing
 
 New pregame matchup reports keep **Matchup Summary at the top**, followed by
-ATS/O-U predictions, a short local-LLM disclaimer, Team Standings, up to three key
-performance notes, and one brief injury bullet per team. Narrative fields are
-limited to 250 words in total, with smaller per-field limits. Repeated performance
+ATS/O-U predictions, a short local-LLM disclaimer, Team Standings, key performance
+notes, and one brief injury bullet per team. The model is asked for a concise
+summary and a few short notes/reasons, but editorial word counts and small
+per-field character limits do not reject or truncate usable analysis. Existing
+model context/output budgets and request deadlines still apply. Repeated performance
 tables, interpretation/summary pairs, Report basis, Narrative warnings, and Summary
 of Uncertainty are no longer included. Detailed evidence remains in Grounding details.
 
@@ -336,6 +338,23 @@ A prediction is unavailable when its line or supporting history is missing, or
 the model finds the evidence insufficient. Predictions are uncertain model
 hypotheses, not verified outcomes or calibrated probabilities; these report
 predictions are not tracked Weekly Analysis bets.
+
+Valid predictions are retained when required citations are missing or incomplete.
+The affected prediction's reason includes **Required fact citations are missing
+or incomplete.** Detailed citation defects are logged internally; this note does
+not establish that the prediction is supported. Complete citations do not receive
+the note. The application does not invent citations, infer a selection, or accept
+a model-supplied betting line to repair a report.
+
+Recoverable model-output defects no longer discard the entire analysis. Citation
+references are deduplicated, extra fields are ignored, and missing notes/injury
+summaries are explicitly labeled unavailable. An invalid selection or unusable
+prediction reason affects only that market; the remaining report is preserved.
+Missing actual lines/history also make only the affected prediction unavailable.
+Recoveries are logged with their section/field. Unreadable or genuinely unfinished
+generation, a response without usable summary/prediction content, cancellation,
+source/model-service failures, and save failures still return explicit errors.
+No additional model calls or automatic repair retries are added.
 
 Before each new matchup report, the server refreshes schedule/results through
 API-Sports. Failed, empty, or unconfigured refreshes return an error without
@@ -362,16 +381,18 @@ denominators, time/location/stage scope, and injury/market terminology.
 
 The report displays one disclaimer: **The local LLM may provide unsupported or
 incorrect facts. Predictions are uncertain and are not guarantees.** Unsupported
-or unverified prose may remain, but verification labels and reasons are kept in
-server diagnostics rather than repeated in the report. Internal team, game,
+or unverified prose may remain, but detailed verification labels and reasons are
+kept in server diagnostics rather than repeated in the report. The short
+per-prediction citation note described above remains visible when applicable.
+Internal team, game,
 player, fact, and statement IDs, routine model-check text, and source lists are
 not displayed in new matchup reports or new matchup follow-up answers. IDs and
 metric-specific samples remain available internally for grounding and validation.
 Internal check failures do not prevent saving an otherwise well-formed analysis
 and are not endorsed as source facts. A failed or incomplete verification pass
-is explicitly logged on the server. Malformed or unfinished narrative
-generation, cancellation, source-read failures, and save failures still report
-errors. Both model passes use the configured local service and its existing
+is explicitly logged on the server. Unusable or unfinished narrative generation,
+cancellation, source-read failures, and save failures still report errors.
+Both model passes use the configured local service and its existing
 request/context/output limits; generation and verification usage are combined
 when available.
 

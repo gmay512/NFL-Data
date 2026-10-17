@@ -16,7 +16,8 @@ import { isPickemAnalysis, readAnalysisStream, readPickemStream, readWeeklyAnaly
 import { PickemError } from '../server/pickem-analysis'
 import { pickemAnalysis, pickemView, pickemWeek, pickemWeeks } from './pickem-fixtures'
 import { renderAnalyticsReport } from '../server/analytics-report'
-import { createMatchupDraft, matchupSnapshot, supportedMatchupVerdicts } from './matchup-report-fixtures'
+import { createMatchupDraft, matchupSnapshot, matchupSource, supportedMatchupVerdicts } from './matchup-report-fixtures'
+import { MATCHUP_CITATION_NOTE, parseMatchupDraft } from '../server/matchup-report'
 import type {
   AnalysisSession,
   AnalysisSessionSummary,
@@ -712,6 +713,56 @@ describe('analytics API contracts', () => {
       assert.equal(reads, 0)
       assert.equal(calls, 0)
       assert.equal(memory.getSession(), null)
+    }
+  })
+
+  it('persists recovered long/citation-incomplete matchup reports and preserves real save failures', async (t) => {
+    t.mock.method(console, 'warn', () => {})
+    const draft = createMatchupDraft()
+    const longText = 'The supplied history can inform a tentative matchup prediction without establishing certainty about the next result. '.repeat(8).trim()
+    const output = {
+      ...draft,
+      summary: { ...draft.summary, text: longText },
+      notes: [],
+      injuries: { away: draft.injuries.away },
+      extra: 'Ignore this field.',
+      predictions: {
+        ...draft.predictions,
+        spread: { ...draft.predictions.spread, line: -99, reason: { text: longText } },
+      },
+    }
+    const normalized = parseMatchupDraft(JSON.stringify(output), 'stop', matchupSnapshot)
+    for (const failSave of [false, true]) {
+      const memory = createMemoryStore()
+      const deps = dependencies(llama('http://unused.invalid'), memory.store)
+      deps.dataSource = { async load() { return matchupSource } }
+      let calls = 0
+      t.mock.method(deps.llama, 'completeMessages', async () => ({
+        content: JSON.stringify(++calls === 1 ? output : supportedMatchupVerdicts(normalized)),
+        model: 'test-model', finishReason: 'stop', usage: null, latencyMs: 1,
+      }))
+      if (failSave) deps.store = { ...memory.store, async saveInitial() { throw new Error('Database save failed.') } }
+      const response = await request('/api/analytics/analyze', deps, 'POST', {
+        title: 'Recovered matchup', preset: 'matchup_preview', filters: { season: 2026, gameId: 21570 },
+      })
+      assert.equal(calls, 2)
+      if (failSave) {
+        assert.equal(response.status, 500)
+        assert.equal(memory.getSession(), null)
+        assert.match(await response.text(), /Database save failed/)
+      } else {
+        assert.equal(response.status, 201)
+        const report = memory.getSession()!.messages[1].content
+        assert(report.includes(longText))
+        assert(report.includes(MATCHUP_CITATION_NOTE))
+        assert.match(report, /\| ATS \| Dallas to cover \| \\\+3 \|/)
+        assert.match(report, /\| O\/U \| Under \| 48 \|/)
+        assert.match(report, /Key performance notes unavailable/)
+        assert.match(report, /### Houston\n\n- Injury summary unavailable/)
+        assert.doesNotMatch(report, /-99|Ignore this field/)
+        const loaded = await request(`/api/analytics/sessions/${sessionId}`, deps)
+        assert.equal((await loaded.json() as { session: AnalysisSession }).session.messages[1].content, report)
+      }
     }
   })
 

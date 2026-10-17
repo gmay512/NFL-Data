@@ -6,7 +6,7 @@ import { JSDOM } from 'jsdom'
 import { buildAnalyticsSnapshot } from '../server/analytics-core'
 import { buildAnalyticsFacts } from '../server/analytics-facts'
 import {
-  MATCHUP_DISCLAIMER, MAX_MATCHUP_NARRATIVE_WORDS, buildMatchupDraftSchema, checkMatchupStatement,
+  MATCHUP_DISCLAIMER, MATCHUP_CITATION_NOTE, buildMatchupDraftSchema, checkMatchupStatement,
   generateMatchupReport, matchupStatements, parseMatchupDraft, renderMatchupReport,
 } from '../server/matchup-report'
 import { AnalyticsReportError, markdownText } from '../server/analytics-report'
@@ -49,7 +49,7 @@ describe('compact matchup reports', () => {
     assert.match(markdown, /\| O\/U \| Under \| 48 \|/)
     assert.doesNotMatch(markdown, /Report basis|Narrative warnings|Unsupported statement|Unverified statement|Summary of Uncertainty|Overall Summary|Interpretation:|\*\*Summary:|Key Observations|Missing\/Ungraded/)
     assert.doesNotMatch(markdown, /Sources:|teamId|playerId|gameIds|Game ID|team\.29|injury\.0/)
-    assert(matchupStatements(draft, matchupSnapshot).reduce((sum, item) => sum + item.text.split(/\s+/).length, 0) <= MAX_MATCHUP_NARRATIVE_WORDS)
+    assert(!markdown.includes(MATCHUP_CITATION_NOTE))
   })
 
   it('renders only prediction and standings tables and one injury bullet per named team', () => {
@@ -155,22 +155,18 @@ describe('compact matchup reports', () => {
 
 describe('matchup schema and factual checks', () => {
   const facts = buildAnalyticsFacts(matchupSnapshot).facts
-  it('requires exact bounded fields and one injury statement per team', () => {
+  it('requests structured output without hard narrative length limits and rejects unusable responses', () => {
     const draft = createMatchupDraft()
     assert.deepEqual(parseMatchupDraft(JSON.stringify(draft), 'stop', matchupSnapshot), draft)
     const schema = buildMatchupDraftSchema(facts, matchupSnapshot)
     assert.equal(schema.additionalProperties, false)
     assert.deepEqual(schema.required, ['summary', 'notes', 'injuries', 'predictions'])
     assert.equal(schema.properties.notes.maxItems, 3)
-    for (const value of [
-      { ...draft, extra: true }, { ...draft, notes: [] }, { ...draft, notes: Array(4).fill(draft.notes[0]) },
-      { ...draft, summary: { text: 'x'.repeat(351), factIds: [] } },
-      { ...draft, summary: { text: 'word '.repeat(51), factIds: [] } },
-      { ...draft, notes: [{ text: 'word '.repeat(26), factIds: [] }] },
-      { ...draft, injuries: { ...draft.injuries, home: [draft.injuries.home] } },
-      { ...draft, injuries: { ...draft.injuries, away: { text: 'word '.repeat(31), factIds: [] } } },
-      { ...draft, summary: { text: 'Text.', factIds: ['limitation.prediction', 'limitation.prediction'] } },
-    ]) assert.throws(() => parseMatchupDraft(JSON.stringify(value), 'stop', matchupSnapshot), AnalyticsReportError)
+    assert(!Object.hasOwn(schema.properties.summary.properties.text, 'maxLength'))
+    assert(!Object.hasOwn(schema.properties.predictions.properties.spread.properties.reason.properties.text, 'maxLength'))
+    for (const value of [null, [], 'Unstructured prose.', {}, { notes: [draft.notes[0]] }]) {
+      assert.throws(() => parseMatchupDraft(JSON.stringify(value), 'stop', matchupSnapshot), AnalyticsReportError)
+    }
     assert.throws(() => parseMatchupDraft('bad JSON', 'stop', matchupSnapshot), /valid matchup narrative JSON/)
     assert.throws(() => parseMatchupDraft(JSON.stringify(draft), 'length', matchupSnapshot), /did not finish normally/)
     const injury = schema.properties.injuries.properties.away
@@ -178,19 +174,136 @@ describe('matchup schema and factual checks', () => {
     assert(injury.properties.factIds.items.enum.includes('injury-summary.29'))
   })
 
-  it('rejects invented picks, model-supplied lines and missing or unrelated supporting facts', () => {
+  it('preserves longer summaries, notes, injuries and reasons beyond all former word/character limits', () => {
     const draft = createMatchupDraft()
-    for (const prediction of [
+    const longText = 'This detailed narrative discusses supplied historical performance without promising a particular future outcome. '.repeat(12).trim()
+    draft.summary.text = longText
+    draft.notes[0].text = longText
+    draft.injuries.away.text = longText
+    draft.injuries.home.text = longText
+    draft.predictions.spread.reason.text = longText
+    draft.predictions.total.reason.text = longText
+    assert(longText.length > 350)
+    assert(longText.split(/\s+/).length > 50)
+    assert(matchupStatements(draft, matchupSnapshot).reduce((sum, item) => sum + item.text.split(/\s+/).length, 0) > 250)
+    const parsed = parseMatchupDraft(JSON.stringify(draft), 'stop', matchupSnapshot)
+    assert.deepEqual(parsed, draft)
+    assert.equal(parsed.summary.text, longText)
+    assert(render(matchupSnapshot, parsed).includes(longText))
+  })
+
+  it('retains valid predictions and source-owned lines while disclosing missing/incomplete citations per market', (t) => {
+    t.mock.method(console, 'warn', () => {})
+    const draft = createMatchupDraft()
+    for (const factIds of [
+      [], ['matchup.spread'], ['team.29.all.ats'], ['matchup.spread', 'injury.0'],
+      ['matchup.spread', 'team.999.all.ats'], ['matchup.spread', 'team.29.all.ats', 'injury.0'],
+    ]) {
+      const parsed = parseMatchupDraft(JSON.stringify({
+        ...draft, predictions: { ...draft.predictions, spread: {
+          ...draft.predictions.spread, reason: { ...draft.predictions.spread.reason, factIds },
+        } },
+      }), 'stop', matchupSnapshot)
+      assert.equal(parsed.predictions.spread.selection, 'away')
+      const markdown = render(matchupSnapshot, parsed)
+      const spread = markdown.split('\n').find((line) => line.startsWith('| ATS |'))!
+      const total = markdown.split('\n').find((line) => line.startsWith('| O/U |'))!
+      assert.match(spread, /Dallas to cover \| \\\+3 \|/)
+      assert(spread.includes(MATCHUP_CITATION_NOTE))
+      assert(!total.includes(MATCHUP_CITATION_NOTE))
+      assert(!markdown.includes('team.999'))
+    }
+    draft.predictions.total.reason.factIds = []
+    const markdown = render(matchupSnapshot, parseMatchupDraft(JSON.stringify(draft), 'stop', matchupSnapshot))
+    assert(markdown.split('\n').find((line) => line.startsWith('| O/U |'))!.includes(MATCHUP_CITATION_NOTE))
+    assert(!markdown.split('\n').find((line) => line.startsWith('| ATS |'))!.includes(MATCHUP_CITATION_NOTE))
+  })
+
+  it('normalizes duplicate and malformed citation metadata without failing or claiming complete evidence', (t) => {
+    t.mock.method(console, 'warn', () => {})
+    const draft = createMatchupDraft()
+    for (const factIds of [undefined, null, 'matchup.spread', 42, ['matchup.spread', 'team.29.all.ats', 42]]) {
+      const parsed = parseMatchupDraft(JSON.stringify({
+        ...draft, predictions: { ...draft.predictions, spread: {
+          ...draft.predictions.spread, reason: { text: 'The away side may cover.', factIds },
+        } },
+      }), 'stop', matchupSnapshot)
+      assert.equal(parsed.predictions.spread.selection, 'away')
+      assert(render(matchupSnapshot, parsed).includes(MATCHUP_CITATION_NOTE))
+    }
+    const parsed = parseMatchupDraft(JSON.stringify({
+      ...draft, predictions: { ...draft.predictions, spread: {
+        ...draft.predictions.spread, reason: {
+          ...draft.predictions.spread.reason, factIds: ['matchup.spread', 'team.29.all.ats', 'matchup.spread'],
+        },
+      } },
+    }), 'stop', matchupSnapshot)
+    assert.deepEqual(parsed.predictions.spread.reason.factIds, ['matchup.spread', 'team.29.all.ats'])
+    assert(!render(matchupSnapshot, parsed).includes(MATCHUP_CITATION_NOTE))
+  })
+
+  it('ignores extra fields and model-owned lines without overriding the consensus or trusting model-supplied flags', (t) => {
+    const diagnostics: unknown[][] = []
+    t.mock.method(console, 'warn', (...args: unknown[]) => diagnostics.push(args))
+    const draft = createMatchupDraft()
+    const parsed = parseMatchupDraft(JSON.stringify({
+      ...draft, extra: 'Do not use this.', predictions: {
+        ...draft.predictions, spread: { ...draft.predictions.spread, line: -99, citationComplete: true },
+      },
+    }), 'stop', matchupSnapshot)
+    assert.deepEqual(parsed, draft)
+    const markdown = render(matchupSnapshot, parsed)
+    assert.match(markdown, /\| ATS \| Dallas to cover \| \\\+3 \|/)
+    assert.doesNotMatch(markdown, /-99|Do not use this/)
+    assert(diagnostics.some((args) => JSON.stringify(args).includes('Ignored unexpected fields')))
+  })
+
+  it('labels missing notes and per-team injuries unavailable without dropping the remaining analysis', (t) => {
+    t.mock.method(console, 'warn', () => {})
+    const draft = createMatchupDraft()
+    for (const notes of [undefined, [], null, 'invalid']) {
+      const parsed = parseMatchupDraft(JSON.stringify({
+        ...draft, notes, injuries: { away: draft.injuries.away },
+      }), 'stop', matchupSnapshot)
+      const markdown = render(matchupSnapshot, parsed)
+      assert.match(markdown, /Key performance notes unavailable/)
+      assert.match(markdown, /### Houston\n\n- Injury summary unavailable/)
+      assert.match(markdown, /Known player.*Questionable/)
+      assert.match(markdown, /\| ATS \| Dallas to cover/)
+      assert(!matchupStatements(parsed, matchupSnapshot).some((item) => item.unavailable))
+    }
+    const noSummary = parseMatchupDraft(JSON.stringify({ ...draft, summary: null }), 'stop', matchupSnapshot)
+    assert.match(render(matchupSnapshot, noSummary), /Matchup summary unavailable/)
+    const plainText = parseMatchupDraft(JSON.stringify({ ...draft, summary: 'A usable plain-text summary.' }), 'stop', matchupSnapshot)
+    assert.equal(plainText.summary.text, 'A usable plain-text summary.')
+    assert.equal(plainText.summary.citationIssue, true)
+  })
+
+  it('isolates invalid selections and missing reasons, and handles unavailable source markets without failing', (t) => {
+    t.mock.method(console, 'warn', () => {})
+    const draft = createMatchupDraft()
+    for (const spread of [
       { ...draft.predictions.spread, selection: 'over' },
-      { ...draft.predictions.spread, line: -9 },
-      { ...draft.predictions.spread, reason: { text: 'A guess.', factIds: [] } },
-      { ...draft.predictions.spread, reason: { text: 'A guess.', factIds: ['matchup.spread'] } },
-      { ...draft.predictions.spread, reason: { text: 'A guess.', factIds: ['matchup.spread', 'injury.0'] } },
-      { ...draft.predictions.spread, reason: { text: 'A guess.', factIds: ['matchup.spread', 'team.999.all.ats'] } },
-    ]) assert.throws(() => parseMatchupDraft(JSON.stringify({
-      ...draft, predictions: { ...draft.predictions, spread: prediction },
-    }), 'stop', matchupSnapshot), AnalyticsReportError)
-    assert.throws(() => parseMatchupDraft(JSON.stringify(draft), 'stop', withOdds(null, 48)), /requires a consensus line/)
+      { ...draft.predictions.spread, selection: null },
+      { ...draft.predictions.spread, reason: null },
+      undefined,
+    ]) {
+      const parsed = parseMatchupDraft(JSON.stringify({ ...draft, predictions: { ...draft.predictions, spread } }), 'stop', matchupSnapshot)
+      assert.equal(parsed.predictions.spread.selection, 'unavailable')
+      assert.equal(parsed.predictions.total.selection, 'under')
+      assert.match(render(matchupSnapshot, parsed), /\| ATS \| Unavailable/)
+      assert.match(render(matchupSnapshot, parsed), /\| O\/U \| Under/)
+    }
+    for (const [spread, total] of [[null, 48], [-3, null]] as const) {
+      const snapshot = withOdds(spread, total)
+      const parsed = parseMatchupDraft(JSON.stringify(draft), 'stop', snapshot)
+      assert.equal(parsed.predictions[spread == null ? 'spread' : 'total'].selection, 'unavailable')
+      assert.equal(parsed.predictions[spread == null ? 'total' : 'spread'].selection, spread == null ? 'under' : 'away')
+    }
+    const noHistory = buildAnalyticsSnapshot('matchup_preview', matchupSnapshot.filters, { ...matchupSource, games: [] })
+    const parsed = parseMatchupDraft(JSON.stringify(draft), 'stop', noHistory)
+    assert.equal(parsed.predictions.spread.selection, 'unavailable')
+    assert.equal(parsed.predictions.total.selection, 'unavailable')
     const missing = buildMatchupDraftSchema(facts, withOdds(null, 48))
     assert.deepEqual(missing.properties.predictions.properties.spread.properties.selection.enum, ['unavailable'])
     assert.throws(() => parseMatchupDraft(JSON.stringify(draft), 'stop', withOdds(Infinity, 48)), /invalid consensus line/)
@@ -240,8 +353,9 @@ describe('mocked local-model matchup pipeline', () => {
     assert.equal(calls.length, 2)
     assert.equal(calls[0][2]?.json_schema.name, 'matchup_narratives')
     assert.equal(calls[1][2]?.json_schema.name, 'matchup_verification')
-    assert.match(calls[0][0][1].content, /50 words.*25 words/)
-    assert.match(calls[0][0][1].content, /exactly one plain-text bullet/)
+    assert.match(calls[0][0][1].content, /Prefer a concise summary/)
+    assert.doesNotMatch(calls[0][0][1].content, /at most \d+ words/)
+    assert.match(calls[0][0][1].content, /exactly one brief plain-text bullet/)
     assert.match(calls[1][0][0].content, /check factual assertions in their reasons/)
     assert.match(result.content, /Matchup Summary: Dallas at Houston/)
     assert.deepEqual(result.usage, { promptTokens: 20, completionTokens: 10, totalTokens: 30 })

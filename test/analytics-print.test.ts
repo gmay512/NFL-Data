@@ -4,7 +4,7 @@ import * as React from 'react'
 import { JSDOM } from 'jsdom'
 import { createRoot, type Root } from 'react-dom/client'
 import { AnalyticsPrintButton } from '../src/features/analytics/AnalyticsPrintButton'
-import { renderMatchupReport } from '../server/matchup-report'
+import { MATCHUP_CITATION_NOTE, parseMatchupDraft, renderMatchupReport } from '../server/matchup-report'
 import { createMatchupDraft, matchupSnapshot, supportedMatchupVerdicts } from './matchup-report-fixtures'
 
 let dom: JSDOM | undefined
@@ -35,6 +35,38 @@ async function setup(print: () => void, prepareContent?: (signal: AbortSignal) =
 }
 
 describe('formatted analysis printing', () => {
+  it('prints retained predictions with citation disclosures and explicitly unavailable sections', async (t) => {
+    t.mock.method(console, 'warn', () => {})
+    const original = createMatchupDraft()
+    const draft = parseMatchupDraft(JSON.stringify({
+      ...original, notes: [], injuries: { home: original.injuries.home },
+      predictions: {
+        ...original.predictions, spread: {
+          ...original.predictions.spread, reason: { text: 'The away team may cover based on prior performance.' },
+        },
+      },
+    }), 'stop', matchupSnapshot)
+    const report = renderMatchupReport(matchupSnapshot, draft, new Map(supportedMatchupVerdicts(draft).verdicts.map((item) => [
+      item.statementId, { verdict: item.verdict, reason: item.reason },
+    ])))
+    let calls = 0
+    const button = await setup(() => {
+      calls++
+      const surface = document.querySelector('.analytics-print-root')!
+      const rows = surface.querySelectorAll('table')[0].querySelectorAll('tbody tr')
+      assert.match(rows[0].textContent ?? '', /ATSDallas to cover\+3/)
+      assert(rows[0].textContent?.includes(MATCHUP_CITATION_NOTE))
+      assert(!rows[1].textContent?.includes(MATCHUP_CITATION_NOTE))
+      assert.match(rows[1].textContent ?? '', /O\/UUnder48/)
+      assert.match(surface.textContent ?? '', /Key performance notes unavailable/)
+      assert.match(surface.textContent ?? '', /Injury summary unavailable/)
+      assert.doesNotMatch(surface.textContent ?? '', /Narrative warnings|Summary of Uncertainty|factIds/)
+    }, async () => report)
+    await React.act(() => button.click())
+    assert.equal(calls, 1)
+    await React.act(() => window.dispatchEvent(new window.Event('afterprint')))
+  })
+
   it('prints the saved team injury bullets without restoring a detailed injury table', async () => {
     const draft = createMatchupDraft()
     const verdicts = new Map(supportedMatchupVerdicts(draft).verdicts.map((item) => [
